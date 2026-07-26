@@ -5,6 +5,7 @@
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
 - 阶段 1 已由用户验收，Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2) 已关闭。
 - 当前唯一功能：Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3)，动态模型身份与分层记忆契约已完成，等待用户验收。
+- 功能提交：[`6b05a66`](https://github.com/LuzernRR/agent-workbench/commit/6b05a66)；[Issue 交付证据](https://github.com/LuzernRR/agent-workbench/issues/3#issuecomment-5082595426)。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
 - 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。

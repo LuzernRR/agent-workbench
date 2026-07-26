@@ -20,8 +20,12 @@
 
 ## 待完成
 
-- [ ] Issue 证据、提交与推送。
 - [ ] 用户验收。
+
+## 交付
+
+- 功能提交：[`6b05a66`](https://github.com/LuzernRR/agent-workbench/commit/6b05a66)
+- Issue 证据：[阶段 2 交付记录](https://github.com/LuzernRR/agent-workbench/issues/3#issuecomment-5082595426)
 
 ## 当前边界
 
