@@ -103,7 +103,15 @@ async function execute(runtime: LiveRuntime, input: { message: string; history: 
     config,
     modelId: runtime.run.modelId,
     reasoningEffort: input.reasoningEffort,
-    messages: [...buildLiveSystemMessages(config.assistant.systemPrompt, input.projectMemoryContext), ...input.history, { role: "user", content: currentMessage }],
+    messages: [
+      ...buildLiveSystemMessages(config.assistant.systemPrompt, input.projectMemoryContext, {
+        providerName: config.provider.type === "deepseek" ? "DeepSeek" : config.provider.type,
+        modelName: config.provider.models.find((model) => model.id === runtime.run.modelId)?.name ?? runtime.run.modelId,
+        modelId: runtime.run.modelId
+      }),
+      ...input.history,
+      { role: "user", content: currentMessage }
+    ],
     requestId: runtime.run.id,
     signal: runtime.abortController.signal,
     onDelta: async (delta) => {

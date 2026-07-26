@@ -2,6 +2,11 @@
 
 以下资料于 2026-07-26 核对。实现前应再次确认版本说明和迁移指南。
 
+## DeepSeek
+
+- [Create Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)：模型请求、流式输出、结束原因与用量。
+- [Models and Pricing](https://api-docs.deepseek.com/quick_start/pricing)：正式模型标识和上下文能力；代理 Provider 的模型注册仍以本地统一配置为准。
+
 ## OpenAI
 
 - [Function calling](https://developers.openai.com/api/docs/guides/function-calling)：工具定义、调用请求和工具结果循环。
@@ -17,6 +22,7 @@
 - [Thinking in LangGraph](https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph)：节点、状态和流程拆分。
 - [Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)：Checkpointer 与 Store 的职责。
 - [Memory](https://docs.langchain.com/oss/python/concepts/memory)：短期与长期记忆概念。
+- [Add and manage memory](https://docs.langchain.com/oss/python/langgraph/add-memory)：线程短期状态、Store 长期记忆和生产 checkpointer。
 - [Streaming](https://docs.langchain.com/oss/python/langgraph/streaming)：消息、更新和自定义流。
 - [Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)：人工审批、暂停与恢复。
 - [LangChain agents](https://docs.langchain.com/oss/python/langchain/agents)：Agent 循环与中间件。
@@ -62,4 +68,3 @@
 - 框架示例只说明当前 API，正式项目必须锁定版本并运行回归。
 - 模型名称、能力、价格和参数可能变化，应由部署配置和模型注册表管理。
 - 文档中的初始阈值用于建立基线，不能替代真实数据评测。
-

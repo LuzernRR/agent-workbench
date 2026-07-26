@@ -6,7 +6,7 @@
 
 | 能力 | 当前实现 | 真实边界 |
 |---|---|---|
-| 模型对话 | 服务端调用 DeepSeek `/chat/completions`，按真实模型 ID 流式输出 | live 不生成模拟工具、计划或成果 |
+| 模型对话 | 服务端调用 DeepSeek `/chat/completions`，按本轮真实模型 ID 流式输出 | 身份问题回答当前 Provider、模型名称和 ID；普通任务不重复自报 |
 | 会话连续性 | 项目、会话、运行、AgentEvent、附件写入 PostgreSQL | 匿名模式不能跨设备恢复 |
 | 匿名身份 | 256 位随机 `HttpOnly` Cookie；数据库只存 SHA-256 | 暂无登录、账号合并与权限管理 |
 | URL 恢复 | `/workbench/p/{projectId}` 与 `/workbench/t/{threadId}` | 所有读取仍校验 `visitor_id`，URL 不是授权凭证 |
@@ -25,7 +25,8 @@
 flowchart LR
     U["用户输入、模型与附件"] --> API["POST /api/v1/threads/{id}/runs"]
     API --> TX["PostgreSQL 事务：run 与用户事件"]
-    PM["同项目其他会话记忆"] --> PR["系统 Prompt 与上下文组装"]
+    ID["本轮 Provider、模型名称和 ID"] --> PR["系统 Prompt 与上下文组装"]
+    PM["同项目其他会话记忆"] --> PR
     TX --> PR
     PR --> DS["DeepSeek SSE"]
     DS --> PE["事件先写 PostgreSQL"]
@@ -116,13 +117,22 @@ npm run build
 npm run test:e2e
 ```
 
-Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；正式 live 服务固定为 `3100`。真实模型、匿名隔离、项目记忆、过期清理和页面关闭后继续生成需要按 [阶段 1 开发记录](docs/development/2026-07-26-001-workbench-continuity.md) 的 live 清单验证。
+Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；正式 live 服务固定为 `3100`。真实会话连续性按 [阶段 1 开发记录](docs/development/2026-07-26-001-workbench-continuity.md) 验证，动态身份和分层记忆按 [阶段 2 开发记录](docs/development/2026-07-26-002-model-identity-memory.md) 验证。
+
+真实 PostgreSQL 分层记忆契约默认不随普通单测执行，显式验证：
+
+```powershell
+cd frontend
+$env:WORKBENCH_LIVE_INTEGRATION='1'
+npx vitest run src/server/live/store.integration.test.ts
+```
 
 ## 文档
 
 - [当前交接](HANDOFF.md)
 - [Agent 开发手册](docs/README.md)
 - [阶段 1 研究与实施](docs/workbench-continuity/RESEARCH.md)
+- [阶段 2 模型身份与记忆](docs/model-identity-memory/RESEARCH.md)
 - [万能搜索 Agent 设计](docs/08-universal-search-agent.md)
 - [逐功能开发记录](docs/development/README.md)
 

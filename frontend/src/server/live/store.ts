@@ -320,9 +320,13 @@ async function recallProjectMemory(client: PoolClient, input: {
   const selected: ProjectMemoryRow[] = [];
   let characters = 0;
   for (const row of result.rows) {
-    if (characters + row.content.length > input.maxChars && selected.length) continue;
-    selected.push(row);
-    characters += row.content.length;
+    const labelLength = row.role === "user" ? "用户：".length : "助手：".length;
+    const separatorLength = selected.length ? 2 : 0;
+    const available = input.maxChars - characters - labelLength - separatorLength;
+    if (available <= 0) break;
+    if (row.content.length > available && selected.length) continue;
+    selected.push({ ...row, content: row.content.slice(0, available) });
+    characters += labelLength + separatorLength + Math.min(row.content.length, available);
     if (characters >= input.maxChars) break;
   }
   if (!selected.length) return "";

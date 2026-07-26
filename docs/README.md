@@ -1,6 +1,6 @@
 # Agent 开发手册
 
-本目录是智能工作台的工程基线。当前仓库只实现前端与浏览器内模拟数据；后续服务端按 Python、LangGraph、PostgreSQL 与 pgvector 路线落地。
+本目录是智能工作台的工程基线。当前仓库已实现 Next.js 服务端 DeepSeek 调用、PostgreSQL/pgvector 持久化、匿名会话与项目记忆；Playwright 才使用浏览器可访问的确定性 mock。后续编排服务按 Python、LangGraph、PostgreSQL 与 pgvector 路线迁移。
 
 ## 阅读顺序
 
@@ -13,14 +13,15 @@
 7. [前端工作台](./06-frontend-workbench.md)：页面布局、交互状态和事件映射。
 8. [配置与调优](./07-configuration-and-tuning.md)：基线配置、压测方式和故障定位。
 9. [万能搜索 Agent](./08-universal-search-agent.md)：从 API Key、意图、计划和工具路由到抓取、RAG、引用、质量循环、评测与经验沉淀。
-10. [资料来源](./references.md)：本手册采用的官方文档与规范。
+10. [动态模型身份与分层记忆](./model-identity-memory/RESEARCH.md)：当前真实实现、隔离和生命周期契约。
+11. [资料来源](./references.md)：本手册采用的官方文档与规范。
 
 ## 固定决策
 
 | 项目 | 决策 |
 | --- | --- |
 | 产品形态 | 单助手对话工作台 |
-| 当前实现 | 纯前端，接口由 Next.js 本地模拟层提供 |
+| 当前实现 | Next.js 服务端调用 DeepSeek，PostgreSQL 持久化；mock 仅用于 Playwright |
 | 前端 | Next.js 16、React 19、TypeScript、assistant-ui、TanStack Query、Zustand、Radix UI、Tailwind CSS |
 | 未来服务端 | Python 3.12、FastAPI、LangGraph、Pydantic 2、Psycopg 3 |
 | 数据 | PostgreSQL 16 与 pgvector，结构化数据和向量放在同一事务边界 |
@@ -67,4 +68,3 @@ flowchart LR
 - 有幂等键，刷新或重连不会重复产生副作用。
 - 有可复现的配置快照，包含模型、提示词、工具和检索版本。
 - 有质量、延迟、成本和错误率结果，不能只凭人工体验判断。
-

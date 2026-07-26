@@ -24,4 +24,5 @@
 
 - [阶段 0：公开仓库、文档与交接基线](2026-07-26-000-public-baseline.md)
 - [阶段 1：真实会话连续性与工作台交互修复](2026-07-26-001-workbench-continuity.md)
+- [阶段 2：动态模型身份与分层记忆契约](2026-07-26-002-model-identity-memory.md)
 - [开发记录模板](TEMPLATE.md)

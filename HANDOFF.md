@@ -3,17 +3,18 @@
 ## 当前结论
 
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
-- 当前唯一功能：Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2)，阶段 1 已由提交 [`81dd154`](https://github.com/LuzernRR/agent-workbench/commit/81dd154) 交付，正在等待用户验收。
+- 阶段 1 已由用户验收，Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2) 已关闭。
+- 当前唯一功能：Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3)，动态模型身份与分层记忆契约已完成，等待用户验收。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
 - 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
-- 用户未明确验收阶段 1 前，不开始万能搜索 Agent 或其他新功能。
+- 用户未明确验收阶段 2 前，不开始 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
 
 ## 已实现
 
 | 领域 | 当前事实 |
 |---|---|
-| 模型 | DeepSeek 真实 SSE；模型列表来自服务端统一配置；浏览器不接触密钥 |
+| 模型 | DeepSeek 真实 SSE；模型列表来自服务端统一配置；身份问题按本轮 Provider、模型名称和 ID 回答；浏览器不接触密钥 |
 | 数据 | PostgreSQL 17 + pgvector 保存访客、项目、会话、运行、事件、附件和项目记忆 |
 | 身份 | 高熵 `HttpOnly` Cookie；数据库仅存 SHA-256；所有 live 查询按访客隔离 |
 | URL | 项目 `/workbench/p/{id}`；会话 `/workbench/t/{id}`；刷新和直达恢复同一选择 |
@@ -26,7 +27,7 @@
 | 滚动 | 用户向上滚动后停止底部跟随；只有点击底部按钮才恢复 |
 | 后台 | 页面隐藏时前端立即追平持久 delta；关闭页面和 SSE 后服务端仍生成并落库 |
 | 停止 | 有真实 `runId` 才显示停止；事件串行落库；停止、完成、失败原子竞争唯一终态；重复停止幂等 |
-| 记忆 | 同访客、同项目、跨会话共享；不跨项目、不跨访客；记忆内容按不可信事实背景注入 Prompt |
+| 记忆 | 同会话活动完成历史；同访客、同项目、跨会话共享；不跨项目、不跨访客；记忆内容按不可信事实背景注入 Prompt |
 | 保留 | 会话最后活动超过 3 天且不在运行时自动删除；运行、事件、附件级联；有界项目记忆保留 |
 | mock | 仅 `WORKBENCH_LLM_MODE=mock` 与 Playwright `3110` 使用；live 不显示种子、模拟工具或虚构状态 |
 
@@ -45,7 +46,8 @@
 flowchart LR
     B["浏览器与 HttpOnly Cookie"] --> N["Next API"]
     N --> PG["PostgreSQL 活动分支"]
-    PG --> P["系统 Prompt、历史、项目记忆、当前消息"]
+    I["本轮真实 Provider、模型名称和 ID"] --> P["系统 Prompt、历史、项目记忆、当前消息"]
+    PG --> P
     P --> D["DeepSeek SSE"]
     D --> E["AgentEvent 先持久化"]
     E --> S["可断开的浏览器 SSE"]
@@ -65,6 +67,7 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 数据访问：`frontend/src/server/persistence/database.ts` 与 `frontend/src/server/live/store.ts`。
 - 清理入口：`ensureLiveRecovery()` 首次 live 请求触发，之后按 `cleanupIntervalMinutes` 限频。
 - 保留配置固定 `threadTtlDays: 3`；项目记忆默认最多 120 条、召回 24 条、上下文最多 16000 字符。
+- 项目记忆字符预算包含角色标签和分隔符；首条超长内容也不会突破预算。
 - `wb_project_memories.embedding` 为 nullable `vector`，不得在未实现 embedding 时宣称语义召回。
 
 ## 核心代码
@@ -79,6 +82,7 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - live 运行：`frontend/src/server/live/engine.ts`
 - live 数据：`frontend/src/server/live/store.ts`
 - Prompt 策略：`frontend/src/server/live/prompt-policy.ts`
+- 真实记忆集成契约：`frontend/src/server/live/store.integration.test.ts`
 - DeepSeek：`frontend/src/server/llm/deepseek-client.ts`
 
 ## 已取得的验收证据
@@ -91,12 +95,16 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 真实身份：Cookie 刷新稳定、不同上下文不同、`HttpOnly`；数据库摘要长度固定 64。
 - 自动化：16 个 Vitest 文件共 76 项、类型检查、全仓 Lint、生产构建、16 项 Playwright 全部通过；生产依赖审计为 0 个漏洞。
 - Issue 证据：[阶段 1 验收记录](https://github.com/LuzernRR/agent-workbench/issues/2#issuecomment-5082415434)。
+- 阶段 2 定向单测：Prompt/Store 共 17 项通过；真实 PostgreSQL 全生命周期集成场景通过。
+- 阶段 2 真实身份：Flash 返回 `DeepSeek / DeepSeek V4 Flash / deepseek-v4-flash`；Pro 返回对应 Pro 名称和 ID。
+- 阶段 2 真实记忆：刷新后同会话和同项目另一会话均召回 `PJ-51062349`；其他项目只返回 `UNKNOWN`。
+- 阶段 2 全量门禁：85 项 Vitest、类型、Lint、生产构建、16 项 Playwright、UTF-8/LF、禁用文案、可见省略号、链接和依赖扫描全部通过。
 
 ## 接手顺序
 
-1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-001-workbench-continuity.md`。
+1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-002-model-identity-memory.md`。
 2. 运行 `git status --short`，保留用户改动和本地密钥。
 3. 确认 `docker ps --filter name=agent-workbench-postgres` 为 healthy。
 4. 在 `frontend/` 运行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
-5. 阶段 1 未验收时只修复本 Issue 回归，不创建下一功能。
-6. 用户验收后关闭 Issue #2，再按 `docs/08-universal-search-agent.md` 拆出一个新的单功能 Issue。
+5. 阶段 2 未验收时只修复 Issue #3 回归，不创建下一功能。
+6. 用户验收后关闭 Issue #3；建议下一功能是 Python/LangGraph 最小运行时与 PostgreSQL checkpoint，不同时接工具、搜索或 RAG。
