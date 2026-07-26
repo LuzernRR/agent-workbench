@@ -1,0 +1,207 @@
+export const AGENT_EVENT_TYPES = [
+  "run.created",
+  "run.started",
+  "run.status",
+  "message.started",
+  "message.reset",
+  "message.delta",
+  "text.delta",
+  "message.completed",
+  "tool.started",
+  "tool.updated",
+  "tool.progress",
+  "tool.completed",
+  "tool.failed",
+  "approval.required",
+  "approval.resolved",
+  "plan.updated",
+  "artifact.created",
+  "artifact.updated",
+  "citation.created",
+  "memory.updated",
+  "file.changed",
+  "log.appended",
+  "run.completed",
+  "run.cancelled",
+  "run.failed"
+] as const;
+
+export type AgentEventType = (typeof AGENT_EVENT_TYPES)[number];
+
+export type AgentEvent = {
+  id: string;
+  seq: number;
+  projectId: string | null;
+  threadId: string;
+  runId: string;
+  createdAt: string;
+  type: AgentEventType;
+  payload: Record<string, unknown>;
+};
+
+export type RunStatus = "idle" | "queued" | "running" | "waiting" | "completed" | "failed" | "stopped" | "reconnecting";
+export type ToolStatus = "preparing" | "running" | "waiting" | "completed" | "failed" | "stopped";
+
+export type MessageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  kind: "image" | "document";
+  url: string;
+};
+
+export type MessageItem = {
+  kind: "message";
+  id: string;
+  runId: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  status: "streaming" | "completed" | "error";
+  createdAt: string;
+  agentId?: string;
+  agentName?: string;
+  citations?: Array<{ label: string; url: string }>;
+  attachments?: MessageAttachment[];
+};
+
+export type ToolItem = {
+  kind: "tool";
+  id: string;
+  runId: string;
+  toolCallId: string;
+  name: string;
+  summary: string;
+  status: ToolStatus;
+  input?: unknown;
+  progress?: { current: number; total: number };
+  output?: string;
+  rawResult?: unknown;
+  durationMs?: number;
+  error?: string;
+  createdAt: string;
+};
+
+export type ApprovalItem = {
+  kind: "approval";
+  id: string;
+  runId: string;
+  approvalId: string;
+  toolCallId?: string;
+  title: string;
+  description: string;
+  status: "pending" | "approved" | "denied";
+  createdAt: string;
+};
+
+export type StatusItem = {
+  kind: "status";
+  id: string;
+  runId: string;
+  label: string;
+  tone: "neutral" | "warning" | "danger";
+  createdAt: string;
+};
+
+export type TimelineItem = MessageItem | ToolItem | ApprovalItem | StatusItem;
+
+export type Artifact = {
+  id: string;
+  name: string;
+  kind: "report" | "table" | "download";
+  mimeType: string;
+  content: string;
+  version: number;
+  createdAt: string;
+  downloadUrl?: string;
+};
+
+export type WorkbenchFile = {
+  id: string;
+  path: string;
+  name: string;
+  status: "created" | "modified" | "unchanged";
+  language?: string;
+  content?: string;
+  version: number;
+  downloadUrl?: string;
+};
+
+export type LogEntry = {
+  id: string;
+  createdAt: string;
+  actor: string;
+  level: "debug" | "info" | "warn" | "error";
+  content: string;
+};
+
+export type PlanStep = {
+  id: string;
+  title: string;
+  status: "todo" | "in_progress" | "done" | "blocked";
+  notes?: string;
+};
+
+export type RunTiming = {
+  startedAt: string;
+  completedAt?: string;
+};
+
+export type AgentThreadState = {
+  projectId: string | null;
+  threadId: string;
+  activeRunId: string | null;
+  runStatus: RunStatus;
+  runStartedAt: string | null;
+  items: Record<string, TimelineItem>;
+  itemOrder: string[];
+  artifacts: Artifact[];
+  files: WorkbenchFile[];
+  logs: LogEntry[];
+  plan: PlanStep[];
+  planUpdatedAt: string | null;
+  runTimings: Record<string, RunTiming>;
+  runStatuses: Record<string, RunStatus>;
+  lastSeq: number;
+};
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  path: string;
+  status: "idle" | "running" | "waiting" | "failed";
+  context?: ProjectContext;
+};
+
+export type ProjectContext = {
+  shortTermVersion?: string;
+  longTermMemoryVersion?: string;
+  checkpointId?: string;
+};
+
+export type ThreadSummary = {
+  id: string;
+  projectId: string | null;
+  title: string;
+  updatedAt: string;
+  lastUserMessageAt?: string;
+  status: "idle" | "running" | "waiting" | "failed";
+};
+
+export type ThreadSnapshot = {
+  project: ProjectSummary | null;
+  thread: ThreadSummary;
+  state: AgentThreadState;
+  context?: ProjectContext;
+};
+
+export type AgentDefinition = { id: string; name: string; description: string; toolIds: string[] };
+export type ReasoningEffort = "medium" | "high" | "xhigh" | "max";
+export type ModelDefinition = {
+  id: string;
+  name: string;
+  description: string;
+  reasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort: ReasoningEffort;
+};
+export type ToolDefinition = { id: string; name: string; description: string; group: string; requiresApproval: boolean };

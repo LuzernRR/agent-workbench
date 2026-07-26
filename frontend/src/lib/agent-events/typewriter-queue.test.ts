@@ -1,0 +1,183 @@
+import { describe, expect, it } from "vitest";
+import { createRenderQueue } from "./typewriter-queue";
+import type { AgentEvent } from "./types";
+
+const base = { projectId: "project", threadId: "thread", runId: "run", createdAt: "2026-07-25T00:00:00.000Z" };
+const event = (seq: number, type: AgentEvent["type"], payload: Record<string, unknown>): AgentEvent => ({
+  ...base,
+  id: `event-${seq}`,
+  seq,
+  type,
+  payload
+});
+
+// A synchronous frame scheduler so tests can advance the queue deterministically
+// instead of depending on requestAnimationFrame timing.
+function manualFrames() {
+  const pending: Array<() => void> = [];
+  return {
+    requestFrame: (callback: () => void) => {
+      pending.push(callback);
+      return pending.length;
+    },
+    cancelFrame: () => {
+      pending.length = 0;
+    },
+    // Run queued frames until the queue stops scheduling more or we hit the cap.
+    flush: (max = 10_000) => {
+      let frames = 0;
+      while (pending.length > 0 && frames < max) {
+        const next = pending.shift()!;
+        frames += 1;
+        next();
+      }
+      return frames;
+    }
+  };
+}
+
+describe("createRenderQueue", () => {
+  it("reveals a short delta one grapheme per frame for a typewriter feel", () => {
+    const frames = manualFrames();
+    const applied: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => applied.push(String(e.payload.delta ?? "")),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "你好" }));
+    const drawn = frames.flush();
+    // Two graphemes over two separate frames.
+    expect(applied).toEqual(["你", "好"]);
+    expect(drawn).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps combined emoji graphemes intact", () => {
+    const frames = manualFrames();
+    const applied: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => applied.push(String(e.payload.delta ?? "")),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 1
+    });
+    // A multi-code-unit emoji must not be split across frames.
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "🚀火箭" }));
+    frames.flush();
+    expect(applied.join("")).toBe("🚀火箭");
+    expect(applied[0]).toBe("🚀");
+  });
+
+  it("bounds tail latency for a large backlog instead of one-per-frame", () => {
+    const frames = manualFrames();
+    let count = 0;
+    const queue = createRenderQueue({
+      apply: () => {
+        count += 1;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 45,
+      maxCharsPerFrame: 120
+    });
+    const big = "字".repeat(3000);
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: big }));
+    const drawn = frames.flush();
+    expect(count).toBe(3000);
+    // A one-char-per-frame loop would need 3000 frames (~50s @60fps). Adaptive
+    // draining must clear it in an order of magnitude fewer frames (~250 ≈ 4s)
+    // while staying continuous, never dumping the whole delta at once.
+    expect(drawn).toBeLessThan(250);
+    expect(drawn).toBeGreaterThan(30);
+  });
+
+  it("drains faster once a terminal event is queued behind the draft", () => {
+    const frames = manualFrames();
+    let chars = 0;
+    const queue = createRenderQueue({
+      apply: (e) => {
+        if (e.type === "text.delta") chars += 1;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 200,
+      terminalFrames: 5,
+      maxCharsPerFrame: 500
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "字".repeat(1000) }));
+    queue.enqueue(event(2, "run.completed", {}));
+    const drawn = frames.flush();
+    expect(chars).toBe(1000);
+    // terminalFrames (5) drains the 1000-char backlog far faster than the loose
+    // targetFrames (200) would.
+    expect(drawn).toBeLessThan(30);
+  });
+
+  it("applies a queued terminal only after the preceding text has drained", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : e.type),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 10
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "abcdef" }));
+    queue.enqueue(event(2, "run.completed", {}));
+    frames.flush();
+    expect(order[order.length - 1]).toBe("run.completed");
+    expect(order.slice(0, -1).join("")).toBe("abcdef");
+  });
+
+  it("preserves non-text ordering: tool events apply after earlier text drains", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : e.type),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 10
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "abc" }));
+    queue.enqueue(event(2, "tool.started", { toolCallId: "t1" }));
+    queue.enqueue(event(3, "text.delta", { messageId: "m1", delta: "de" }));
+    frames.flush();
+    expect(order).toEqual(["a", "b", "c", "tool.started", "d", "e"]);
+  });
+
+  it("drops the unrendered tail of a draft on message.reset but keeps prior control events", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : `[${e.type}]`),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame,
+      targetFrames: 10
+    });
+    // Queue a large draft plus a preceding tool event, then reset before draining.
+    queue.enqueue(event(1, "tool.completed", { toolCallId: "t1" }));
+    queue.enqueue(event(2, "text.delta", { messageId: "m1", delta: "废弃的草稿内容" }));
+    queue.enqueue(event(3, "message.reset", { messageId: "m1", text: "" }));
+    frames.flush();
+    // The discarded draft characters never render; the tool event and the reset do.
+    expect(order.some((entry) => entry.length === 1 && "废弃的草稿内容".includes(entry))).toBe(false);
+    expect(order).toContain("[tool.completed]");
+    expect(order).toContain("[message.reset]");
+  });
+
+  it("stops applying events after dispose", () => {
+    const frames = manualFrames();
+    let count = 0;
+    const queue = createRenderQueue({
+      apply: () => {
+        count += 1;
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "abcdef" }));
+    queue.dispose();
+    frames.flush();
+    expect(count).toBe(0);
+  });
+});
