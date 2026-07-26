@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRuntimeConfig, publicModelDefinitions, RuntimeConfigError } from "./runtime-config";
+import { parseRuntimeConfig, publicModelDefinitions, requireDatabaseConfig, RuntimeConfigError } from "./runtime-config";
 
 const validConfig = {
   version: 1,
@@ -11,13 +11,16 @@ const validConfig = {
     defaultModel: "deepseek-v4-flash",
     models: [{
       id: "deepseek-v4-flash",
-      name: "快速模型",
+      name: "DeepSeek V4 Flash",
       description: "快速响应",
       reasoningEfforts: ["medium", "high"],
       defaultReasoningEffort: "medium"
     }],
     request: { timeoutMs: 30_000, maxRetries: 2 }
   },
+  database: { url: "postgresql://workbench:secret@127.0.0.1:5432/agent_workbench", ssl: false, poolMax: 10 },
+  session: { cookieName: "workbench_visitor", ttlDays: 365 },
+  retention: { threadTtlDays: 3, cleanupIntervalMinutes: 15, projectMemoryMaxItems: 120, projectMemoryRecallItems: 24, projectMemoryMaxChars: 16_000 },
   generation: { temperature: 0.6, maxTokens: 1024, thinkingEnabled: true },
   assistant: { systemPrompt: "使用中文回答。" }
 };
@@ -27,12 +30,14 @@ describe("统一运行配置", () => {
     const config = parseRuntimeConfig(validConfig);
     expect(publicModelDefinitions(config)).toEqual([{
       id: "deepseek-v4-flash",
-      name: "快速模型",
+      name: "DeepSeek V4 Flash",
       description: "快速响应",
       reasoningEfforts: ["medium", "high"],
       defaultReasoningEffort: "medium"
     }]);
     expect(publicModelDefinitions(config)[0]).not.toHaveProperty("apiKey");
+    expect(requireDatabaseConfig(config)).toEqual(validConfig.database);
+    expect(config.retention.threadTtlDays).toBe(3);
   });
 
   it("拒绝非对话接口和未知默认模型", () => {
@@ -46,4 +51,3 @@ describe("统一运行配置", () => {
     })).toThrow("默认模型未在模型列表中定义");
   });
 });
-

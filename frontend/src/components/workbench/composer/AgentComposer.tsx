@@ -7,7 +7,7 @@ import { AuiIf, ComposerPrimitive, useAui, useAuiState } from "@assistant-ui/rea
 import * as Popover from "@radix-ui/react-popover";
 import { ArrowUp, Check, ChevronDown, FileText, Plus, Square, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { workbenchApi, safeWorkbenchHref } from "@/lib/api/client";
+import { workbenchApi, safeWorkbenchHref, safeWorkbenchImageSrc } from "@/lib/api/client";
 import { ImagePreview } from "@/components/workbench/attachments/ImagePreview";
 import { useWorkbenchUiStore } from "@/stores/workbench-ui-store";
 import { resolveWorkbenchResourceUrl } from "@/lib/api/client";
@@ -25,6 +25,7 @@ export function AgentComposer({ threadId, disabled }: { threadId: string | null;
   const models = useQuery({ queryKey: ["models"], queryFn: workbenchApi.models });
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const agentId = useWorkbenchUiStore((store) => store.agentId);
   const modelId = useWorkbenchUiStore((store) => store.modelId);
   const reasoningEffort = useWorkbenchUiStore((store) => store.reasoningEffort);
@@ -112,20 +113,22 @@ export function AgentComposer({ threadId, disabled }: { threadId: string | null;
   return (
     <ComposerPrimitive.Root className="conversation-composer flex flex-col" data-testid="composer">
       <input ref={fileInputRef} type="file" multiple className="sr-only" aria-label="选择图片或文档" accept="image/*,.pdf,.txt,.md,.csv,.json,.doc,.docx,.xls,.xlsx,.ppt,.pptx" onChange={(event) => { void uploadFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
-      <div className="flex flex-col rounded-2xl border border-[#d8d8d8] bg-surface shadow-composer transition-colors duration-150 focus-within:border-[#a8a8ad]" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={(event) => { event.preventDefault(); void uploadFiles(Array.from(event.dataTransfer.files)); }}>
+      <div className="flex flex-col rounded-2xl border border-[#d8d8d8] bg-surface shadow-composer" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={(event) => { event.preventDefault(); void uploadFiles(Array.from(event.dataTransfer.files)); }}>
           {visibleAttachments.length ? <div className="flex flex-wrap gap-2 px-4 pt-3" aria-label="待发送附件">
-          {visibleAttachments.map((attachment) => { const href = safeWorkbenchHref(resolveWorkbenchResourceUrl(attachment.url)); return <div key={attachment.id} className="group/attachment relative flex min-h-14 max-w-72 items-start gap-2 rounded-lg bg-panel py-2 pr-8 text-[15px] text-secondary">
-            {attachment.kind === "image" && href ? <ImagePreview src={href} alt={attachment.name} className="size-14 shrink-0 rounded-lg" sizes="56px" /> : href ? <a href={href} target="_blank" rel="noreferrer" className="grid size-14 shrink-0 place-items-center rounded-lg bg-[#f0f0ee]" title={`打开 ${attachment.name}`}><FileText className="size-5" /></a> : <span className="grid size-14 shrink-0 place-items-center rounded-lg bg-[#f0f0ee] text-[13px]">附件不可用</span>}
+          {visibleAttachments.map((attachment) => { const href = safeWorkbenchHref(resolveWorkbenchResourceUrl(attachment.url)); const imageSrc = safeWorkbenchImageSrc(attachment.url); const remove = () => draftMode ? removePendingDraftAttachment(attachment.id) : removePendingAttachment(attachment.id); return attachment.kind === "image" && imageSrc ? <div key={attachment.id} className="group/attachment relative size-16 overflow-hidden rounded-xl bg-panel">
+            <ImagePreview src={imageSrc} alt="已上传图片" className="size-16 rounded-xl" sizes="64px" />
+            <button type="button" className="absolute right-1 top-1 grid size-6 place-items-center rounded-full bg-black/55 text-white transition-colors hover:bg-black/75" onClick={remove} aria-label="移除图片" title="移除图片"><X className="size-3.5" /></button>
+          </div> : <div key={attachment.id} className="group/attachment relative flex min-h-14 max-w-72 items-start gap-2 rounded-lg bg-panel py-2 pr-8 text-[15px] text-secondary">
+            {href ? <a href={href} target="_blank" rel="noreferrer" className="grid size-14 shrink-0 place-items-center rounded-lg bg-[#f0f0ee]" title={`打开 ${attachment.name}`}><FileText className="size-5" /></a> : <span className="grid size-14 shrink-0 place-items-center rounded-lg bg-[#f0f0ee] text-[13px]">附件不可用</span>}
             <span className="min-w-0 whitespace-normal break-words leading-5" title={attachment.name}>{attachment.name}</span>
-            <button type="button" className="absolute right-1 top-1 grid size-6 place-items-center rounded-md text-tertiary hover:bg-white hover:text-ink" onClick={() => draftMode ? removePendingDraftAttachment(attachment.id) : removePendingAttachment(attachment.id)} aria-label={`移除附件 ${attachment.name}`} title="移除附件"><X className="size-3.5" /></button>
+            <button type="button" className="absolute right-1 top-1 grid size-6 place-items-center rounded-md text-tertiary hover:bg-white hover:text-ink" onClick={remove} aria-label={`移除附件 ${attachment.name}`} title="移除附件"><X className="size-3.5" /></button>
           </div>; })}
         </div> : null}
         {uploadError ? <div role="alert" className="px-5 pt-2 text-[15px] text-danger">{uploadError}</div> : null}
-        {agents.error ? <div role="alert" className="px-5 pt-2 text-[15px] text-danger">{getWorkbenchErrorMessage(agents.error, "助手配置加载失败")}</div> : null}
+        {agents.error ? <div role="alert" className="px-5 pt-2 text-[15px] text-danger">{getWorkbenchErrorMessage(agents.error, "对话配置加载失败")}</div> : null}
         {models.error ? <div role="alert" className="px-5 pt-2 text-[15px] text-danger">{getWorkbenchErrorMessage(models.error, "模型加载失败")}</div> : null}
         <ComposerPrimitive.Input
           disabled={disabled || isUploading}
-          autoFocus
           rows={1}
           aria-label="任务输入"
           placeholder="输入消息"
@@ -148,14 +151,14 @@ export function AgentComposer({ threadId, disabled }: { threadId: string | null;
           <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()} disabled={disabled || isUploading || visibleAttachments.length >= MAX_ATTACHMENTS} title={isUploading ? "正在上传" : "上传图片或文档"} aria-label={isUploading ? "正在上传附件" : "上传图片或文档"}>{isUploading ? <span className="size-4 animate-spin rounded-full border-2 border-tertiary border-t-transparent" /> : <Plus className="size-[18px]" />}</button>
           <div className="min-w-0 flex-1" />
 
-          <Popover.Root>
+          <Popover.Root open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
             <Popover.Trigger asChild>
               <button type="button" className="flex min-h-9 max-w-52 items-center gap-1.5 rounded-lg px-2 py-1 text-[15px] leading-5 text-secondary transition-colors hover:bg-panel hover:text-ink" aria-label="选择模型" title={selectedModel?.name || "选择模型"}>
-                <span className="whitespace-normal break-words">{selectedModel?.name || "模型"}</span><ChevronDown className="size-3.5 shrink-0 text-tertiary" />
+                <span className="whitespace-normal break-words">{modelMenuOpen ? "模型" : selectedModel?.name || "模型"}</span><ChevronDown className="size-3.5 shrink-0 text-tertiary" />
               </button>
             </Popover.Trigger>
             <Popover.Portal><Popover.Content side="top" align="end" sideOffset={10} className="z-50 w-64 rounded-xl border border-line bg-surface p-1.5 shadow-popover">
-              {(models.data || []).map((model) => <Popover.Close asChild key={model.id}><button type="button" onClick={() => setModel(model.id, model.defaultReasoningEffort)} className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-[15px] text-ink hover:bg-panel" title={model.name}><span className="min-w-0 flex-1 whitespace-normal break-words leading-5">{model.name}</span>{model.id === modelId ? <Check className="mt-0.5 size-4 shrink-0 text-ink" /> : null}</button></Popover.Close>)}
+              {(models.data || []).map((model) => <Popover.Close asChild key={model.id}><button type="button" onClick={() => setModel(model.id, model.defaultReasoningEffort)} className="flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left text-[15px] text-ink hover:bg-panel" title={`${model.name} · ${model.id}`} aria-label={model.name}><span className="min-w-0 flex-1 leading-5"><span className="block whitespace-normal break-words">{model.name}</span><span className="mt-0.5 block font-mono text-[12px] text-tertiary">{model.id}</span></span>{model.id === modelId ? <Check className="mt-0.5 size-4 shrink-0 text-ink" /> : null}</button></Popover.Close>)}
             </Popover.Content></Popover.Portal>
           </Popover.Root>
 

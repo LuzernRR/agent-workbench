@@ -1,103 +1,101 @@
 # 项目交接
 
-## 交接结论
+## 当前结论
 
-- 仓库：`LuzernRR/agent-workbench`
-- 默认分支：`main`
-- 运行端口：`3100`
-- 前端目录：`frontend`
-- 本地密钥：`config/agent-runtime.local.json`，禁止提交
-- 当前开发模式：单功能、单 Issue、单开发记录、用户验收后再继续
+- 仓库：`LuzernRR/agent-workbench`，分支 `main`。
+- 当前唯一功能：Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2)，阶段 1 完成验证后等待用户验收。
+- 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
+- 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
+- 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
+- 用户未明确验收阶段 1 前，不开始万能搜索 Agent 或其他新功能。
 
-## 已验证能力
+## 已实现
 
-- DeepSeek V4 Flash、V4 Pro 公开模型配置。
-- 浏览器发送消息、Next 服务端调用、DeepSeek SSE、AgentEvent、逐字回复完整闭环。
-- 会话新建、重命名、移动、删除与项目树展示。
-- 流式停止、附件上传、审批演示、计划、成果、文件、代码、日志工作区。
-- 桌面、窄屏、移动端布局。
-- 密钥不进入公开模型接口、客户端源码和构建文件。
+| 领域 | 当前事实 |
+|---|---|
+| 模型 | DeepSeek 真实 SSE；模型列表来自服务端统一配置；浏览器不接触密钥 |
+| 数据 | PostgreSQL 17 + pgvector 保存访客、项目、会话、运行、事件、附件和项目记忆 |
+| 身份 | 高熵 `HttpOnly` Cookie；数据库仅存 SHA-256；所有 live 查询按访客隔离 |
+| URL | 项目 `/workbench/p/{id}`；会话 `/workbench/t/{id}`；刷新和直达恢复同一选择 |
+| 编辑 | 事务归档目标运行及下游活动分支，确认修改后旧回复立即消失 |
+| 导航 | 左栏项目树包含所属会话；无项目会话单列但没有“独立会话”标题；每行单行裁切且不显示省略号 |
+| 顶栏 | 项目名与会话名是两个独立点击目标；会话菜单只显示当前项目或无项目范围 |
+| 拖拽 | 无长按等待；项目直接排序；会话可拖入、拖出和跨项目移动；刷新后保持 |
+| 视觉 | 项目输入、消息编辑、按钮和菜单无矩形焦点框；空导航无说明占位；图片不显示文件名 |
+| 输出 | 回复不显示“智能助手”；按内容选择表格、步骤、列表或短段落；移动端表格内部滚动 |
+| 滚动 | 用户向上滚动后停止底部跟随；只有点击底部按钮才恢复 |
+| 后台 | 页面隐藏时前端立即追平持久 delta；关闭页面和 SSE 后服务端仍生成并落库 |
+| 停止 | 有真实 `runId` 才显示停止；事件串行落库；停止、完成、失败原子竞争唯一终态；重复停止幂等 |
+| 记忆 | 同访客、同项目、跨会话共享；不跨项目、不跨访客；记忆内容按不可信事实背景注入 Prompt |
+| 保留 | 会话最后活动超过 3 天且不在运行时自动删除；运行、事件、附件级联；有界项目记忆保留 |
+| mock | 仅 `WORKBENCH_LLM_MODE=mock` 与 Playwright `3110` 使用；live 不显示种子、模拟工具或虚构状态 |
 
-## 当前真实边界
+## 尚未实现
 
-| 领域 | 当前实现 | 接手时不得误判 |
-|---|---|---|
-| 数据 | `src/server/mock/store.ts` 进程内 Map | 不是持久化，重启服务后数据丢失 |
-| 模型 | DeepSeek 真实接口 | 模型回复真实，工具事件不一定真实 |
-| 工具 | `scripts.ts` 测试脚本 | 搜索、抓取、RAG、代码执行尚未接真实工具 |
-| 附件 | 进程内字节与文本上下文 | 图片未作为多模态内容发给模型 |
-| 记忆 | 文档设计与日志演示 | 未接 PostgreSQL、pgvector、检查点 |
-| 认证 | 本地单用户 | 无账号、租户、权限隔离 |
+- Python + LangGraph 运行时尚未接入；当前 Agent 编排仍在 Next 服务端。
+- 万能搜索 Agent、真实搜索、抓取、重排、声明级引用和验证循环尚未实现。
+- pgvector 扩展和 `embedding` 字段已准备，但项目记忆当前按时间召回，不是语义检索。
+- 图片只做存储与预览，没有进入多模态模型输入。
+- 匿名 Cookie 不能跨浏览器、设备或清除 Cookie 后恢复；暂无登录、租户、角色和权限系统。
+- 服务进程重启会把未完成运行标记失败；尚无 LangGraph checkpoint 续跑与外部任务队列。
 
-## 用户已报告且尚未处理
+## 关键链路
 
-1. 新建项目输入框存在重叠和选中感。
-2. 项目需要长按拖动、动效以及拖入拖出。
-3. 图片附件只显示图像，不显示文件名。
-4. 助手回复去掉“智能助手”。
-5. 模型选择展示真实模型名称。
-6. 所有演示数据替换为真实数据。
-7. 项目、会话、消息、运行和附件持久化。
-8. 切换会话与刷新页面时消除闪屏。
-9. 顶栏项目与会话层级、筛选逻辑修正。
-10. 实现第一个万能搜索 Agent。
-
-## 建议验收顺序
-
-每一项单独建立 Issue，上一项未获用户验收不得执行下一项。
-
-1. 新建项目对话框视觉修复。
-2. 顶栏项目与会话显示规则。
-3. 图片附件展示规则。
-4. 回复身份与真实模型命名。
-5. PostgreSQL 持久化基础与数据迁移。
-6. 会话切换、刷新恢复与闪屏治理。
-7. 项目长按拖拽与跨层级移动。
-8. 万能搜索 Agent：搜索、抓取、重排、引用、验证。
-
-## 下一项默认范围
-
-### 功能 1：新建项目对话框视觉修复
-
-- 修复输入框、标签、占位符和焦点环重叠。
-- 去掉持续性的“已选中”外观，只在键盘焦点时显示克制焦点态。
-- 不改变项目 API、树结构、拖拽和持久化。
-- 覆盖桌面、窄屏和移动端截图。
-- 用户验收后才进入顶栏显示规则。
-
-## 核心代码路径
-
-- 工作台壳层：`frontend/src/components/workbench/app-shell/WorkbenchShell.tsx`
-- 项目与会话树：`frontend/src/components/workbench/sidebar/WorkbenchSidebar.tsx`
-- 输入与模型：`frontend/src/components/workbench/composer/AgentComposer.tsx`
-- 对话渲染：`frontend/src/components/workbench/conversation/Conversation.tsx`
-- 前端流状态：`frontend/src/hooks/use-agent-thread.ts`
-- 事件协议：`frontend/src/lib/agent-events/`
-- DeepSeek 客户端：`frontend/src/server/llm/deepseek-client.ts`
-- 运行编排：`frontend/src/server/mock/engine.ts`
-- 当前内存存储：`frontend/src/server/mock/store.ts`
-- 统一配置：`frontend/src/server/config/runtime-config.ts`
-
-## 开发前检查
-
-```powershell
-git status --short
-git pull --ff-only
-cd frontend
-npm test
-npm run typecheck
-npm run lint
+```mermaid
+flowchart LR
+    B["浏览器与 HttpOnly Cookie"] --> N["Next API"]
+    N --> PG["PostgreSQL 活动分支"]
+    PG --> P["系统 Prompt、历史、项目记忆、当前消息"]
+    P --> D["DeepSeek SSE"]
+    D --> E["AgentEvent 先持久化"]
+    E --> S["可断开的浏览器 SSE"]
+    E --> R["刷新或重开读取快照"]
+    S --> UI["Zod、Reducer、渲染队列"]
+    R --> UI
 ```
 
-## 交付前检查
+SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后台执行先落库，再通知零个或多个订阅者；浏览器关闭只移除订阅者。`frontend/src/hooks/use-agent-thread.ts` 在页面隐藏后禁用逐字动画并立即应用完整 delta，避免恢复时慢速回放。
 
-```powershell
-cd frontend
-npm test
-npm run typecheck
-npm run lint
-npm run build
-npm run test:e2e
-```
+同一 live runtime 通过 `eventTail` 串行提交事件。停止先同步设置 `cancelled` 并中止 Provider，再由 `finalizeLiveRun()` 用条件更新抢占终态；线程状态、完成消息、项目记忆和终态事件与抢占结果保持同一事务。终态已存在时 stop API 返回实际状态，不写重复事件。
 
-还需要针对当前 Issue 补充真实浏览器操作、截图、控制台错误和接口证据。
+## 数据与配置
+
+- 容器：`agent-workbench-postgres`，镜像 `pgvector/pgvector:pg17`，仅绑定 `127.0.0.1:5432`。
+- 幂等 schema：`frontend/src/server/persistence/schema.ts`。
+- 数据访问：`frontend/src/server/persistence/database.ts` 与 `frontend/src/server/live/store.ts`。
+- 清理入口：`ensureLiveRecovery()` 首次 live 请求触发，之后按 `cleanupIntervalMinutes` 限频。
+- 保留配置固定 `threadTtlDays: 3`；项目记忆默认最多 120 条、召回 24 条、上下文最多 16000 字符。
+- `wb_project_memories.embedding` 为 nullable `vector`，不得在未实现 embedding 时宣称语义召回。
+
+## 核心代码
+
+- 壳层与顶栏：`frontend/src/components/workbench/app-shell/WorkbenchShell.tsx`
+- 入口与 URL：`frontend/src/components/workbench/entry/WorkbenchEntry.tsx`
+- 项目会话树：`frontend/src/components/workbench/sidebar/WorkbenchSidebar.tsx`
+- 对话与滚动：`frontend/src/components/workbench/conversation/Conversation.tsx`
+- 输入、附件、模型：`frontend/src/components/workbench/composer/AgentComposer.tsx`
+- SSE 状态：`frontend/src/hooks/use-agent-thread.ts`
+- 逐字与后台追平：`frontend/src/lib/agent-events/typewriter-queue.ts`
+- live 运行：`frontend/src/server/live/engine.ts`
+- live 数据：`frontend/src/server/live/store.ts`
+- Prompt 策略：`frontend/src/server/live/prompt-policy.ts`
+- DeepSeek：`frontend/src/server/llm/deepseek-client.ts`
+
+## 已取得的验收证据
+
+- 真实 DeepSeek：项目 A 会话 1 写入随机代号，会话 2准确召回；项目 B 返回“不知道”。
+- 真实保留：4 天前会话清理前有 1 会话、1 运行、9 事件、1 附件、2 记忆；清理后原始链路全为 0，项目记忆仍为 2。
+- 真实后台：浏览器上下文与 SSE 关闭后运行状态仍为 `completed`，447 个事件已落库，重开直接显示完整回复。
+- 真实停止：UI 首次与重复停止均为 200；运行 `stopped`、线程 `idle`、取消事件唯一且为最后事件，等待 2 秒事件数不变，项目记忆为 0；刷新后可继续发起并停止新运行。
+- 真实刷新：14 次 DOM 文字采样无首页招呼语、禁用空状态文字、乱码或错误归属。
+- 真实身份：Cookie 刷新稳定、不同上下文不同、`HttpOnly`；数据库摘要长度固定 64。
+- 自动化：16 个 Vitest 文件共 76 项、类型检查、全仓 Lint、生产构建、16 项 Playwright 全部通过；生产依赖审计为 0 个漏洞。
+
+## 接手顺序
+
+1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-001-workbench-continuity.md`。
+2. 运行 `git status --short`，保留用户改动和本地密钥。
+3. 确认 `docker ps --filter name=agent-workbench-postgres` 为 healthy。
+4. 在 `frontend/` 运行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
+5. 阶段 1 未验收时只修复本 Issue 回归，不创建下一功能。
+6. 用户验收后关闭 Issue #2，再按 `docs/08-universal-search-agent.md` 拆出一个新的单功能 Issue。

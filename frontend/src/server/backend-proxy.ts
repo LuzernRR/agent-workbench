@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
 import { handleMock } from "@/server/mock/handler";
+import { handleLive } from "@/server/live/handler";
 
 export const externalBackendUrl = process.env.WORKBENCH_API_ORIGIN?.replace(/\/$/, "") || null;
 
-/**
- * 未配置真实后端时使用内存实现，让工作台在没有 Java/Python 服务的情况下也能完整运行。
- * 设为 WORKBENCH_DISABLE_MOCK=1 可恢复原来的 503 行为。
- */
-const mockEnabled = !externalBackendUrl && process.env.WORKBENCH_DISABLE_MOCK !== "1";
+/** 未配置外部后端时，测试端口显式使用 fixture，正式端口进入 PostgreSQL live runtime。 */
+const fixtureMode = process.env.WORKBENCH_LLM_MODE === "mock";
 
 function backendHeaders(request: Request) {
   const headers = new Headers(request.headers);
@@ -32,16 +30,8 @@ function backendHeaders(request: Request) {
   return headers;
 }
 
-export function backendUnavailable() {
-  return NextResponse.json(
-    { success: false, code: "BACKEND_UNAVAILABLE", message: "工作台后端尚未配置" },
-    { status: 503 }
-  );
-}
-
 export async function proxyJson(request: Request, path: string): Promise<Response> {
-  if (mockEnabled) return handleMock(request, path);
-  if (!externalBackendUrl) return backendUnavailable();
+  if (!externalBackendUrl) return fixtureMode ? handleMock(request, path) : handleLive(request, path);
   try {
     const response = await fetch(`${externalBackendUrl}${path}`, {
       method: request.method,
@@ -60,8 +50,7 @@ export async function proxyJson(request: Request, path: string): Promise<Respons
 }
 
 export async function proxyStream(request: Request, path: string, unavailableMessage = "工作台事件流暂不可用"): Promise<Response> {
-  if (mockEnabled) return handleMock(request, path);
-  if (!externalBackendUrl) return backendUnavailable();
+  if (!externalBackendUrl) return fixtureMode ? handleMock(request, path) : handleLive(request, path);
   try {
     const response = await fetch(`${externalBackendUrl}${path}`, {
       headers: backendHeaders(request),

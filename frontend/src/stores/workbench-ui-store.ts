@@ -6,6 +6,8 @@ export type PermissionMode = "ask" | "auto" | "read-only";
 export type DraftAttachment = MessageAttachment & { file: File };
 
 type WorkbenchUiState = {
+  leftPanelCollapsed: boolean;
+  rightPanelCollapsed: boolean;
   workspaceTab: WorkspaceTab;
   workspaceFullscreen: boolean;
   selectedArtifactId: string | null;
@@ -17,6 +19,8 @@ type WorkbenchUiState = {
   permissionMode: PermissionMode;
   pendingAttachments: MessageAttachment[];
   pendingDraftAttachments: DraftAttachment[];
+  setLeftPanelCollapsed: (value: boolean) => void;
+  setRightPanelCollapsed: (value: boolean) => void;
   setWorkspaceTab: (tab: WorkspaceTab) => void;
   setWorkspaceFullscreen: (value: boolean) => void;
   setSelectedArtifactId: (id: string | null) => void;
@@ -34,6 +38,8 @@ type WorkbenchUiState = {
 };
 
 export const useWorkbenchUiStore = create<WorkbenchUiState>((set) => ({
+  leftPanelCollapsed: false,
+  rightPanelCollapsed: true,
   workspaceTab: "artifacts",
   workspaceFullscreen: false,
   selectedArtifactId: null,
@@ -45,6 +51,8 @@ export const useWorkbenchUiStore = create<WorkbenchUiState>((set) => ({
   permissionMode: "ask",
   pendingAttachments: [],
   pendingDraftAttachments: [],
+  setLeftPanelCollapsed: (leftPanelCollapsed) => set({ leftPanelCollapsed }),
+  setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
   setWorkspaceTab: (workspaceTab) => set({ workspaceTab }),
   setWorkspaceFullscreen: (workspaceFullscreen) => set({ workspaceFullscreen }),
   setSelectedArtifactId: (selectedArtifactId) => set({ selectedArtifactId }),

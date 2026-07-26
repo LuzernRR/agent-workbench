@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeDisplayText, normalizeProjectName, safeLinkLabel, safeWorkbenchHref } from "./client";
+import { normalizeDisplayText, normalizeProjectName, safeLinkLabel, safeWorkbenchHref, safeWorkbenchImageSrc } from "./client";
 
 describe("normalizeDisplayText", () => {
   it("replaces irrecoverable question-mark titles", () => {
@@ -22,6 +22,9 @@ describe("safe workbench links", () => {
     expect(safeWorkbenchHref("/api/v1/artifacts/one")).toBe("/api/v1/artifacts/one");
     expect(safeWorkbenchHref("javascript:alert(1)")).toBe("");
     expect(safeWorkbenchHref("data:text/html,test")).toBe("");
+    expect(safeWorkbenchHref("blob:http://127.0.0.1/local-image")).toBe("");
+    expect(safeWorkbenchImageSrc("blob:http://127.0.0.1/local-image")).toBe("blob:http://127.0.0.1/local-image");
+    expect(safeWorkbenchImageSrc("data:image/png;base64,unsafe")).toBe("");
   });
 
   it("never displays a raw URL as the link title", () => {

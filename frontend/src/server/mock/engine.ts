@@ -306,6 +306,14 @@ export function startRun(input: {
   const agent: MockAgentId = "assistant";
   const runId = newId("run");
   const history = completedConversation(thread, input.replaceMessageId);
+  if (input.replaceMessageId) {
+    const targetRunIndex = thread.runIds.findIndex((existingRunId) => db().runs.get(existingRunId)?.events.some((event) => event.payload.messageId === input.replaceMessageId));
+    if (targetRunIndex >= 0) {
+      const archivedRunIds = thread.runIds.splice(targetRunIndex);
+      archivedRunIds.forEach((existingRunId) => db().runs.delete(existingRunId));
+      for (const [artifactId, artifact] of db().artifacts) if (artifact.threadId === thread.id) db().artifacts.delete(artifactId);
+    }
+  }
   const attachmentText = attachmentContext(thread, input.attachmentIds || []);
   const modelMessage = attachmentText ? `${message}\n\n${attachmentText}` : message;
 
@@ -361,7 +369,8 @@ export function startRun(input: {
 
 export function stopRun(runId: string) {
   const run = db().runs.get(runId);
-  if (!run) return false;
+  if (!run) return null;
+  if (["completed", "failed", "stopped"].includes(run.status)) return run.status;
   run.cancelled = true;
   run.status = "stopped";
   run.abortController.abort(new DOMException("用户停止运行", "AbortError"));
@@ -370,7 +379,7 @@ export function stopRun(runId: string) {
   const thread = db().threads.get(run.threadId);
   if (thread) touchThread(thread, { status: "idle" });
   emit(run, "run.cancelled", {});
-  return true;
+  return run.status;
 }
 
 export function resolveApproval(approvalId: string, decision: "allow_once" | "always_allow" | "deny") {

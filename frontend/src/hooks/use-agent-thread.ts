@@ -3,10 +3,10 @@
 // Subscription/read-model split follows Kanna useKannaState + event-store and
 // OpenHands use-event-store, transported as resumable SSE for this stack.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AGENT_EVENT_TYPES, type AgentEvent, type AgentThreadState } from "@/lib/agent-events/types";
 import { parseAgentEvent } from "@/lib/agent-events/schema";
-import { reduceAgentEvent } from "@/lib/agent-events/reducer";
+import { reduceAgentEvent, truncateThreadStateForEdit } from "@/lib/agent-events/reducer";
 import { createRenderQueue } from "@/lib/agent-events/typewriter-queue";
 import { workbenchApi } from "@/lib/api/client";
 import { useWorkbenchUiStore } from "@/stores/workbench-ui-store";
@@ -15,7 +15,7 @@ export type StreamConnection = "idle" | "connecting" | "connected" | "reconnecti
 
 export function useAgentThread(threadId: string | null) {
   const queryClient = useQueryClient();
-  const snapshotQuery = useQuery({ queryKey: ["thread", threadId], queryFn: () => workbenchApi.thread(threadId!), enabled: Boolean(threadId), placeholderData: threadId ? keepPreviousData : undefined });
+  const snapshotQuery = useQuery({ queryKey: ["thread", threadId], queryFn: () => workbenchApi.thread(threadId!), enabled: Boolean(threadId), staleTime: 15_000 });
   const [state, setState] = useState<AgentThreadState | null>(null);
   const [connection, setConnection] = useState<StreamConnection>("idle");
   const lastSeqRef = useRef(0);
@@ -49,8 +49,15 @@ export function useAgentThread(threadId: string | null) {
     if (!snapshotQuery.data || snapshotQuery.data.thread.id !== threadId) return;
     // The event reducer needs an independent mutable stream snapshot.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(snapshotQuery.data.state);
-    lastSeqRef.current = snapshotQuery.data.state.lastSeq;
+    setState((current) => {
+      const incoming = snapshotQuery.data.state;
+      // A refetch can start before an approval/stop response and finish after
+      // newer SSE events. Never let that older snapshot rewind the visible
+      // read model or strand a running tool at an earlier frame.
+      if (current?.threadId === incoming.threadId && current.lastSeq > incoming.lastSeq) return current;
+      return incoming;
+    });
+    lastSeqRef.current = Math.max(lastSeqRef.current, snapshotQuery.data.state.lastSeq);
   }, [snapshotQuery.data, threadId]);
 
   useEffect(() => {
@@ -63,10 +70,7 @@ export function useAgentThread(threadId: string | null) {
       return;
     }
     const source = new EventSource(workbenchApi.eventUrl(runId, lastSeqRef.current));
-    type RenderQueueItem = { event: AgentEvent; characters: string[] | null; offset: number };
-    const renderQueue: RenderQueueItem[] = [];
-    let renderFrame = 0;
-    let disposed = false;
+    let instantCatchup = document.visibilityState !== "visible";
 
     const applyEvent = (event: AgentEvent) => {
       setState((current) => (current ? reduceAgentEvent(current, event) : current));
@@ -75,64 +79,29 @@ export function useAgentThread(threadId: string | null) {
       }
     };
 
-    const drainRenderQueue = () => {
-      renderFrame = 0;
-      if (disposed) return;
-      while (renderQueue.length > 0) {
-        const current = renderQueue[0];
-        if (current.characters) {
-          if (current.offset < current.characters.length) {
-            const characterIndex = current.offset++;
-            const synthetic = {
-              ...current.event,
-              // The reducer enforces monotonic durable sequence numbers. Use
-              // fractional display-only positions inside this one persisted
-              // delta so each grapheme is rendered exactly once and the next
-              // real event still has a larger integer sequence.
-              seq: current.event.seq - 1 + (characterIndex + 1) / (current.characters.length + 1),
-              payload: { ...current.event.payload, delta: current.characters[characterIndex] }
-            } satisfies AgentEvent;
-            applyEvent(synthetic);
-            renderFrame = window.requestAnimationFrame(drainRenderQueue);
-            return;
-          }
-          renderQueue.shift();
-          continue;
-        }
-        renderQueue.shift();
-        applyEvent(current.event);
-      }
+    const renderQueue = createRenderQueue({ apply: applyEvent });
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") return;
+      instantCatchup = true;
+      renderQueue.flush();
     };
-
-    const scheduleRender = () => {
-      if (!disposed && !renderFrame) renderFrame = window.requestAnimationFrame(drainRenderQueue);
-    };
-
-    const enqueueEvent = (event: AgentEvent) => {
-      if (event.type === "message.reset") {
-        // A quality retry invalidates any unrendered portion of the previous
-        // draft. Drop only queued deltas, preserve preceding control/tool
-        // events, then apply the reset in durable order.
-        const retained = renderQueue.filter((item) => item.event.type !== "text.delta" && item.event.type !== "message.delta");
-        renderQueue.splice(0, renderQueue.length, ...retained, { event, characters: null, offset: 0 });
-        scheduleRender();
-        return;
-      }
-      if (event.type === "text.delta" || event.type === "message.delta") {
-        const characters = Array.from(String(event.payload.delta || ""));
-        if (characters.length > 0) renderQueue.push({ event, characters, offset: 0 });
-      } else {
-        renderQueue.push({ event, characters: null, offset: 0 });
-      }
-      scheduleRender();
-    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const onEvent = (raw: Event) => {
       try {
         const message = raw as MessageEvent<string>;
         const event = parseAgentEvent(JSON.parse(message.data), { projectId: activeProjectId, threadId: activeThreadId!, runId });
+        // The URL cursor is fixed when EventSource is created and older proxies
+        // may omit Last-Event-ID on reconnect. Never enqueue the same durable
+        // event twice, especially while a hidden page is flushing whole deltas.
+        if (event.seq <= lastSeqRef.current) return;
         lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
-        enqueueEvent(event);
+        if (instantCatchup || document.visibilityState !== "visible") {
+          renderQueue.flush();
+          applyEvent(event);
+        } else {
+          renderQueue.enqueue(event);
+        }
       } catch (error) {
         console.error("Invalid AgentEvent", error);
       }
@@ -142,9 +111,8 @@ export function useAgentThread(threadId: string | null) {
     source.onopen = () => setConnection("connected");
     source.onerror = () => setConnection(source.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
     return () => {
-      disposed = true;
-      if (renderFrame) window.cancelAnimationFrame(renderFrame);
-      renderQueue.length = 0;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      renderQueue.dispose();
       AGENT_EVENT_TYPES.forEach((type) => source.removeEventListener(type, onEvent));
       source.close();
     };
@@ -155,13 +123,34 @@ export function useAgentThread(threadId: string | null) {
       if (!threadId) throw new Error("请先发送首条指令");
       return workbenchApi.startRun(threadId, { message, agentId, modelId, reasoningEffort, toolIds: selectedToolIds, permissionMode, attachmentIds: attachments || pendingAttachments.map((attachment) => attachment.id), replaceMessageId: replaceMessageId || null });
     },
-    onSuccess: () => {
+    onMutate: ({ message, replaceMessageId }) => {
+      let previous: AgentThreadState | null = null;
+      if (replaceMessageId) {
+        setState((current) => {
+          previous = current;
+          return current ? truncateThreadStateForEdit(current, replaceMessageId, message) : current;
+        });
+      }
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) setState(context.previous);
+    },
+    onSuccess: ({ runId }) => {
+      setState((current) => current?.threadId === threadId ? {
+        ...current,
+        activeRunId: runId,
+        runStatus: "running",
+        runStatuses: { ...current.runStatuses, [runId]: "running" }
+      } : current);
       clearPendingAttachments();
       void (async () => {
         const refreshed = await workbenchApi.thread(threadId!);
         queryClient.setQueryData(["thread", threadId], refreshed);
-        lastSeqRef.current = refreshed.state.lastSeq;
-        setState(refreshed.state);
+        lastSeqRef.current = Math.max(lastSeqRef.current, refreshed.state.lastSeq);
+        setState((current) => current?.threadId === refreshed.state.threadId && current.lastSeq > refreshed.state.lastSeq
+          ? current
+          : refreshed.state);
       })();
     }
   });

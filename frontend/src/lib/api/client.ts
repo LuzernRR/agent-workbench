@@ -31,6 +31,13 @@ export function safeWorkbenchHref(value: string | null | undefined) {
   }
 }
 
+/** Image previews may use browser-owned object URLs; never expose them as links. */
+export function safeWorkbenchImageSrc(value: string | null | undefined) {
+  const resolved = resolveWorkbenchResourceUrl(value).trim();
+  if (resolved.startsWith("blob:")) return resolved;
+  return safeWorkbenchHref(resolved);
+}
+
 export function safeLinkLabel(value: string | null | undefined, fallback: string) {
   const label = value?.trim() || "";
   if (!label || /^(?:https?:\/\/|www\.)/iu.test(label)) return fallback;
@@ -122,6 +129,10 @@ export const workbenchApi = {
     method: "PATCH",
     body: JSON.stringify(body)
   }).then((project) => ({ ...project, name: normalizeProjectName(project.name) })),
+  reorderProjects: (projectIds: string[]) => apiFetch<{ status: string }>("/projects/reorder", {
+    method: "PATCH",
+    body: JSON.stringify({ projectIds })
+  }),
   deleteProject: (projectId: string) => apiFetch<{ status: string }>(`/projects/${projectId}`, {
     method: "DELETE"
   }),

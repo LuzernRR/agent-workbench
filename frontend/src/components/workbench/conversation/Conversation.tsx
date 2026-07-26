@@ -2,7 +2,7 @@
 
 // assistant-ui's minimal thread template is the runtime source for the
 // ThreadPrimitive, MessagePrimitive, action bar, and composer composition here.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActionBarPrimitive, AssistantRuntimeProvider, AuiIf, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react";
 import { ArrowDown, Check, Copy, FileText, Pencil, X } from "lucide-react";
 import type { AgentThreadState, MessageAttachment, MessageItem, RunTiming, TimelineItem } from "@/lib/agent-events/types";
@@ -73,7 +73,7 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
   );
   const runtime = useExternalStoreRuntime<TimelineItem>({
     messages: timelineItems,
-    isRunning: ["queued", "running", "waiting", "reconnecting"].includes(state.runStatus) || isStarting,
+    isRunning: Boolean(state.activeRunId) && ["queued", "running", "waiting", "reconnecting"].includes(state.runStatus),
     onNew: async (message: AppendMessage) => { const text = toAppendText(message); if (text) await onStartRun(text); },
     onCancel: async () => { await onStopRun(); },
     setMessages: () => undefined,
@@ -110,15 +110,7 @@ export function ConversationSkeleton() {
 }
 
 function ConversationViewport({ state, onStartRun, onResolveApproval, isResolvingApproval }: { state: AgentThreadState; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean }) {
-  const viewportRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const viewport = viewportRef.current;
-      if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: state.lastSeq > 0 ? "smooth" : "auto" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [state.lastSeq]);
-  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport ref={viewportRef} turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto scroll-smooth"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="grid min-h-[48vh] place-items-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} />}</ThreadPrimitive.Messages></div><ThreadPrimitive.ScrollToBottom className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
+  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="grid min-h-[48vh] place-items-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} />}</ThreadPrimitive.Messages></div><ThreadPrimitive.ScrollToBottom className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
 }
 
 function RuntimeMessage({ state, onStartRun, onResolveApproval, isResolvingApproval }: { state: AgentThreadState; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean }) {
@@ -141,8 +133,9 @@ function RuntimeMessage({ state, onStartRun, onResolveApproval, isResolvingAppro
     .map((id) => state.items[id])
     .filter((candidate): candidate is MessageItem => candidate?.kind === "message" && candidate.role === "assistant" && candidate.runId === item.runId);
   const runComplete = state.runStatuses[item.runId] === "completed" && runMessages.length > 0 && runMessages.every((message) => message.status === "completed");
-  const isLatestUser = item.role === "user" && !state.itemOrder.slice(itemIndex + 1).some((id) => state.items[id]?.kind === "message" && state.items[id]?.role === "user");
-  const canEdit = isLatestUser && ["completed", "failed", "stopped"].includes(state.runStatuses[item.runId] || "");
+  const canEdit = item.role === "user"
+    && !["queued", "running", "waiting", "reconnecting"].includes(state.runStatus)
+    && ["completed", "failed", "stopped"].includes(state.runStatuses[item.runId] || "");
   return <MessageEntry item={item} timing={isFirstAssistant ? state.runTimings[item.runId] : undefined} editable={canEdit} onResubmit={onStartRun} assistantReply={isLastAssistant && runComplete ? runMessages.map((message) => message.text).filter(Boolean).join("\n\n") : undefined} />;
 }
 
@@ -165,9 +158,9 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply }: { 
   return (
     <MessagePrimitive.Root className={isUser ? "conversation-lane group mb-3 flex justify-end" : "group mb-2"} data-message-id={item.id}>
       <div className={isUser ? "flex min-w-0 max-w-[min(850px,82%)] flex-col items-end" : "max-w-none"}>
-        {!isUser && timing ? <RunElapsed timing={timing} agentName={item.agentName} /> : null}
+        {!isUser && timing ? <RunElapsed timing={timing} /> : null}
         <MessageAttachments attachments={item.attachments} isUser={isUser} />
-        {item.text ? editing && isUser ? <div className="rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] text-ink"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditing(false); } }} autoFocus rows={2} aria-label="编辑当前消息" className="min-h-12 w-full resize-none border-0 bg-transparent leading-6 outline-none ring-0" /><div className="mt-1 flex justify-end gap-1"><button type="button" className="message-action" onClick={() => setEditing(false)} title="取消编辑" aria-label="取消编辑"><X className="size-4" /></button><button type="button" className="message-action text-ink" onClick={() => void submitEdit()} disabled={!draft.trim() || submitting} title="发送修改" aria-label="发送修改"><Check className="size-4" /></button></div></div> : <div className={isUser ? "rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] font-normal leading-6 text-ink" : item.status === "streaming" ? "streaming-cursor" : ""}>
+        {item.text ? editing && isUser ? <div data-message-editor className="rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] text-ink"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditing(false); } }} autoFocus rows={2} aria-label="编辑当前消息" className="min-h-12 w-full appearance-none resize-none border-0 bg-transparent p-0 leading-6 outline-none ring-0" /><div className="mt-1 flex justify-end gap-1"><button type="button" className="message-action" onClick={() => setEditing(false)} title="取消编辑" aria-label="取消编辑"><X className="size-4" /></button><button type="button" className="message-action text-ink" onClick={() => void submitEdit()} disabled={!draft.trim() || submitting} title="发送修改" aria-label="发送修改"><Check className="size-4" /></button></div></div> : <div className={isUser ? "rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] font-normal leading-6 text-ink" : item.status === "streaming" ? "streaming-cursor" : ""}>
           {isUser ? <MessagePrimitive.Parts /> : <MessagePrimitive.Parts components={{ Text: () => <MarkdownRenderer>{item.text}</MarkdownRenderer> }} />}
         </div> : null}
         {!isUser && item.citations?.length ? <MessageCitations citations={item.citations} /> : null}
@@ -188,7 +181,7 @@ function MessageCitations({ citations }: { citations: NonNullable<MessageItem["c
   </div>;
 }
 
-function RunElapsed({ timing, agentName }: { timing: RunTiming; agentName?: string }) {
+function RunElapsed({ timing }: { timing: RunTiming }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (timing.completedAt) return;
@@ -198,7 +191,7 @@ function RunElapsed({ timing, agentName }: { timing: RunTiming; agentName?: stri
   const end = timing.completedAt ? new Date(timing.completedAt).getTime() : now;
   const seconds = Math.max(0, Math.floor((end - new Date(timing.startedAt).getTime()) / 1000));
   const minutes = Math.floor(seconds / 60);
-  return <div className="mb-1.5 text-[15px] leading-6 text-secondary">{agentName ? <><span>{agentName}</span><span className="mx-1 text-tertiary">·</span></> : null}<span>已处理 <span className="tabular-nums">{minutes ? `${minutes} 分 ` : ""}{seconds % 60} 秒</span></span></div>;
+  return <div className="mb-1.5 text-[15px] leading-6 text-secondary"><span>已处理 <span className="tabular-nums">{minutes ? `${minutes} 分 ` : ""}{seconds % 60} 秒</span></span></div>;
 }
 
 function MessageActions({ item, isUser, editable, onEdit, assistantReply }: { item: MessageItem; isUser: boolean; editable: boolean; onEdit: () => void; assistantReply?: string }) {
@@ -232,7 +225,7 @@ function MessageAttachments({ attachments, isUser }: { attachments?: MessageAtta
   if (!attachments?.length) return null;
   return <div className={`mb-1 flex max-w-full flex-wrap gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
     {attachments.map((attachment) => { const href = safeWorkbenchHref(resolveWorkbenchResourceUrl(attachment.url)); return attachment.kind === "image" && href ? (
-      <ImagePreview key={attachment.id} src={href} alt={attachment.name} className="h-24 w-28 rounded-xl" sizes="128px" />
+      <ImagePreview key={attachment.id} src={href} alt="已上传图片" className="h-24 w-28 rounded-xl" sizes="128px" />
     ) : href ? (
       <a key={attachment.id} href={href} target="_blank" rel="noreferrer" className="flex min-h-9 max-w-64 items-start gap-2 rounded-lg bg-panel px-3 py-2 text-[15px] text-secondary hover:text-ink" title={`打开文档 ${attachment.name}`}>
         <FileText className="mt-0.5 size-4 shrink-0" /><span className="whitespace-normal break-words" title={attachment.name}>{attachment.name}</span>

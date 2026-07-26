@@ -14,7 +14,9 @@ import type { AgentEvent } from "./types";
 // Non-text events (tools, plan, citations, terminal) apply strictly in durable
 // order, only after any characters queued before them have drained. A
 // `message.reset` (quality retry) discards the still-unrendered portion of the
-// previous draft but preserves preceding control/tool events.
+// previous draft but preserves preceding control/tool events. Background tabs
+// can explicitly flush pending deltas because browsers suspend animation frames
+// when a document is hidden.
 
 type QueueItem = { event: AgentEvent; characters: string[] | null; offset: number };
 
@@ -112,11 +114,31 @@ export function createRenderQueue(options: RenderQueueOptions) {
     schedule();
   };
 
+  const flush = () => {
+    if (disposed) return;
+    if (frame) cancelFrame(frame);
+    frame = 0;
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (!current.characters) {
+        options.apply(current.event);
+        continue;
+      }
+      const delta = current.characters.slice(current.offset).join("");
+      if (!delta) continue;
+      options.apply({
+        ...current.event,
+        seq: current.event.seq,
+        payload: { ...current.event.payload, delta }
+      });
+    }
+  };
+
   const dispose = () => {
     disposed = true;
     if (frame) cancelFrame(frame);
     queue.length = 0;
   };
 
-  return { enqueue, dispose };
+  return { enqueue, flush, dispose };
 }

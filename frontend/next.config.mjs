@@ -2,6 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  serverExternalPackages: ["pg"],
   // Support mounting the same workbench under an optional path prefix.
   basePath: process.env.WORKBENCH_BASE_PATH || "",
   env: {

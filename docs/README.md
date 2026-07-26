@@ -12,7 +12,8 @@
 6. [开发路线](./05-development-roadmap.md)：从前端样机到生产环境的阶段与验收门槛。
 7. [前端工作台](./06-frontend-workbench.md)：页面布局、交互状态和事件映射。
 8. [配置与调优](./07-configuration-and-tuning.md)：基线配置、压测方式和故障定位。
-9. [资料来源](./references.md)：本手册采用的官方文档与规范。
+9. [万能搜索 Agent](./08-universal-search-agent.md)：从 API Key、意图、计划和工具路由到抓取、RAG、引用、质量循环、评测与经验沉淀。
+10. [资料来源](./references.md)：本手册采用的官方文档与规范。
 
 ## 固定决策
 

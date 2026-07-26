@@ -13,8 +13,8 @@ export const TOOLS: ToolDefinition[] = [
 export const AGENTS: AgentDefinition[] = [
   {
     id: "assistant",
-    name: "智能助手",
-    description: "处理对话、规划、文件与成果生成。",
+    name: "对话",
+    description: "测试模式对话运行器。",
     toolIds: TOOLS.map((tool) => tool.id)
   }
 ];
@@ -22,18 +22,18 @@ export const AGENTS: AgentDefinition[] = [
 export const MOCK_MODELS: ModelDefinition[] = [
   {
     id: "deepseek-v4-flash",
-    name: "快速模型",
+    name: "DeepSeek V4 Flash",
     description: "快速响应与日常任务。",
     reasoningEfforts: ["medium", "high"],
     defaultReasoningEffort: "medium"
   },
   {
     id: "deepseek-v4-pro",
-    name: "旗舰模型",
+    name: "DeepSeek V4 Pro",
     description: "复杂任务与深度推理。",
     reasoningEfforts: ["medium", "high", "xhigh", "max"],
     defaultReasoningEffort: "high"
   }
 ];
 
-export const AGENT_LABELS: Record<MockAgentId, string> = { assistant: "智能助手" };
+export const AGENT_LABELS: Record<MockAgentId, string> = { assistant: "对话" };

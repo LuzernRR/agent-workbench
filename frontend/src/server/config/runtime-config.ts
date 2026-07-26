@@ -12,6 +12,25 @@ const modelSchema = z.object({
   defaultReasoningEffort: reasoningEffortSchema
 }).strict();
 
+const databaseSchema = z.object({
+  url: z.string().url().refine((value) => ["postgres:", "postgresql:"].includes(new URL(value).protocol), "数据库必须使用 PostgreSQL"),
+  ssl: z.boolean(),
+  poolMax: z.number().int().min(1).max(50)
+}).strict();
+
+const sessionSchema = z.object({
+  cookieName: z.literal("workbench_visitor"),
+  ttlDays: z.number().int().min(1).max(730)
+}).strict();
+
+const retentionSchema = z.object({
+  threadTtlDays: z.literal(3),
+  cleanupIntervalMinutes: z.number().int().min(1).max(1440),
+  projectMemoryMaxItems: z.number().int().min(20).max(500),
+  projectMemoryRecallItems: z.number().int().min(1).max(50),
+  projectMemoryMaxChars: z.number().int().min(2_000).max(40_000)
+}).strict();
+
 const runtimeConfigSchema = z.object({
   version: z.literal(1),
   runtime: z.object({ mode: z.enum(["live", "mock"]) }).strict(),
@@ -26,6 +45,9 @@ const runtimeConfigSchema = z.object({
       maxRetries: z.number().int().min(0).max(5)
     }).strict()
   }).strict(),
+  database: databaseSchema.optional(),
+  session: sessionSchema.optional(),
+  retention: retentionSchema,
   generation: z.object({
     temperature: z.number().min(0).max(2),
     maxTokens: z.number().int().min(1).max(16_384),
@@ -94,4 +116,9 @@ export function publicModelDefinitions(config: AgentRuntimeConfig): ModelDefinit
 
 export function runtimeMode(config: AgentRuntimeConfig) {
   return process.env.WORKBENCH_LLM_MODE === "mock" ? "mock" : config.runtime.mode;
+}
+
+export function requireDatabaseConfig(config: AgentRuntimeConfig) {
+  if (!config.database) throw new RuntimeConfigError("live 模式缺少 PostgreSQL 配置");
+  return config.database;
 }

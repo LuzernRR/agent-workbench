@@ -32,7 +32,7 @@ export type MockAttachment = MessageAttachment & { bytes: Uint8Array };
 export type MockArtifactRecord = { id: string; threadId: string; name: string; mimeType: string; content: string };
 
 type MockDatabase = {
-  projects: Map<string, ProjectSummary & { createdAt: string }>;
+  projects: Map<string, ProjectSummary & { createdAt: string; sortOrder: number }>;
   threads: Map<string, MockThread>;
   runs: Map<string, MockRun>;
   artifacts: Map<string, MockArtifactRecord>;
@@ -58,7 +58,7 @@ function seed(): MockDatabase {
     ["proj-learning", "学习与研究", "workspace/learning"]
   ];
   projects.forEach(([id, name, path], index) => {
-    db.projects.set(id, { id, name, path, status: "idle", createdAt: iso((index + 3) * 86400000) });
+    db.projects.set(id, { id, name, path, status: "idle", sortOrder: index, createdAt: iso((index + 3) * 86400000) });
   });
 
   const threads: Array<[string, string | null, string, number]> = [
@@ -136,8 +136,8 @@ export function listThreads(): ThreadSummary[] {
 
 export function listProjects(): ProjectSummary[] {
   return [...db().projects.values()]
-    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
-    .map(({ createdAt: _createdAt, ...project }) => ({
+    .sort((left, right) => left.sortOrder - right.sortOrder || Date.parse(left.createdAt) - Date.parse(right.createdAt))
+    .map(({ createdAt: _createdAt, sortOrder: _sortOrder, ...project }) => ({
       ...project,
       status: [...db().threads.values()].some((thread) => thread.projectId === project.id && thread.status === "running") ? "running" : "idle",
       context: {

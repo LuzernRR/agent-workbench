@@ -21,4 +21,12 @@ describe("MarkdownRenderer", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(screen.queryByText(/https:\/\/bad\.example/u)).not.toBeInTheDocument();
   });
+
+  it("keeps comparison tables semantic inside a responsive scroll region", () => {
+    const { container } = render(<MarkdownRenderer>{"| 模型 | 上下文 |\n| --- | --- |\n| DeepSeek | 128K |"}</MarkdownRenderer>);
+
+    expect(screen.getByRole("table")).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "模型" })).toBeVisible();
+    expect(container.querySelector(".markdown-table-scroll > table")).toBe(screen.getByRole("table"));
+  });
 });

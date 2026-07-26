@@ -34,6 +34,9 @@ export function MarkdownRenderer({ children, className = "" }: { children: strin
             const safeSrc = safeWorkbenchHref(typeof src === "string" ? src : "");
             const label = safeLinkLabel(alt, "生成图片");
             return safeSrc ? <img src={safeSrc} alt={label} loading="lazy" referrerPolicy="no-referrer" {...props} /> : <span>{label}</span>;
+          },
+          table({ children: tableChildren, ...props }) {
+            return <div className="markdown-table-scroll scrollbar-subtle"><table {...props}>{tableChildren}</table></div>;
           }
         }}
       >{children}</ReactMarkdown>

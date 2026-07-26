@@ -303,3 +303,32 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
 export function reduceAgentEvents(state: AgentThreadState, events: AgentEvent[]) {
   return events.reduce(reduceAgentEvent, state);
 }
+
+/**
+ * Optimistically switch the visible linear branch before an edited message is
+ * sent. The server performs the durable archive transaction; this function
+ * guarantees that no stale reply survives in the first client render frame.
+ */
+export function truncateThreadStateForEdit(state: AgentThreadState, messageId: string, nextText: string): AgentThreadState {
+  const index = state.itemOrder.indexOf(messageId);
+  const target = state.items[messageId];
+  if (index < 0 || !target || target.kind !== "message" || target.role !== "user") return state;
+  const retainedOrder = state.itemOrder.slice(0, index + 1);
+  const retainedItems = Object.fromEntries(retainedOrder.map((id) => [id, id === messageId ? { ...target, text: nextText, status: "completed" as const } : state.items[id]]));
+  const removedRunIds = new Set(state.itemOrder.slice(index).map((id) => state.items[id]?.runId).filter(Boolean));
+  return {
+    ...state,
+    activeRunId: null,
+    runStatus: "queued",
+    runStartedAt: null,
+    items: retainedItems,
+    itemOrder: retainedOrder,
+    artifacts: [],
+    files: [],
+    logs: [],
+    plan: [],
+    planUpdatedAt: null,
+    runStatuses: Object.fromEntries(Object.entries(state.runStatuses).filter(([runId]) => !removedRunIds.has(runId))),
+    runTimings: Object.fromEntries(Object.entries(state.runTimings).filter(([runId]) => !removedRunIds.has(runId)))
+  };
+}

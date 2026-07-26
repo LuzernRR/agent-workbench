@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createEmptyThreadState, reduceAgentEvent, reduceAgentEvents } from "./reducer";
+import { createEmptyThreadState, reduceAgentEvent, reduceAgentEvents, truncateThreadStateForEdit } from "./reducer";
 import type { AgentEvent } from "./types";
 
 const base = { projectId: "project", threadId: "thread", runId: "run", createdAt: "2026-07-22T00:00:00.000Z" };
@@ -62,5 +62,40 @@ describe("reduceAgentEvent", () => {
     ]);
     expect(state.runTimings.run).toEqual({ startedAt: base.createdAt, completedAt: base.createdAt });
     expect(state.runStatuses.run).toBe("completed");
+  });
+
+  it("编辑用户消息时立即截断目标运行和全部下游内容", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "run.created", {}),
+      event(2, "message.started", { messageId: "user-1", role: "user", text: "旧问题" }),
+      event(3, "message.completed", { messageId: "user-1", text: "旧问题" }),
+      event(4, "message.started", { messageId: "assistant-1", role: "assistant" }),
+      event(5, "message.completed", { messageId: "assistant-1", text: "旧回复" }),
+      { ...event(6, "run.created", {}), runId: "run-2" },
+      { ...event(7, "message.started", { messageId: "user-2", role: "user", text: "下游问题" }), runId: "run-2" },
+      { ...event(8, "message.completed", { messageId: "user-2", text: "下游问题" }), runId: "run-2" }
+    ]);
+    const populated = {
+      ...state,
+      artifacts: [{ id: "artifact-1", name: "旧成果", kind: "report" as const, mimeType: "text/markdown", content: "旧内容", version: 1, createdAt: base.createdAt }],
+      files: [{ id: "file-1", path: "old.md", name: "old.md", status: "created" as const, language: "markdown", content: "旧内容", version: 1 }],
+      logs: [{ id: "log-1", level: "info" as const, actor: "助手", content: "旧日志", createdAt: base.createdAt }],
+      plan: [{ id: "step-1", title: "旧计划", status: "done" as const }],
+      planUpdatedAt: base.createdAt
+    };
+
+    const next = truncateThreadStateForEdit(populated, "user-1", "新问题");
+
+    expect(next.itemOrder).toEqual(["user-1"]);
+    expect(next.items["user-1"]).toMatchObject({ text: "新问题", status: "completed" });
+    expect(next.items["assistant-1"]).toBeUndefined();
+    expect(next.items["user-2"]).toBeUndefined();
+    expect(next.artifacts).toEqual([]);
+    expect(next.files).toEqual([]);
+    expect(next.logs).toEqual([]);
+    expect(next.plan).toEqual([]);
+    expect(next.runStatuses).toEqual({});
+    expect(next.runTimings).toEqual({});
+    expect(next.runStatus).toBe("queued");
   });
 });

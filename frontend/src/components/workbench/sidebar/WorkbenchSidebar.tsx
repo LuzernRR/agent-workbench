@@ -1,11 +1,28 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { Children, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Popover from "@radix-ui/react-popover";
-import { ChevronDown, ChevronRight, Edit3, Folder, FolderInput, FolderMinus, FolderOpen, FolderPlus, PanelLeftClose, PanelsTopLeft, Plus, Settings2, Trash2, X } from "lucide-react";
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragCancelEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent
+} from "@dnd-kit/core";
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ChevronDown, ChevronRight, Edit3, Folder, FolderInput, FolderMinus, FolderOpen, FolderPlus, GripVertical, PanelLeftClose, PanelsTopLeft, Plus, Settings2, Trash2, X } from "lucide-react";
 import type { ProjectSummary, ThreadSummary } from "@/lib/agent-events/types";
 import { workbenchApi } from "@/lib/api/client";
 import { getWorkbenchErrorMessage } from "@/lib/errors";
@@ -13,20 +30,28 @@ import { cn } from "@/lib/utils";
 
 type ProjectDialogState = { mode: "create" | "rename"; project?: ProjectSummary } | null;
 type SelectionHandler = (projectId: string | null, threadId: string | null) => void;
+type ActiveDrag = { type: "project"; projectId: string } | { type: "thread"; threadId: string };
+
+const projectDragId = (id: string) => `project:${id}`;
+const threadDragId = (id: string) => `thread:${id}`;
+const UNASSIGNED_DROP_ID = "drop:unassigned";
 
 export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollapse }: { projectId: string | null; threadId: string | null; onSelectThread?: SelectionHandler; onCollapse: () => void }) {
   const queryClient = useQueryClient();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: workbenchApi.projects });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: workbenchApi.projects, staleTime: 15_000 });
   const projectIds = (projects.data || []).map((project) => project.id);
   const threads = useQuery({
     queryKey: ["threads", "all", projectIds],
     queryFn: () => workbenchApi.allThreads(projectIds),
     enabled: !projects.isLoading,
-    staleTime: 15000
+    staleTime: 15_000
   });
-  const [draggedThreadId, setDraggedThreadId] = useState<string | null>(null);
-  const draggedThreadIdRef = useRef<string | null>(null);
-  const [dropProjectId, setDropProjectId] = useState<string | null | undefined>(undefined);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 3 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null);
+  const [overProjectId, setOverProjectId] = useState<string | null | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<ThreadSummary | null>(null);
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<ProjectSummary | null>(null);
   const [projectDialog, setProjectDialog] = useState<ProjectDialogState>(null);
@@ -51,32 +76,45 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["projects"] }),
       queryClient.invalidateQueries({ queryKey: ["threads"] }),
-      queryClient.invalidateQueries({ queryKey: ["thread", threadId] })
+      threadId ? queryClient.invalidateQueries({ queryKey: ["thread", threadId] }) : Promise.resolve()
     ]);
   };
 
   const moveThread = useMutation({
     mutationFn: ({ id, destinationProjectId }: { id: string; destinationProjectId: string | null }) => workbenchApi.moveThread(id, destinationProjectId),
-    onSuccess: async (thread) => {
-      await invalidateNavigation();
-      setDraggedThreadId(null);
-      setDropProjectId(undefined);
-      if (thread.id === threadId && thread.projectId !== projectId) onSelectThread?.(thread.projectId, thread.id);
+    onMutate: async ({ id, destinationProjectId }) => {
+      await queryClient.cancelQueries({ queryKey: ["threads"] });
+      const key = ["threads", "all", projectIds] as const;
+      const previous = queryClient.getQueryData<ThreadSummary[]>(key);
+      queryClient.setQueryData<ThreadSummary[]>(key, (current) => (current || []).map((thread) => thread.id === id ? { ...thread, projectId: destinationProjectId, updatedAt: new Date().toISOString() } : thread));
+      if (id === threadId) onSelectThread?.(destinationProjectId, id);
+      return { previous, key };
     },
-    onError: () => {
-      setDraggedThreadId(null);
-      setDropProjectId(undefined);
-    }
+    onError: (_error, _variables, context) => {
+      if (context?.previous) queryClient.setQueryData(context.key, context.previous);
+    },
+    onSettled: () => void invalidateNavigation()
+  });
+
+  const reorderProjects = useMutation({
+    mutationFn: (ids: string[]) => workbenchApi.reorderProjects(ids),
+    onMutate: async (ids) => {
+      await queryClient.cancelQueries({ queryKey: ["projects"] });
+      const previous = queryClient.getQueryData<ProjectSummary[]>(["projects"]);
+      const byId = new Map((previous || []).map((project) => [project.id, project]));
+      queryClient.setQueryData<ProjectSummary[]>(["projects"], ids.map((id) => byId.get(id)).filter((project): project is ProjectSummary => Boolean(project)));
+      return { previous };
+    },
+    onError: (_error, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(["projects"], context.previous);
+    },
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ["projects"] })
   });
 
   const renameThread = useMutation({
     mutationFn: ({ id, title }: { id: string; title: string }) => workbenchApi.renameThread(id, title),
-    onSuccess: async () => {
-      await invalidateNavigation();
-      setThreadRenameTarget(null);
-    }
+    onSuccess: async () => { await invalidateNavigation(); setThreadRenameTarget(null); }
   });
-
   const deleteThread = useMutation({
     mutationFn: (id: string) => workbenchApi.deleteThread(id),
     onSuccess: async (_, id) => {
@@ -87,25 +125,19 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
       setDeleteTarget(null);
     }
   });
-
   const createProject = useMutation({
     mutationFn: () => workbenchApi.createProject({ name: projectName.trim() }),
-    onSuccess: async () => {
+    onSuccess: async (project) => {
       await invalidateNavigation();
       setProjectDialog(null);
       setProjectName("");
+      onSelectThread?.(project.id, null);
     }
   });
-
   const updateProject = useMutation({
     mutationFn: () => projectDialog?.project ? workbenchApi.updateProject(projectDialog.project.id, { name: projectName.trim() }) : Promise.reject(new Error("项目不存在")),
-    onSuccess: async () => {
-      await invalidateNavigation();
-      setProjectDialog(null);
-      setProjectName("");
-    }
+    onSuccess: async () => { await invalidateNavigation(); setProjectDialog(null); setProjectName(""); }
   });
-
   const deleteProject = useMutation({
     mutationFn: (id: string) => workbenchApi.deleteProject(id),
     onSuccess: async (_, id) => {
@@ -116,175 +148,163 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
     }
   });
 
-  const dropThread = (destinationProjectId: string | null, transferredThreadId?: string) => {
-    const sourceId = transferredThreadId || draggedThreadIdRef.current || draggedThreadId;
-    if (!sourceId || moveThread.isPending) return;
-    const source = (threads.data || []).find((thread) => thread.id === sourceId);
-    if (!source || source.projectId === destinationProjectId) {
-      draggedThreadIdRef.current = null;
-      setDraggedThreadId(null);
-      setDropProjectId(undefined);
-      return;
+  const openCreateProject = () => { setProjectName(""); setProjectDialog({ mode: "create" }); };
+  const openRenameProject = (project: ProjectSummary) => { setProjectName(project.name); setProjectDialog({ mode: "rename", project }); };
+  const openRenameThread = (thread: ThreadSummary) => { setThreadTitle(thread.title); setThreadRenameTarget(thread); };
+  const toggleProject = (id: string) => setCollapsedProjectIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const dialogPending = createProject.isPending || updateProject.isPending;
+
+  const destinationFor = (event: DragOverEvent | DragEndEvent) => {
+    const over = event.over;
+    if (!over) return undefined;
+    if (over.id === UNASSIGNED_DROP_ID) return null;
+    const data = over.data.current;
+    if (data?.type === "project") return String(data.projectId);
+    if (data?.type === "thread") return (threads.data || []).find((thread) => thread.id === data.threadId)?.projectId ?? null;
+    return undefined;
+  };
+  const resetDrag = () => { setActiveDrag(null); setOverProjectId(undefined); };
+  const onDragStart = (event: DragStartEvent) => {
+    const data = event.active.data.current;
+    if (data?.type === "project") setActiveDrag({ type: "project", projectId: String(data.projectId) });
+    if (data?.type === "thread") setActiveDrag({ type: "thread", threadId: String(data.threadId) });
+  };
+  const onDragOver = (event: DragOverEvent) => {
+    if (activeDrag?.type === "thread") setOverProjectId(destinationFor(event));
+  };
+  const onDragCancel = (_event: DragCancelEvent) => resetDrag();
+  const onDragEnd = (event: DragEndEvent) => {
+    const active = activeDrag;
+    if (active?.type === "project" && event.over) {
+      const current = projects.data || [];
+      const from = current.findIndex((project) => project.id === active.projectId);
+      const overData = event.over.data.current;
+      const targetProjectId = overData?.type === "project" ? String(overData.projectId) : overData?.type === "thread" ? (threads.data || []).find((thread) => thread.id === overData.threadId)?.projectId : null;
+      const to = current.findIndex((project) => project.id === targetProjectId);
+      if (from >= 0 && to >= 0 && from !== to) reorderProjects.mutate(arrayMove(current, from, to).map((project) => project.id));
     }
-    draggedThreadIdRef.current = null;
-    moveThread.mutate({ id: sourceId, destinationProjectId });
+    if (active?.type === "thread") {
+      const source = (threads.data || []).find((thread) => thread.id === active.threadId);
+      const destination = destinationFor(event);
+      if (source && destination !== undefined && source.projectId !== destination) moveThread.mutate({ id: source.id, destinationProjectId: destination });
+    }
+    resetDrag();
   };
 
-  const openCreateProject = () => {
-    setProjectName("");
-    setProjectDialog({ mode: "create" });
-  };
-  const openRenameProject = (project: ProjectSummary) => {
-    setProjectName(project.name);
-    setProjectDialog({ mode: "rename", project });
-  };
-  const openRenameThread = (thread: ThreadSummary) => {
-    setThreadTitle(thread.title);
-    setThreadRenameTarget(thread);
-  };
-  const startDrag = (thread: ThreadSummary, event: React.PointerEvent) => {
-    if (event.button !== 0) return;
-    draggedThreadIdRef.current = thread.id;
-  };
-  const endDrag = () => {
-    draggedThreadIdRef.current = null;
-    setDraggedThreadId(null);
-    setDropProjectId(undefined);
-  };
-  const toggleProject = (id: string) => {
-    setCollapsedProjectIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-  const dialogPending = createProject.isPending || updateProject.isPending;
+  const activeLabel = activeDrag?.type === "project"
+    ? projects.data?.find((project) => project.id === activeDrag.projectId)?.name
+    : activeDrag?.type === "thread" ? threads.data?.find((thread) => thread.id === activeDrag.threadId)?.title : null;
 
   return (
     <aside className="flex h-full min-w-0 flex-col bg-sidebar" aria-label="项目与会话">
       <div className="flex min-h-[52px] shrink-0 items-center gap-2.5 border-b border-line px-3 py-2">
         <span className="grid size-7 shrink-0 place-items-center rounded-md bg-ink text-white" aria-hidden><PanelsTopLeft className="size-4" /></span>
-        <div className="min-w-0 flex-1 whitespace-normal break-words text-[15px] font-semibold">智能工作台</div>
+        <div className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap text-[15px] font-semibold">智能工作台</div>
         <button className="icon-button" onClick={onCollapse} title="折叠左栏" aria-label="折叠左栏"><PanelLeftClose className="size-4" /></button>
       </div>
 
       <div className="shrink-0 p-2.5">
         <button className="primary-button h-9 w-full justify-start" type="button" onClick={() => onSelectThread?.(null, null)}><Plus className="size-4" />新建会话</button>
-        {moveThread.error ? <p role="alert" className="mt-2 px-1 text-[15px] text-danger">{getWorkbenchErrorMessage(moveThread.error, "任务移动失败")}</p> : null}
-        {renameThread.error ? <p role="alert" className="mt-2 px-1 text-[15px] text-danger">{getWorkbenchErrorMessage(renameThread.error, "会话重命名失败")}</p> : null}
-        {deleteThread.error ? <p role="alert" className="mt-2 px-1 text-[15px] text-danger">{getWorkbenchErrorMessage(deleteThread.error, "会话删除失败")}</p> : null}
-        {createProject.error || updateProject.error || deleteProject.error ? <p role="alert" className="mt-2 px-1 text-[15px] text-danger">{getWorkbenchErrorMessage(createProject.error || updateProject.error || deleteProject.error, "项目操作失败")}</p> : null}
+        {moveThread.error ? <NavigationAlert error={moveThread.error} fallback="会话移动失败" /> : null}
+        {reorderProjects.error ? <NavigationAlert error={reorderProjects.error} fallback="项目排序失败" /> : null}
+        {renameThread.error ? <NavigationAlert error={renameThread.error} fallback="会话重命名失败" /> : null}
+        {deleteThread.error ? <NavigationAlert error={deleteThread.error} fallback="会话删除失败" /> : null}
+        {createProject.error || updateProject.error || deleteProject.error ? <NavigationAlert error={createProject.error || updateProject.error || deleteProject.error} fallback="项目操作失败" /> : null}
       </div>
 
-      <div className="scrollbar-subtle min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        <section aria-labelledby="projects-heading">
-          <div className="mb-1 flex items-center justify-between px-2 pt-2"><h2 id="projects-heading" className="text-balance text-[13px] font-semibold text-secondary">项目</h2><button type="button" className="icon-button size-7" onClick={openCreateProject} title="新建项目" aria-label="新建项目"><FolderPlus className="size-4" /></button></div>
-          {projects.error ? <NavigationError label="项目加载失败" onRetry={() => void projects.refetch()} /> : null}
-          {threads.error ? <NavigationError label="会话加载失败" onRetry={() => void threads.refetch()} /> : null}
-          <div className="space-y-0.5" role="tree" aria-label="项目会话树">
-            {projects.isLoading ? <NavigationSkeleton rows={3} /> : null}
-            {(projects.data || []).map((project) => {
-              const projectThreads = threadsByProject.get(project.id) || [];
-              const expanded = !collapsedProjectIds.has(project.id);
-              const isDropTarget = draggedThreadId !== null && dropProjectId === project.id;
-              return <div key={project.id} role="treeitem" aria-expanded={expanded} aria-selected={project.id === projectId}>
-                <div className={cn("group flex h-9 min-w-0 items-center rounded-md pr-1", isDropTarget && "bg-white ring-1 ring-ink")} onPointerUp={(event) => { if (event.button === 0) dropThread(project.id); }}>
-                  <button type="button" aria-label={`${expanded ? "收起" : "展开"}项目 ${project.name}`} title={project.name} className={cn("flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-[14px] leading-5 text-secondary hover:bg-white hover:text-ink", project.id === projectId && "font-medium text-ink")} onClick={() => toggleProject(project.id)}>
-                    {expanded ? <ChevronDown className="size-3.5 shrink-0 text-tertiary" /> : <ChevronRight className="size-3.5 shrink-0 text-tertiary" />}
-                    {expanded ? <FolderOpen className="size-4 shrink-0" /> : <Folder className="size-4 shrink-0" />}
-                    <span className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{project.name}</span>
-                    <span className="shrink-0 tabular-nums text-[12px] text-tertiary">{projectThreads.length}</span>
-                  </button>
-                  <ProjectMenu project={project} onRename={openRenameProject} onDelete={setProjectDeleteTarget} />
-                </div>
-                {expanded && projectThreads.length ? <div role="group" className="ml-[15px] border-l border-line pl-1.5">
-                  {projectThreads.map((thread) => <div key={thread.id} role="treeitem" aria-selected={thread.id === threadId}><ThreadTreeRow thread={thread} projectName={project.name} selected={thread.id === threadId} dragged={draggedThreadId === thread.id} projects={projects.data || []} onSelect={() => onSelectThread?.(thread.projectId, thread.id)} onDragStart={startDrag} onDragEnd={endDrag} onRename={openRenameThread} onMove={(destinationProjectId) => moveThread.mutate({ id: thread.id, destinationProjectId })} onDelete={setDeleteTarget} /></div>)}
-                </div> : null}
-              </div>;
-            })}
-            {!projects.isLoading && !projects.data?.length ? <div className="rounded-lg border border-dashed border-line px-3 py-4 text-[14px] leading-5 text-secondary"><p>还没有项目</p><button type="button" className="mt-2 text-ink underline underline-offset-2" onClick={openCreateProject}>创建第一个项目</button></div> : null}
-            {!projects.isLoading && threads.isLoading ? <NavigationSkeleton rows={4} detailed /> : null}
-          </div>
-        </section>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={onDragStart} onDragOver={onDragOver} onDragCancel={onDragCancel} onDragEnd={onDragEnd}>
+        <div className="scrollbar-subtle min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          <section aria-labelledby="projects-heading">
+            <div className="mb-1 flex items-center justify-between px-2 pt-2"><h2 id="projects-heading" className="text-[13px] font-semibold text-secondary">项目</h2><button type="button" className="icon-button size-7" onClick={openCreateProject} title="新建项目" aria-label="新建项目"><FolderPlus className="size-4" /></button></div>
+            {projects.error ? <NavigationError label="项目加载失败" onRetry={() => void projects.refetch()} /> : null}
+            {threads.error ? <NavigationError label="会话加载失败" onRetry={() => void threads.refetch()} /> : null}
+            <SortableContext items={(projects.data || []).map((project) => projectDragId(project.id))} strategy={verticalListSortingStrategy}>
+              <div className="space-y-0.5" role="tree" aria-label="项目会话树">
+                {projects.isLoading ? <NavigationSkeleton rows={3} /> : null}
+                {(projects.data || []).map((project) => {
+                  const projectThreads = threadsByProject.get(project.id) || [];
+                  const expanded = !collapsedProjectIds.has(project.id);
+                  return <ProjectTreeItem key={project.id} project={project} expanded={expanded} selected={project.id === projectId && !threadId} dropTarget={activeDrag?.type === "thread" && overProjectId === project.id} onToggle={() => toggleProject(project.id)} onSelect={() => onSelectThread?.(project.id, null)} onRename={openRenameProject} onDelete={setProjectDeleteTarget}>
+                    {projectThreads.map((thread) => <ThreadTreeRow key={thread.id} thread={thread} projectName={project.name} selected={thread.id === threadId} projects={projects.data || []} onSelect={() => onSelectThread?.(thread.projectId, thread.id)} onRename={openRenameThread} onMove={(destinationProjectId) => moveThread.mutate({ id: thread.id, destinationProjectId })} onDelete={setDeleteTarget} />)}
+                  </ProjectTreeItem>;
+                })}
+                {!projects.isLoading && threads.isLoading ? <NavigationSkeleton rows={4} detailed /> : null}
+              </div>
+            </SortableContext>
+          </section>
 
-        <section className="mt-4" aria-labelledby="sessions-heading">
-          <div className="mb-1 flex items-center justify-between px-2"><h2 id="sessions-heading" className="text-balance text-[13px] font-semibold text-secondary">会话</h2><button type="button" className="icon-button size-7" onClick={() => onSelectThread?.(null, null)} title="新建会话" aria-label="新建会话"><Plus className="size-4" /></button></div>
-          {draggedThreadId ? <div role="button" tabIndex={0} aria-label="将会话移出项目" className={cn("mb-2 rounded-md border border-dashed border-line px-3 py-2 text-center text-[13px] text-secondary", dropProjectId === null && "border-ink bg-white text-ink")} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropProjectId(null); }} onDrop={(event) => { event.preventDefault(); dropThread(null, event.dataTransfer.getData("text/plain")); }}>拖到此处移出项目</div> : null}
-          <div className="space-y-0.5" aria-label="会话列表">
-            {unassignedThreads.map((thread) => <ThreadTreeRow key={thread.id} thread={thread} selected={thread.id === threadId} dragged={draggedThreadId === thread.id} projects={projects.data || []} onSelect={() => onSelectThread?.(null, thread.id)} onDragStart={startDrag} onDragEnd={endDrag} onRename={openRenameThread} onMove={(destinationProjectId) => moveThread.mutate({ id: thread.id, destinationProjectId })} onDelete={setDeleteTarget} />)}
-            {!threads.isLoading && !threads.data?.length ? <div className="rounded-lg border border-dashed border-line px-3 py-4 text-[14px] leading-5 text-secondary"><p>还没有会话</p><button type="button" className="mt-2 text-ink underline underline-offset-2" onClick={() => onSelectThread?.(null, null)}>开始第一个任务</button></div> : null}
-          </div>
-        </section>
-      </div>
+          <UnassignedDropZone active={activeDrag?.type === "thread"} over={activeDrag?.type === "thread" && overProjectId === null}>
+            <section className="mt-4" aria-labelledby="sessions-heading">
+              <div className="mb-1 flex items-center justify-between px-2"><h2 id="sessions-heading" className="text-[13px] font-semibold text-secondary">会话</h2><button type="button" className="icon-button size-7" onClick={() => onSelectThread?.(null, null)} title="新建会话" aria-label="新建会话"><Plus className="size-4" /></button></div>
+              {activeDrag?.type === "thread" ? <div className={cn("mb-1 grid h-9 place-items-center rounded-md bg-white/55 text-[13px] text-secondary transition-all duration-200", overProjectId === null && "bg-[#e9e9e6] text-ink")}>移出项目</div> : null}
+              <div className="space-y-0.5" aria-label="会话列表">
+                {unassignedThreads.map((thread) => <ThreadTreeRow key={thread.id} thread={thread} selected={thread.id === threadId} projects={projects.data || []} onSelect={() => onSelectThread?.(null, thread.id)} onRename={openRenameThread} onMove={(destinationProjectId) => moveThread.mutate({ id: thread.id, destinationProjectId })} onDelete={setDeleteTarget} />)}
+              </div>
+            </section>
+          </UnassignedDropZone>
+        </div>
+        <DragOverlay dropAnimation={{ duration: 190, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" }}>
+          {activeLabel ? <div className="flex h-9 max-w-60 items-center gap-2 rounded-lg bg-white px-3 text-[14px] font-medium text-ink shadow-popover"><GripVertical className="size-4 text-tertiary" /><span className="min-w-0 overflow-hidden text-clip whitespace-nowrap">{activeLabel}</span></div> : null}
+        </DragOverlay>
+      </DndContext>
 
-      <AlertDialog.Root open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open && !deleteThread.isPending) setDeleteTarget(null); }}><AlertDialog.Portal><AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-line bg-white p-5 shadow-xl"><AlertDialog.Title className="text-balance text-[17px] font-semibold text-ink">删除这个会话？</AlertDialog.Title><AlertDialog.Description className="mt-2 text-pretty text-[15px] leading-6 text-secondary">会话及其运行记录将被永久删除。</AlertDialog.Description><div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel asChild><button type="button" className="quiet-button" disabled={deleteThread.isPending}>取消</button></AlertDialog.Cancel><AlertDialog.Action asChild><button type="button" className="primary-button bg-danger" disabled={deleteThread.isPending} onClick={(event) => { event.preventDefault(); if (deleteTarget) deleteThread.mutate(deleteTarget.id); }}>{deleteThread.isPending ? "正在删除" : "删除"}</button></AlertDialog.Action></div></AlertDialog.Content></AlertDialog.Portal></AlertDialog.Root>
-      <AlertDialog.Root open={Boolean(projectDeleteTarget)} onOpenChange={(open) => { if (!open && !deleteProject.isPending) setProjectDeleteTarget(null); }}><AlertDialog.Portal><AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-line bg-white p-5 shadow-xl"><AlertDialog.Title className="text-balance text-[17px] font-semibold text-ink">删除项目“{projectDeleteTarget?.name}”？</AlertDialog.Title><AlertDialog.Description className="mt-2 text-pretty text-[15px] leading-6 text-secondary">项目下的会话、运行记录和成果将一并删除，且无法恢复。</AlertDialog.Description><div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel asChild><button type="button" className="quiet-button" disabled={deleteProject.isPending}>取消</button></AlertDialog.Cancel><AlertDialog.Action asChild><button type="button" className="primary-button bg-danger" disabled={deleteProject.isPending} onClick={(event) => { event.preventDefault(); if (projectDeleteTarget) deleteProject.mutate(projectDeleteTarget.id); }}>{deleteProject.isPending ? "正在删除" : "删除项目"}</button></AlertDialog.Action></div></AlertDialog.Content></AlertDialog.Portal></AlertDialog.Root>
-      <Dialog.Root open={Boolean(projectDialog)} onOpenChange={(open) => { if (!open && !dialogPending) setProjectDialog(null); }}><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(460px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-line bg-white p-5 shadow-xl outline-none"><Dialog.Title className="text-balance text-[18px] font-semibold text-ink">{projectDialog?.mode === "rename" ? "重命名项目" : "新建项目"}</Dialog.Title><Dialog.Description className="mt-1 text-pretty text-[15px] leading-6 text-secondary">用项目整理相关会话。</Dialog.Description><form className="mt-5 space-y-4" onSubmit={(event) => { event.preventDefault(); if (!projectName.trim()) return; if (projectDialog?.mode === "rename") updateProject.mutate(); else createProject.mutate(); }}><label className="block text-[15px] font-medium text-ink" htmlFor="project-name">项目名称<input id="project-name" autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={160} className="mt-1.5 h-10 w-full rounded-lg border border-line bg-white px-3 text-[16px] outline-none focus:border-ink" placeholder="例如：产品规划" /></label><div className="flex justify-end gap-2"><Dialog.Close asChild><button type="button" className="quiet-button" disabled={dialogPending}>取消</button></Dialog.Close><button type="submit" className="primary-button" disabled={dialogPending || !projectName.trim()}>{dialogPending ? "正在保存" : projectDialog?.mode === "rename" ? "保存" : "创建项目"}</button></div></form><Dialog.Close asChild><button type="button" className="icon-button absolute right-3 top-3" aria-label="关闭项目对话框" title="关闭"><X className="size-4" /></button></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>
-      <Dialog.Root open={Boolean(threadRenameTarget)} onOpenChange={(open) => { if (!open && !renameThread.isPending) setThreadRenameTarget(null); }}><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-line bg-white p-5 shadow-xl outline-none"><Dialog.Title className="text-balance text-[18px] font-semibold text-ink">重命名会话</Dialog.Title><Dialog.Description className="mt-1 text-pretty text-[15px] leading-6 text-secondary">修改侧栏中显示的名称。</Dialog.Description><form className="mt-5" onSubmit={(event) => { event.preventDefault(); if (threadRenameTarget && threadTitle.trim()) renameThread.mutate({ id: threadRenameTarget.id, title: threadTitle.trim() }); }}><label className="block text-[15px] font-medium text-ink" htmlFor="thread-title">会话名称<input id="thread-title" autoFocus value={threadTitle} onChange={(event) => setThreadTitle(event.target.value)} maxLength={240} className="mt-1.5 h-10 w-full rounded-lg border border-line bg-white px-3 text-[16px] outline-none focus:border-ink" /></label><div className="mt-4 flex justify-end gap-2"><Dialog.Close asChild><button type="button" className="quiet-button" disabled={renameThread.isPending}>取消</button></Dialog.Close><button type="submit" className="primary-button" disabled={renameThread.isPending || !threadTitle.trim()}>{renameThread.isPending ? "正在保存" : "保存"}</button></div></form><Dialog.Close asChild><button type="button" className="icon-button absolute right-3 top-3" aria-label="关闭会话重命名对话框" title="关闭"><X className="size-4" /></button></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>
+      <AlertDialog.Root open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open && !deleteThread.isPending) setDeleteTarget(null); }}><AlertDialog.Portal><AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-5 shadow-xl"><AlertDialog.Title className="text-[17px] font-semibold text-ink">删除这个会话？</AlertDialog.Title><AlertDialog.Description className="mt-2 text-[15px] leading-6 text-secondary">会话及其运行记录将被永久删除。</AlertDialog.Description><div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel asChild><button type="button" className="quiet-button" disabled={deleteThread.isPending}>取消</button></AlertDialog.Cancel><AlertDialog.Action asChild><button type="button" className="primary-button bg-danger" disabled={deleteThread.isPending} onClick={(event) => { event.preventDefault(); if (deleteTarget) deleteThread.mutate(deleteTarget.id); }}>{deleteThread.isPending ? "正在删除" : "删除"}</button></AlertDialog.Action></div></AlertDialog.Content></AlertDialog.Portal></AlertDialog.Root>
+      <AlertDialog.Root open={Boolean(projectDeleteTarget)} onOpenChange={(open) => { if (!open && !deleteProject.isPending) setProjectDeleteTarget(null); }}><AlertDialog.Portal><AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-5 shadow-xl"><AlertDialog.Title className="text-[17px] font-semibold text-ink">删除项目“{projectDeleteTarget?.name}”？</AlertDialog.Title><AlertDialog.Description className="mt-2 text-[15px] leading-6 text-secondary">项目下的会话、运行记录和附件将一并删除，且无法恢复。</AlertDialog.Description><div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel asChild><button type="button" className="quiet-button" disabled={deleteProject.isPending}>取消</button></AlertDialog.Cancel><AlertDialog.Action asChild><button type="button" className="primary-button bg-danger" disabled={deleteProject.isPending} onClick={(event) => { event.preventDefault(); if (projectDeleteTarget) deleteProject.mutate(projectDeleteTarget.id); }}>{deleteProject.isPending ? "正在删除" : "删除项目"}</button></AlertDialog.Action></div></AlertDialog.Content></AlertDialog.Portal></AlertDialog.Root>
+      <Dialog.Root open={Boolean(projectDialog)} onOpenChange={(open) => { if (!open && !dialogPending) setProjectDialog(null); }}><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(460px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-5 shadow-xl outline-none"><Dialog.Title className="text-[18px] font-semibold text-ink">{projectDialog?.mode === "rename" ? "重命名项目" : "新建项目"}</Dialog.Title><Dialog.Description className="mt-1 text-[15px] leading-6 text-secondary">用项目整理相关会话。</Dialog.Description><form className="mt-5" onSubmit={(event) => { event.preventDefault(); if (!projectName.trim()) return; if (projectDialog?.mode === "rename") updateProject.mutate(); else createProject.mutate(); }}><label className="block text-[14px] font-medium text-secondary" htmlFor="project-name">项目名称</label><input id="project-name" autoFocus value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={160} className="borderless-field mt-2 h-11 w-full rounded-xl border-0 bg-panel px-3 text-[16px] text-ink outline-none ring-0 placeholder:text-tertiary" placeholder="例如：产品规划" /><div className="mt-5 flex justify-end gap-2"><Dialog.Close asChild><button type="button" className="quiet-button" disabled={dialogPending}>取消</button></Dialog.Close><button type="submit" className="primary-button" disabled={dialogPending || !projectName.trim()}>{dialogPending ? "正在保存" : projectDialog?.mode === "rename" ? "保存" : "创建项目"}</button></div></form><Dialog.Close asChild><button type="button" className="icon-button absolute right-3 top-3" aria-label="关闭项目对话框" title="关闭"><X className="size-4" /></button></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>
+      <Dialog.Root open={Boolean(threadRenameTarget)} onOpenChange={(open) => { if (!open && !renameThread.isPending) setThreadRenameTarget(null); }}><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-40 bg-black/25" /><Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white p-5 shadow-xl outline-none"><Dialog.Title className="text-[18px] font-semibold text-ink">重命名会话</Dialog.Title><Dialog.Description className="mt-1 text-[15px] leading-6 text-secondary">修改侧栏中显示的名称。</Dialog.Description><form className="mt-5" onSubmit={(event) => { event.preventDefault(); if (threadRenameTarget && threadTitle.trim()) renameThread.mutate({ id: threadRenameTarget.id, title: threadTitle.trim() }); }}><label className="block text-[14px] font-medium text-secondary" htmlFor="thread-title">会话名称</label><input id="thread-title" autoFocus value={threadTitle} onChange={(event) => setThreadTitle(event.target.value)} maxLength={240} className="borderless-field mt-2 h-11 w-full rounded-xl border-0 bg-panel px-3 text-[16px] text-ink outline-none ring-0" /><div className="mt-5 flex justify-end gap-2"><Dialog.Close asChild><button type="button" className="quiet-button" disabled={renameThread.isPending}>取消</button></Dialog.Close><button type="submit" className="primary-button" disabled={renameThread.isPending || !threadTitle.trim()}>{renameThread.isPending ? "正在保存" : "保存"}</button></div></form><Dialog.Close asChild><button type="button" className="icon-button absolute right-3 top-3" aria-label="关闭会话重命名对话框" title="关闭"><X className="size-4" /></button></Dialog.Close></Dialog.Content></Dialog.Portal></Dialog.Root>
     </aside>
   );
 }
 
-function ThreadTreeRow({ thread, projectName, selected, dragged, projects, onSelect, onDragStart, onDragEnd, onRename, onMove, onDelete }: {
-  thread: ThreadSummary;
-  projectName?: string;
-  selected: boolean;
-  dragged: boolean;
-  projects: ProjectSummary[];
-  onSelect: () => void;
-  onDragStart: (thread: ThreadSummary, event: React.PointerEvent) => void;
-  onDragEnd: () => void;
-  onRename: (thread: ThreadSummary) => void;
-  onMove: (projectId: string | null) => void;
-  onDelete: (thread: ThreadSummary) => void;
-}) {
-  const timestamp = thread.lastUserMessageAt ?? thread.updatedAt;
-  return <div
-    data-testid="thread-row"
-    data-project-id={thread.projectId ?? ""}
-    onPointerDown={(event) => onDragStart(thread, event)}
-    onPointerUp={onDragEnd}
-    onPointerCancel={onDragEnd}
-    className={cn("group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-[14px] leading-5 text-secondary hover:bg-white hover:text-ink", selected && "bg-white text-ink ring-1 ring-line", dragged && "opacity-50")}
-  >
-    <button type="button" aria-label={projectName ? `${thread.title} ${projectName}` : thread.title} onClick={onSelect} className="flex h-full min-w-0 flex-1 items-center gap-2 px-2 text-left" title={thread.title}>
-      <span className="status-dot shrink-0" data-status={thread.status} />
-      <span data-testid="thread-title" className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{thread.title}</span>
-      <time className="shrink-0 tabular-nums text-[12px] text-tertiary" dateTime={timestamp}>{formatThreadTime(timestamp)}</time>
-    </button>
+function ProjectTreeItem({ project, expanded, selected, dropTarget, onToggle, onSelect, onRename, onDelete, children }: { project: ProjectSummary; expanded: boolean; selected: boolean; dropTarget: boolean; onToggle: () => void; onSelect: () => void; onRename: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void; children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: projectDragId(project.id), data: { type: "project", projectId: project.id } });
+  const style = { transform: CSS.Transform.toString(transform), transition: transition || "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)", zIndex: isDragging ? 10 : undefined };
+  return <div ref={setNodeRef} style={style} role="treeitem" aria-expanded={expanded} aria-selected={selected} className={cn("relative", isDragging && "opacity-25")}>
+    <div className={cn("group flex h-9 min-w-0 items-center rounded-md pr-1 transition-colors duration-150", selected && "bg-[#ececea] text-ink", dropTarget && "bg-[#e5e5e2] shadow-[inset_0_0_0_1px_#8f8f8b]")}>
+      <button type="button" aria-label={`${expanded ? "收起" : "展开"}项目 ${project.name}`} className="grid size-8 shrink-0 place-items-center rounded-md text-tertiary hover:bg-white/80 hover:text-ink" onClick={onToggle}>{expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}</button>
+      <button type="button" onClick={onSelect} className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[14px] leading-5 text-secondary hover:text-ink" title={project.name}>{expanded ? <FolderOpen className="size-4 shrink-0" /> : <Folder className="size-4 shrink-0" />}<span className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{project.name}</span><span className="shrink-0 tabular-nums text-[12px] text-tertiary">{Children.count(children)}</span></button>
+      <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} className="grid size-7 touch-none place-items-center rounded-md text-tertiary opacity-0 transition-opacity hover:bg-white hover:text-ink focus:opacity-100 group-hover:opacity-100" aria-label={`拖动项目 ${project.name}`} title="拖动项目"><GripVertical className="size-4" /></button>
+      <ProjectMenu project={project} onRename={onRename} onDelete={onDelete} />
+    </div>
+    {expanded && Children.count(children) ? <div role="group" className="ml-[15px] border-l border-line pl-1.5">{children}</div> : null}
+  </div>;
+}
+
+function ThreadTreeRow({ thread, projectName, selected, projects, onSelect, onRename, onMove, onDelete }: { thread: ThreadSummary; projectName?: string; selected: boolean; projects: ProjectSummary[]; onSelect: () => void; onRename: (thread: ThreadSummary) => void; onMove: (projectId: string | null) => void; onDelete: (thread: ThreadSummary) => void }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, isDragging } = useDraggable({ id: threadDragId(thread.id), data: { type: "thread", threadId: thread.id } });
+  const style = { transform: CSS.Translate.toString(transform), transition: isDragging ? undefined : "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)" };
+  return <div ref={setNodeRef} style={style} data-testid="thread-row" data-thread-id={thread.id} data-project-id={thread.projectId ?? ""} className={cn("group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-[14px] leading-5 text-secondary transition-colors duration-150 hover:bg-white hover:text-ink", selected && "bg-[#ececea] text-ink", isDragging && "opacity-20")}>
+    <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} className="grid size-7 touch-none shrink-0 place-items-center rounded-md text-tertiary opacity-0 transition-opacity hover:bg-white focus:opacity-100 group-hover:opacity-100" aria-label={`拖动会话 ${thread.title}`} title="拖动会话"><GripVertical className="size-3.5" /></button>
+    <button type="button" aria-label={projectName ? `${thread.title} ${projectName}` : thread.title} onClick={onSelect} className="flex h-full min-w-0 flex-1 items-center px-1 text-left" title={thread.title}><span data-testid="thread-title" className="block min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{thread.title}</span></button>
     <ThreadMenu thread={thread} projects={projects} onRename={onRename} onMove={onMove} onDelete={onDelete} />
   </div>;
 }
 
-function ProjectMenu({ project, onRename, onDelete }: { project: ProjectSummary; onRename: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void }) {
-  return <Popover.Root><Popover.Trigger asChild><button type="button" className="icon-button mt-1 size-7 shrink-0 opacity-0 focus:opacity-100 group-hover:opacity-100" aria-label={`管理项目 ${project.name}`} title={`管理项目 ${project.name}`}><Settings2 className="size-4" /></button></Popover.Trigger><Popover.Portal><Popover.Content side="right" align="start" sideOffset={6} className="z-50 w-44 rounded-lg border border-line bg-white p-1.5 shadow-popover"><Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onRename(project)}><Edit3 className="size-4" />重命名项目</button></Popover.Close><Popover.Close asChild><button type="button" className="mt-1 flex min-h-9 w-full items-center gap-2 border-t border-line px-2 pt-1 text-left text-[15px] text-danger" onClick={() => onDelete(project)}><Trash2 className="size-4" />删除项目</button></Popover.Close></Popover.Content></Popover.Portal></Popover.Root>;
+function UnassignedDropZone({ active, over, children }: { active: boolean; over: boolean; children: React.ReactNode }) {
+  const { setNodeRef } = useDroppable({ id: UNASSIGNED_DROP_ID, data: { type: "unassigned" } });
+  return <div ref={setNodeRef} className={cn("rounded-lg transition-colors duration-150", active && over && "bg-white/40")}>{children}</div>;
 }
 
-function NavigationSkeleton({ rows, detailed = false }: { rows: number; detailed?: boolean }) {
-  return <div role="status" aria-label={detailed ? "正在加载会话" : "正在加载项目"} className="space-y-1 py-1" aria-live="polite">{Array.from({ length: rows }, (_, index) => <div key={index} className={cn("animate-pulse rounded-lg bg-white/55 px-2", detailed ? "h-12" : "h-10")} aria-hidden><div className={cn("h-2.5 rounded-full bg-[#e8e8e6]", detailed ? "mt-2 w-3/4" : "mt-3.5 w-2/3")} />{detailed ? <div className="mt-2 h-2 w-1/2 rounded-full bg-[#eeeeec]" /> : null}</div>)}</div>;
+function ProjectMenu({ project, onRename, onDelete }: { project: ProjectSummary; onRename: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void }) {
+  return <Popover.Root><Popover.Trigger asChild><button type="button" className="icon-button size-7 shrink-0 opacity-0 focus:opacity-100 group-hover:opacity-100" aria-label={`管理项目 ${project.name}`} title={`管理项目 ${project.name}`}><Settings2 className="size-4" /></button></Popover.Trigger><Popover.Portal><Popover.Content side="right" align="start" sideOffset={6} className="z-50 w-44 rounded-lg border border-line bg-white p-1.5 shadow-popover"><Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onRename(project)}><Edit3 className="size-4" />重命名项目</button></Popover.Close><Popover.Close asChild><button type="button" className="mt-1 flex min-h-9 w-full items-center gap-2 border-t border-line px-2 pt-1 text-left text-[15px] text-danger" onClick={() => onDelete(project)}><Trash2 className="size-4" />删除项目</button></Popover.Close></Popover.Content></Popover.Portal></Popover.Root>;
 }
 
 function ThreadMenu({ thread, projects, onRename, onMove, onDelete }: { thread: ThreadSummary; projects: ProjectSummary[]; onRename: (thread: ThreadSummary) => void; onMove: (projectId: string | null) => void; onDelete: (thread: ThreadSummary) => void }) {
-  return <Popover.Root><Popover.Trigger asChild><button type="button" className="icon-button mt-1.5 size-7 shrink-0 opacity-0 focus:opacity-100 group-hover:opacity-100" aria-label={`管理会话 ${thread.title}`} title={`管理会话 ${thread.title}`}><Settings2 className="size-4" /></button></Popover.Trigger><Popover.Portal><Popover.Content side="right" align="start" sideOffset={6} className="z-50 max-h-[min(520px,80dvh)] w-56 overflow-y-auto rounded-lg border border-line bg-white p-1.5 shadow-popover"><Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onRename(thread)}><Edit3 className="size-4" />重命名会话</button></Popover.Close>{thread.projectId ? <Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onMove(null)}><FolderMinus className="size-4" />移出项目</button></Popover.Close> : null}<div className="px-2 py-1 text-[14px] text-tertiary">移入项目</div>{projects.filter((candidate) => candidate.id !== thread.projectId).map((candidate) => <Popover.Close asChild key={candidate.id}><button type="button" className="flex min-h-9 w-full items-start gap-2 rounded-md px-2 py-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" title={candidate.name} onClick={() => onMove(candidate.id)}><FolderInput className="mt-0.5 size-4 shrink-0" /><span className="whitespace-normal break-words leading-5">{candidate.name}</span></button></Popover.Close>)}<Popover.Close asChild><button type="button" className="mt-1 flex min-h-9 w-full items-center gap-2 border-t border-line px-2 pt-1 text-left text-[15px] text-danger" onClick={() => onDelete(thread)}><Trash2 className="size-4" />删除会话</button></Popover.Close></Popover.Content></Popover.Portal></Popover.Root>;
+  return <Popover.Root><Popover.Trigger asChild><button type="button" className="icon-button size-7 shrink-0 opacity-0 focus:opacity-100 group-hover:opacity-100" aria-label={`管理会话 ${thread.title}`} title={`管理会话 ${thread.title}`}><Settings2 className="size-4" /></button></Popover.Trigger><Popover.Portal><Popover.Content side="right" align="start" sideOffset={6} className="z-50 max-h-[min(520px,80dvh)] w-56 overflow-y-auto rounded-lg border border-line bg-white p-1.5 shadow-popover"><Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onRename(thread)}><Edit3 className="size-4" />重命名会话</button></Popover.Close>{thread.projectId ? <Popover.Close asChild><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" onClick={() => onMove(null)}><FolderMinus className="size-4" />移出项目</button></Popover.Close> : null}<div className="px-2 py-1 text-[14px] text-tertiary">移入项目</div>{projects.filter((candidate) => candidate.id !== thread.projectId).map((candidate) => <Popover.Close asChild key={candidate.id}><button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[15px] text-secondary hover:bg-panel hover:text-ink" title={candidate.name} onClick={() => onMove(candidate.id)}><FolderInput className="size-4 shrink-0" /><span className="min-w-0 overflow-hidden text-clip whitespace-nowrap">{candidate.name}</span></button></Popover.Close>)}<Popover.Close asChild><button type="button" className="mt-1 flex min-h-9 w-full items-center gap-2 border-t border-line px-2 pt-1 text-left text-[15px] text-danger" onClick={() => onDelete(thread)}><Trash2 className="size-4" />删除会话</button></Popover.Close></Popover.Content></Popover.Portal></Popover.Root>;
+}
+
+function NavigationAlert({ error, fallback }: { error: unknown; fallback: string }) {
+  return <p role="alert" className="mt-2 px-1 text-[14px] text-danger">{getWorkbenchErrorMessage(error, fallback)}</p>;
 }
 
 function NavigationError({ label, onRetry }: { label: string; onRetry: () => void }) {
-  return <div role="alert" className="mb-2 flex items-center gap-2 px-2 text-[14px] text-danger"><span className="min-w-0 flex-1">{label}</span><button type="button" className="shrink-0 text-ink underline underline-offset-2" onClick={onRetry}>重试</button></div>;
+  return <div role="alert" className="mb-2 rounded-lg bg-white/65 px-3 py-2 text-[14px] text-danger"><p>{label}</p><button type="button" className="mt-1 text-ink underline underline-offset-2" onClick={onRetry}>重新加载</button></div>;
 }
 
-function formatThreadTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "时间未知";
-  const now = new Date();
-  const diffMs = Math.max(0, now.getTime() - date.getTime());
-  const diffMinutes = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-  if (diffMinutes < 1) return "刚刚";
-  if (diffMinutes < 60) return `${diffMinutes}分前`;
-  if (diffHours < 24) return `${diffHours}小时前`;
-  if (diffDays < 7) return `${diffDays}天前`;
-  if (date.getFullYear() === now.getFullYear()) return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "numeric", day: "numeric" }).format(date);
+function NavigationSkeleton({ rows, detailed = false }: { rows: number; detailed?: boolean }) {
+  return <div className="space-y-1 py-1" role="status" aria-label="正在加载列表">{Array.from({ length: rows }, (_, index) => <div key={index} className={cn("h-8 rounded-md bg-white/55", detailed && index % 2 === 1 && "ml-5 w-[calc(100%-20px)]")} />)}</div>;
 }

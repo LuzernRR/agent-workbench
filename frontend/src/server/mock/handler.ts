@@ -173,10 +173,21 @@ export async function handleMock(request: Request, rawPath: string): Promise<Res
       const payload = await body(request);
       const name = String(payload.name || "").trim();
       if (!name) return fail("项目名称不能为空", 400);
-      const project = { id: newId("proj"), name, path: String(payload.path || "") || `E:/workspace/${newId("ws")}`, status: "idle" as const, createdAt: new Date().toISOString() };
+      const sortOrder = Math.max(-1, ...[...database.projects.values()].map((project) => project.sortOrder)) + 1;
+      const project = { id: newId("proj"), name, path: String(payload.path || "") || `E:/workspace/${newId("ws")}`, status: "idle" as const, sortOrder, createdAt: new Date().toISOString() };
       database.projects.set(project.id, project);
-      const { createdAt: _createdAt, ...summary } = project;
+      const { createdAt: _createdAt, sortOrder: _sortOrder, ...summary } = project;
       return json(summary);
+    }
+    if (segments.length === 2 && segments[1] === "reorder" && method === "PATCH") {
+      const payload = await body(request);
+      const projectIds = Array.isArray(payload.projectIds) ? payload.projectIds.map(String) : [];
+      if (projectIds.length !== database.projects.size || projectIds.some((id) => !database.projects.has(id))) return fail("项目顺序无效", 400);
+      projectIds.forEach((id, index) => {
+        const project = database.projects.get(id)!;
+        project.sortOrder = index;
+      });
+      return json({ status: "reordered" });
     }
     const projectId = segments[1];
     const project = projectId ? database.projects.get(projectId) : undefined;
@@ -186,7 +197,7 @@ export async function handleMock(request: Request, rawPath: string): Promise<Res
         const payload = await body(request);
         if (typeof payload.name === "string" && payload.name.trim()) project.name = payload.name.trim();
         if (typeof payload.path === "string") project.path = payload.path;
-        const { createdAt: _createdAt, ...summary } = project;
+        const { createdAt: _createdAt, sortOrder: _sortOrder, ...summary } = project;
         return json(summary);
       }
       if (method === "DELETE") {
@@ -224,6 +235,12 @@ export async function handleMock(request: Request, rawPath: string): Promise<Res
           const target = payload.projectId === null ? null : String(payload.projectId);
           if (target && !database.projects.has(target)) return fail("project not found", 404);
           touchThread(thread, { projectId: target });
+          thread.runIds.forEach((runId) => {
+            const run = database.runs.get(runId);
+            if (!run) return;
+            run.projectId = target;
+            run.events = run.events.map((event) => ({ ...event, projectId: target }));
+          });
         }
         return json(threadSummary(thread));
       }
@@ -281,7 +298,8 @@ export async function handleMock(request: Request, rawPath: string): Promise<Res
       return eventStream(segments[1], Number.isFinite(after) ? after : 0);
     }
     if (segments[2] === "stop" && method === "POST") {
-      return stopRun(segments[1]) ? json({ status: "stopped" }) : fail("run not found", 404);
+      const status = stopRun(segments[1]);
+      return status ? json({ status }) : fail("run not found", 404);
     }
   }
 

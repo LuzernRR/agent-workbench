@@ -165,6 +165,25 @@ describe("createRenderQueue", () => {
     expect(order).toContain("[message.reset]");
   });
 
+  it("flushes hidden-page backlog without waiting for animation frames", () => {
+    const frames = manualFrames();
+    const applied: AgentEvent[] = [];
+    const queue = createRenderQueue({
+      apply: (value) => applied.push(value),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "后台继续生成" }));
+    queue.enqueue(event(2, "run.completed", {}));
+
+    queue.flush();
+
+    expect(applied.map((value) => value.type)).toEqual(["text.delta", "run.completed"]);
+    expect(applied[0].payload.delta).toBe("后台继续生成");
+    expect(applied[0].seq).toBe(1);
+    expect(frames.flush()).toBe(0);
+  });
+
   it("stops applying events after dispose", () => {
     const frames = manualFrames();
     let count = 0;

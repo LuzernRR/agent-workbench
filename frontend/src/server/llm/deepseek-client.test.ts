@@ -23,6 +23,7 @@ const config = parseRuntimeConfig({
     models: [{ id: "deepseek-v4-flash", name: "快速模型", description: "快速响应", reasoningEfforts: ["medium", "high"], defaultReasoningEffort: "medium" }],
     request: { timeoutMs: 30_000, maxRetries: 0 }
   },
+  retention: { threadTtlDays: 3, cleanupIntervalMinutes: 15, projectMemoryMaxItems: 120, projectMemoryRecallItems: 24, projectMemoryMaxChars: 16_000 },
   generation: { temperature: 0.6, maxTokens: 1024, thinkingEnabled: true },
   assistant: { systemPrompt: "使用中文回答。" }
 });
