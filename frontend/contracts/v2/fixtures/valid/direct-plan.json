@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "2.0",
+  "planId": "plan_direct_1",
+  "briefId": "brief_direct_1",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "revision": 1,
+  "steps": [
+    {
+      "id": "step_analyze",
+      "facet": "定义",
+      "objective": "确定解释范围",
+      "queries": [],
+      "preferredTools": [],
+      "dependsOn": [],
+      "evidenceNeeded": 0,
+      "status": "done"
+    },
+    {
+      "id": "step_write",
+      "facet": "回答",
+      "objective": "形成直接回答",
+      "queries": [],
+      "preferredTools": [],
+      "dependsOn": ["step_analyze"],
+      "evidenceNeeded": 0,
+      "status": "todo"
+    }
+  ],
+  "stopConditions": ["回答覆盖定义与用途"],
+  "reasonCodes": ["direct_answer"],
+  "createdAt": "2026-07-26T12:00:02Z",
+  "versions": {
+    "contract": "2.0",
+    "release": "release_s00",
+    "graph": "graph_v2",
+    "prompt": "prompt_plan_v1",
+    "model": "deepseek_v4_flash",
+    "provider": "deepseek",
+    "toolRegistry": null,
+    "parser": "parser_v1",
+    "index": null,
+    "evaluator": null
+  }
+}

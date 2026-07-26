@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "toolSpecs": [
+    {
+      "schemaVersion": "2.0", "toolId": "web_search", "version": "tool_v1", "description": "搜索网页。",
+      "capabilities": ["web.search"], "sourceTypes": ["web"], "permissions": ["network.public"], "approval": "never",
+      "effect": "read", "reversibility": "read_only", "cost": { "estimatedUsd": "0", "unit": "call" },
+      "idempotency": "key_required", "timeoutMs": 30000,
+      "parametersSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": {} },
+      "resultSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false,
+        "properties": { "item": { "type": "object", "properties": { "title": { "type": "string" } } } }
+      },
+      "strictModeBeta": false
+    }
+  ]
+}

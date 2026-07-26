@@ -1,0 +1,314 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "response": {
+    "schemaVersion": "2.0",
+    "responseId": "response_direct",
+    "runId": "run_direct",
+    "scope": {
+      "tenantId": "tenant_1",
+      "actorId": "actor_1",
+      "visitorId": "visitor_1",
+      "projectId": "project_1",
+      "threadId": "thread_1"
+    },
+    "status": "completed",
+    "answerMarkdown": "JSON Schema 用于描述和验证 JSON 数据结构。",
+    "claims": [],
+    "citations": [],
+    "limitations": [],
+    "conflicts": [],
+    "stopReason": "no_search_needed",
+    "artifacts": [],
+    "usage": {
+      "currency": "USD",
+      "modelBreakdown": [
+        {
+          "provider": "deepseek",
+          "model": "deepseek_v4_flash",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "inputTokens": 100,
+          "outputTokens": 50,
+          "totalTokens": 150,
+          "reasoningTokens": 20,
+          "cacheHitInputTokens": 0,
+          "cacheMissInputTokens": 100,
+          "estimatedCostUsd": "0.001",
+          "actualCostUsd": "0.001",
+          "possibleDuplicateCostUsd": "0"
+        }
+      ],
+      "toolBreakdown": [],
+      "totals": {
+        "modelCalls": 1,
+        "toolCalls": 0,
+        "searchQueries": 0,
+        "pageReads": 0,
+        "inputTokens": 100,
+        "outputTokens": 50,
+        "totalTokens": 150,
+        "reasoningTokens": 20,
+        "peakParallelTools": 0,
+        "elapsedMs": 1000,
+        "estimatedCostUsd": "0.001",
+        "actualCostUsd": "0.001",
+        "possibleDuplicateCostUsd": "0"
+      }
+    },
+    "versions": {
+      "contract": "2.0",
+      "release": "release_s00",
+      "graph": "graph_v2",
+      "prompt": "prompt_writer_v1",
+      "model": "deepseek_v4_flash",
+      "provider": "deepseek",
+      "toolRegistry": null,
+      "parser": "parser_v1",
+      "index": null,
+      "evaluator": "eval_v1"
+    },
+    "completedAt": "2026-07-26T13:00:01Z"
+  },
+  "events": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_verify_direct",
+      "runId": "run_direct",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 1,
+      "occurredAt": "2026-07-26T13:00:00.100Z",
+      "type": "verification.completed",
+      "kind": "verification",
+      "status": "completed",
+      "startedAt": "2026-07-26T13:00:00Z",
+      "completedAt": "2026-07-26T13:00:00.100Z",
+      "inputRevision": 0,
+      "refs": { "responseId": "response_direct" },
+      "source": "fixture",
+      "payload": {
+        "passed": true,
+        "unsupportedClaimIds": [],
+        "verifiedCitationIds": [],
+        "draftRevision": 0,
+        "publicText": null,
+        "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_message_direct_started",
+      "runId": "run_direct",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 2,
+      "occurredAt": "2026-07-26T13:00:00.200Z",
+      "type": "message.started",
+      "kind": "message",
+      "status": "running",
+      "startedAt": "2026-07-26T13:00:00.200Z",
+      "completedAt": null,
+      "inputRevision": 0,
+      "refs": { "messageId": "message_direct" },
+      "source": "fixture",
+      "payload": {
+        "messageId": "message_direct",
+        "role": "assistant",
+        "steeringRevision": 0
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_message_direct_completed",
+      "runId": "run_direct",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 3,
+      "occurredAt": "2026-07-26T13:00:00.300Z",
+      "type": "message.completed",
+      "kind": "message",
+      "status": "completed",
+      "startedAt": "2026-07-26T13:00:00.200Z",
+      "completedAt": "2026-07-26T13:00:00.300Z",
+      "inputRevision": 0,
+      "refs": { "messageId": "message_direct", "responseId": "response_direct" },
+      "source": "fixture",
+      "payload": {
+        "messageId": "message_direct",
+        "role": "assistant",
+        "contentRef": "content_direct",
+        "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "responseId": "response_direct",
+        "steeringRevision": 0,
+        "verified": true
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_memory_direct",
+      "runId": "run_direct",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 4,
+      "occurredAt": "2026-07-26T13:00:00.400Z",
+      "type": "memory.updated",
+      "kind": "memory",
+      "status": "completed",
+      "startedAt": "2026-07-26T13:00:00.400Z",
+      "completedAt": "2026-07-26T13:00:00.400Z",
+      "inputRevision": 0,
+      "refs": { "responseId": "response_direct" },
+      "source": "fixture",
+      "payload": {
+        "memoryRef": "memory_direct",
+        "sourceResponseId": "response_direct",
+        "exchangeVerified": true
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_run_completed",
+      "runId": "run_direct",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 5,
+      "occurredAt": "2026-07-26T13:00:01Z",
+      "type": "run.completed",
+      "kind": "run",
+      "status": "completed",
+      "startedAt": "2026-07-26T13:00:00Z",
+      "completedAt": "2026-07-26T13:00:01Z",
+      "inputRevision": 0,
+      "refs": { "responseId": "response_direct" },
+      "source": "fixture",
+      "payload": {
+        "responseId": "response_direct",
+        "responseStatus": "completed",
+        "stopReason": "no_search_needed",
+        "usage": {
+          "currency": "USD",
+          "modelBreakdown": [
+            {
+              "provider": "deepseek",
+              "model": "deepseek_v4_flash",
+              "pricingVersion": "pricing_2026_07",
+              "currency": "USD",
+              "calls": 1,
+              "inputTokens": 100,
+              "outputTokens": 50,
+              "totalTokens": 150,
+              "reasoningTokens": 20,
+              "cacheHitInputTokens": 0,
+              "cacheMissInputTokens": 100,
+              "estimatedCostUsd": "0.001",
+              "actualCostUsd": "0.001",
+              "possibleDuplicateCostUsd": "0"
+            }
+          ],
+          "toolBreakdown": [],
+          "totals": {
+            "modelCalls": 1,
+            "toolCalls": 0,
+            "searchQueries": 0,
+            "pageReads": 0,
+            "inputTokens": 100,
+            "outputTokens": 50,
+            "totalTokens": 150,
+            "reasoningTokens": 20,
+            "peakParallelTools": 0,
+            "elapsedMs": 1000,
+            "estimatedCostUsd": "0.001",
+            "actualCostUsd": "0.001",
+            "possibleDuplicateCostUsd": "0"
+          }
+        },
+        "budget": {
+          "deadlineAt": "2026-07-26T13:01:00Z",
+          "modelCalls": { "max": 4, "used": 1, "reserved": 0, "remaining": 3 },
+          "inputTokens": { "max": 1000, "used": 100, "reserved": 0, "remaining": 900 },
+          "outputTokens": { "max": 500, "used": 50, "reserved": 0, "remaining": 450 },
+          "costUsd": { "max": "0.01", "used": "0.001", "reserved": "0", "remaining": "0.009" },
+          "planRevisions": { "max": 3, "used": 1, "reserved": 0, "remaining": 2 },
+          "searchQueries": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "pageReads": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "toolCalls": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "parallelTools": { "max": 2, "used": 0, "reserved": 0, "remaining": 2 },
+          "wallTimeMs": { "max": 10000, "used": 1000, "reserved": 0, "remaining": 9000 },
+          "exhausted": false
+        }
+      }
+    }
+  ],
+  "queueEvents": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "queue_event_after_completed",
+      "threadId": "thread_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "queueCursor": 1,
+      "queueRevision": 1,
+      "occurredAt": "2026-07-26T13:00:02Z",
+      "type": "queue.updated",
+      "source": "fixture",
+      "payload": {
+        "transition": "dequeued",
+        "expectedPreviousRevision": 0,
+        "trigger": { "runId": "run_direct", "terminalStatus": "completed" },
+        "entries": [
+          {
+            "schemaVersion": "2.0",
+            "queueEntryId": "queue_next_1",
+            "threadId": "thread_1",
+            "messageRef": "message_next_1",
+            "runId": "run_next_1",
+            "position": 0,
+            "queueRevision": 1,
+            "status": "starting",
+            "createdAt": "2026-07-26T12:59:00Z",
+            "startedAt": "2026-07-26T13:00:02Z",
+            "idempotencyKey": "idem_queue_next_1",
+            "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+            "publicDisplay": { "messagePreview": "下一项研究任务", "attachmentCount": 0 }
+          }
+        ],
+        "activeRunIds": ["run_next_1"],
+        "autoStartNext": true,
+        "paused": false,
+        "pauseReason": null
+      }
+    }
+  ]
+}

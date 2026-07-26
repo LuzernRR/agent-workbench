@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "toolSpecs": [
+    {
+      "schemaVersion": "2.0", "toolId": "external_delete", "version": "tool_v1", "description": "删除外部记录。",
+      "capabilities": ["record.delete"], "sourceTypes": [], "permissions": ["external.write"], "approval": "never",
+      "effect": "external_side_effect", "reversibility": "irreversible", "cost": { "estimatedUsd": "0", "unit": "call" },
+      "idempotency": "none", "timeoutMs": 30000,
+      "parametersSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": {} },
+      "resultSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": {} },
+      "strictModeBeta": false
+    }
+  ]
+}

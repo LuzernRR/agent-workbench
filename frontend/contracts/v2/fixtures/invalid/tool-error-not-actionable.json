@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "2.0",
+  "toolCallId": "call_error_2",
+  "toolId": "web_search",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "status": "failed",
+  "outputRef": null,
+  "artifactIds": [],
+  "evidenceIds": [],
+  "summary": "请求失败",
+  "error": {
+    "code": "RATE_LIMITED",
+    "category": "rate_limited",
+    "message": "请求频率受限。",
+    "fieldPath": null,
+    "expected": null,
+    "retryable": true,
+    "retryAfterMs": 1000,
+    "providerStatus": 429
+  },
+  "completedAt": "2026-07-26T17:20:00Z"
+}

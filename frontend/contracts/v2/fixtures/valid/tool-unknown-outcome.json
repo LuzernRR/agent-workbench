@@ -1,0 +1,223 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "toolSpecs": [
+    {
+      "schemaVersion": "2.0",
+      "toolId": "external_publish",
+      "version": "tool_v1",
+      "description": "向已授权的外部系统发布内容，并返回可核验的操作引用。",
+      "capabilities": ["content.publish"],
+      "sourceTypes": [],
+      "permissions": ["external.write"],
+      "approval": "always",
+      "effect": "external_side_effect",
+      "reversibility": "irreversible",
+      "cost": { "estimatedUsd": "0.01", "unit": "call" },
+      "idempotency": "none",
+      "timeoutMs": 30000,
+      "parametersSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content"],
+        "properties": { "content": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+      },
+      "resultSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["remoteId"],
+        "properties": { "remoteId": { "type": "string", "minLength": 1 } }
+      },
+      "strictModeBeta": false
+    }
+  ],
+  "toolCalls": [
+    {
+      "schemaVersion": "2.0",
+      "toolCallId": "call_publish_unknown_1",
+      "operationRef": "operation_publish_unknown_1",
+      "toolId": "external_publish",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "arguments": { "content": "发布已审核的摘要" },
+      "idempotencyKey": null,
+      "createdAt": "2026-07-26T19:00:00Z"
+    }
+  ],
+  "toolResults": [
+    {
+      "schemaVersion": "2.0",
+      "toolCallId": "call_publish_unknown_1",
+      "operationRef": "operation_publish_unknown_1",
+      "toolId": "external_publish",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "status": "unknown",
+      "outputRef": null,
+      "artifactIds": [],
+      "evidenceIds": [],
+      "summary": "外部操作结果尚未确认",
+      "error": {
+        "code": "OUTCOME_UNKNOWN",
+        "category": "outcome_unknown",
+        "message": "请求已发出，但连接在确认结果前中断。",
+        "fieldPath": null,
+        "expected": null,
+        "retryable": false,
+        "retryAfterMs": null,
+        "nextAction": "check_operation",
+        "providerStatus": null
+      },
+      "attempt": 1,
+      "usage": {
+        "toolId": "external_publish",
+        "toolVersion": "tool_v1",
+        "provider": "publisher",
+        "pricingVersion": "pricing_2026_07",
+        "currency": "USD",
+        "calls": 1,
+        "attempts": 1,
+        "units": 1,
+        "bytes": 0,
+        "resultCount": 0,
+        "searchQueries": 0,
+        "pageReads": 0,
+        "estimatedCostUsd": "0.01",
+        "actualCostUsd": null,
+        "possibleDuplicateCostUsd": "0.01"
+      },
+      "completedAt": "2026-07-26T19:00:30Z"
+    }
+  ],
+  "events": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_publish_started_1",
+      "runId": "run_publish_unknown_1",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 1,
+      "occurredAt": "2026-07-26T19:00:00Z",
+      "type": "tool.started",
+      "kind": "tool",
+      "status": "running",
+      "startedAt": "2026-07-26T19:00:00Z",
+      "completedAt": null,
+      "inputRevision": 0,
+      "refs": { "toolCallId": "call_publish_unknown_1" },
+      "source": "fixture",
+      "payload": {
+        "toolCallId": "call_publish_unknown_1",
+        "toolId": "external_publish",
+        "planStepId": "step_publish_1",
+        "inputHash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "display": {
+          "registryTitle": "外部发布",
+          "category": "other",
+          "parameterSummary": null,
+          "resultSummary": null,
+          "errorMessage": null,
+          "resultCount": null,
+          "resultType": null,
+          "sourceTypes": [],
+          "durationMs": null,
+          "costUsd": null,
+          "attemptStatus": "pending",
+          "approvalStatus": "approved",
+          "errorCode": null
+        },
+        "attempt": 1,
+        "publicText": null,
+        "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_publish_unknown_1",
+      "runId": "run_publish_unknown_1",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 2,
+      "occurredAt": "2026-07-26T19:00:30Z",
+      "type": "tool.unknown",
+      "kind": "tool",
+      "status": "unknown",
+      "startedAt": "2026-07-26T19:00:00Z",
+      "completedAt": "2026-07-26T19:00:30Z",
+      "inputRevision": 0,
+      "refs": { "toolCallId": "call_publish_unknown_1" },
+      "source": "fixture",
+      "payload": {
+        "toolCallId": "call_publish_unknown_1",
+        "toolId": "external_publish",
+        "operationRef": "operation_publish_unknown_1",
+        "display": {
+          "registryTitle": "外部发布",
+          "category": "other",
+          "parameterSummary": null,
+          "resultSummary": null,
+          "errorMessage": "操作结果待核验",
+          "resultCount": null,
+          "resultType": null,
+          "sourceTypes": [],
+          "durationMs": 30000,
+          "costUsd": "0.01",
+          "attemptStatus": "unknown",
+          "approvalStatus": "approved",
+          "errorCode": "OUTCOME_UNKNOWN"
+        },
+        "errorCode": "OUTCOME_UNKNOWN",
+        "nextAction": "check_operation",
+        "durationMs": 30000,
+        "attempt": 1,
+        "usage": {
+          "toolId": "external_publish",
+          "toolVersion": "tool_v1",
+          "provider": "publisher",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "attempts": 1,
+          "units": 1,
+          "bytes": 0,
+          "resultCount": 0,
+          "searchQueries": 0,
+          "pageReads": 0,
+          "estimatedCostUsd": "0.01",
+          "actualCostUsd": null,
+          "possibleDuplicateCostUsd": "0.01"
+        },
+        "publicText": null,
+        "reasonCodes": ["tool_error"]
+      }
+    }
+  ]
+}

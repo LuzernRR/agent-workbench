@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "2.0",
+  "intentId": "intent_direct_1",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "taskType": "direct_answer",
+  "searchNeed": "none",
+  "freshness": "timeless",
+  "dateFrom": null,
+  "dateTo": null,
+  "sourceTypes": [],
+  "platforms": [],
+  "outputMode": "short",
+  "depth": "quick",
+  "language": "zh-CN",
+  "riskFlags": [],
+  "missingCriticalFields": [],
+  "confidence": 0.98,
+  "reasonCodes": ["direct_answer"],
+  "createdAt": "2026-07-26T12:00:00Z",
+  "versions": {
+    "contract": "2.0",
+    "release": "release_s00",
+    "graph": "graph_v2",
+    "prompt": "prompt_intent_v1",
+    "model": "deepseek_v4_flash",
+    "provider": "deepseek",
+    "toolRegistry": null,
+    "parser": "parser_v1",
+    "index": null,
+    "evaluator": null
+  }
+}

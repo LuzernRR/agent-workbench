@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "budget_update_1", "runId": "run_budget_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T20:10:00Z", "type": "budget.updated", "kind": "budget", "status": "completed",
+      "startedAt": "2026-07-26T20:10:00Z", "completedAt": "2026-07-26T20:10:00Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "budgetRevision": 0,
+        "pricingVersion": "pricing_2026_07",
+        "budget": {
+          "deadlineAt": "2026-07-26T20:20:00Z",
+          "modelCalls": { "max": 4, "used": 0, "reserved": 1, "remaining": 3 },
+          "inputTokens": { "max": 1000, "used": 0, "reserved": 100, "remaining": 900 },
+          "outputTokens": { "max": 500, "used": 0, "reserved": 50, "remaining": 450 },
+          "costUsd": { "max": "0.01", "used": "0", "reserved": "0.002", "remaining": "0.008" },
+          "planRevisions": { "max": 3, "used": 0, "reserved": 0, "remaining": 3 },
+          "searchQueries": { "max": 4, "used": 0, "reserved": 0, "remaining": 4 },
+          "pageReads": { "max": 8, "used": 0, "reserved": 0, "remaining": 8 },
+          "toolCalls": { "max": 8, "used": 0, "reserved": 0, "remaining": 8 },
+          "parallelTools": { "max": 2, "used": 0, "reserved": 0, "remaining": 2 },
+          "wallTimeMs": { "max": 600000, "used": 0, "reserved": 0, "remaining": 600000 },
+          "exhausted": false
+        },
+        "usage": {
+          "currency": "USD", "modelBreakdown": [], "toolBreakdown": [],
+          "totals": {
+            "modelCalls": 0, "toolCalls": 0, "searchQueries": 0, "pageReads": 0, "inputTokens": 0, "outputTokens": 0,
+            "totalTokens": 0, "reasoningTokens": 0, "peakParallelTools": 0, "elapsedMs": 0,
+            "estimatedCostUsd": "0", "actualCostUsd": "0", "possibleDuplicateCostUsd": "0"
+          }
+        },
+        "possibleDuplicateCostUsd": "0",
+        "exhausted": false,
+        "publicText": null,
+        "reasonCodes": []
+      }
+    }
+  ]
+}

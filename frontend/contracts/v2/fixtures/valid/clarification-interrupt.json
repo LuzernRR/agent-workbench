@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "events": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_clarification_1",
+      "runId": "run_clarification",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1,
+      "occurredAt": "2026-07-26T16:20:00Z",
+      "type": "clarification.required",
+      "kind": "clarification",
+      "status": "waiting_clarification",
+      "startedAt": "2026-07-26T16:20:00Z",
+      "completedAt": null,
+      "inputRevision": 0,
+      "refs": { "checkpointRef": "checkpoint_clarification_1" },
+      "source": "fixture",
+      "payload": {
+        "clarificationId": "clarification_1",
+        "question": "需要比较哪个时间范围？",
+        "checkpointRef": "checkpoint_clarification_1",
+        "stateRevision": 4,
+        "expiresAt": "2026-07-27T16:20:00Z",
+        "publicText": null,
+        "reasonCodes": ["missing_critical_field"]
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_clarification_2",
+      "runId": "run_clarification",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 2,
+      "occurredAt": "2026-07-26T16:21:00Z",
+      "type": "clarification.resumed",
+      "kind": "clarification",
+      "status": "completed",
+      "startedAt": "2026-07-26T16:21:00Z",
+      "completedAt": "2026-07-26T16:21:00Z",
+      "inputRevision": 1,
+      "refs": { "checkpointRef": "checkpoint_clarification_1", "messageId": "message_clarification_reply" },
+      "source": "fixture",
+      "payload": {
+        "clarificationId": "clarification_1",
+        "checkpointRef": "checkpoint_clarification_1",
+        "responseMessageRef": "message_clarification_reply",
+        "responseHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "resumedAtStateRevision": 5,
+        "idempotencyKey": "idem_clarification_reply_1",
+        "publicText": null,
+        "reasonCodes": ["freshness_required"]
+      }
+    }
+  ]
+}

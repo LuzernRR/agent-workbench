@@ -1,0 +1,111 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "toolSpecs": [
+    {
+      "schemaVersion": "2.0",
+      "toolId": "web_search",
+      "version": "tool_v1",
+      "description": "搜索公开网页候选",
+      "capabilities": ["web.search"],
+      "sourceTypes": ["web", "official_docs", "news"],
+      "permissions": ["network.public"],
+      "approval": "never",
+      "effect": "read",
+      "reversibility": "read_only",
+      "cost": {
+        "estimatedUsd": "0.002",
+        "unit": "call"
+      },
+      "idempotency": "key_required",
+      "timeoutMs": 15000,
+      "parametersSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query", "limit"],
+        "properties": {
+          "query": { "type": "string", "minLength": 1 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+        }
+      },
+      "resultSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "strictModeBeta": true
+    }
+  ],
+  "toolCalls": [
+    {
+      "schemaVersion": "2.0",
+      "toolCallId": "call_search_1",
+      "operationRef": "operation_search_1",
+      "toolId": "web_search",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "arguments": {
+        "query": "JSON Schema Draft 2020-12",
+        "limit": 5
+      },
+      "idempotencyKey": "idem_search_1",
+      "createdAt": "2026-07-26T12:01:00Z"
+    }
+  ],
+  "toolResults": [
+    {
+      "schemaVersion": "2.0",
+      "toolCallId": "call_search_1",
+      "operationRef": "operation_search_1",
+      "toolId": "web_search",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "status": "succeeded",
+      "outputRef": "tool_output_1",
+      "artifactIds": [],
+      "evidenceIds": ["evidence_1"],
+      "summary": "返回五个候选结果",
+      "error": null,
+      "attempt": 1,
+      "usage": {
+        "toolId": "web_search",
+        "toolVersion": "tool_v1",
+        "provider": "search_provider",
+        "pricingVersion": "pricing_2026_07",
+        "currency": "USD",
+        "calls": 1,
+        "attempts": 1,
+        "units": 1,
+        "bytes": 1000,
+        "resultCount": 5,
+        "searchQueries": 1,
+        "pageReads": 0,
+        "estimatedCostUsd": "0.002",
+        "actualCostUsd": "0.002",
+        "possibleDuplicateCostUsd": "0"
+      },
+      "completedAt": "2026-07-26T12:01:01Z"
+    }
+  ]
+}

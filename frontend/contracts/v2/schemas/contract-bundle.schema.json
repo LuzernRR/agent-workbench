@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/contract-bundle.schema.json",
+  "title": "Search Agent v2 contract fixture bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "scope"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "intent": { "$ref": "research-intent.schema.json" },
+    "brief": { "$ref": "research-brief.schema.json" },
+    "plan": { "$ref": "search-plan.schema.json" },
+    "toolSpecs": {
+      "type": "array",
+      "items": { "$ref": "tool.schema.json#/$defs/ToolSpec" }
+    },
+    "toolCalls": {
+      "type": "array",
+      "items": { "$ref": "tool.schema.json#/$defs/ToolCall" }
+    },
+    "toolResults": {
+      "type": "array",
+      "items": { "$ref": "tool.schema.json#/$defs/ToolResult" }
+    },
+    "sources": {
+      "type": "array",
+      "items": { "$ref": "evidence.schema.json#/$defs/SourceRef" }
+    },
+    "snapshots": {
+      "type": "array",
+      "items": { "$ref": "evidence.schema.json#/$defs/SnapshotRef" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "evidence.schema.json#/$defs/PassageRef" }
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "claim-citation.schema.json#/$defs/Claim" }
+    },
+    "citations": {
+      "type": "array",
+      "items": { "$ref": "claim-citation.schema.json#/$defs/Citation" }
+    },
+    "response": {
+      "oneOf": [
+        { "$ref": "search-response.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "steeringCommands": {
+      "type": "array",
+      "items": { "$ref": "steering-command.schema.json" }
+    },
+    "queueEntries": {
+      "type": "array",
+      "items": { "$ref": "run-queue-entry.schema.json" }
+    },
+    "queueEvents": {
+      "type": "array",
+      "items": { "$ref": "thread-queue-event.schema.json" }
+    },
+    "agentState": {
+      "oneOf": [
+        { "$ref": "agent-state.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "agentStates": {
+      "type": "array",
+      "items": { "$ref": "agent-state.schema.json" }
+    },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "agent-event.schema.json" }
+    }
+  }
+}

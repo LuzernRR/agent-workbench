@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/search-response.schema.json",
+  "title": "SearchResponse v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "responseId",
+    "runId",
+    "scope",
+    "status",
+    "answerMarkdown",
+    "claims",
+    "citations",
+    "limitations",
+    "conflicts",
+    "stopReason",
+    "artifacts",
+    "usage",
+    "versions",
+    "completedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "responseId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "runId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "status": { "enum": ["completed", "partial", "failed"] },
+    "answerMarkdown": { "type": "string", "maxLength": 100000 },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "claim-citation.schema.json#/$defs/Claim" }
+    },
+    "citations": {
+      "type": "array",
+      "items": { "$ref": "claim-citation.schema.json#/$defs/Citation" }
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claimIds", "description"],
+        "properties": {
+          "claimIds": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
+          },
+          "description": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "stopReason": { "$ref": "common.schema.json#/$defs/stopCode" },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/ArtifactRef" }
+    },
+    "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+    "versions": { "$ref": "common.schema.json#/$defs/Versions" },
+    "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "completed" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "answerMarkdown": { "type": "string", "minLength": 1 },
+          "stopReason": { "enum": ["sufficient_evidence", "no_search_needed"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "partial" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "answerMarkdown": { "type": "string", "minLength": 1 },
+          "limitations": { "type": "array", "minItems": 1 },
+          "stopReason": { "enum": ["budget_exhausted", "deadline_exceeded", "no_accessible_sources", "low_marginal_gain", "policy_denied", "conflicting_evidence"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "answerMarkdown": { "type": "string", "maxLength": 0 },
+          "claims": { "type": "array", "maxItems": 0 },
+          "citations": { "type": "array", "maxItems": 0 },
+          "stopReason": { "enum": ["user_cancelled", "deadline_exceeded", "budget_exhausted", "policy_denied", "failed"] }
+        }
+      }
+    }
+  ]
+}

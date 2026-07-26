@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "2.0",
+  "citationId": "citation_private_leak",
+  "claimId": "claim_private_leak",
+  "evidenceId": "evidence_private_leak",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "label": "1",
+  "title": "私有来源",
+  "canonicalUrl": "https://private.example.com/secret",
+  "artifactRef": { "artifactId": "artifact_private_leak", "kind": "document", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "storageRef": "private_ref" },
+  "locator": { "kind": "pdf_page", "page": 1 },
+  "locatorVerified": true,
+  "publishedAt": null,
+  "retrievedAt": "2026-07-26T19:20:00Z",
+  "sourceType": "private"
+}

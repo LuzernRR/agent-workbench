@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "sources": [
+    {
+      "schemaVersion": "2.0", "sourceId": "source_unverified", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "sourceType": "official_docs", "canonicalUrl": "https://example.com/spec", "artifactRef": null, "title": "规范", "publisher": "示例", "publishedAt": null, "retrievedAt": "2026-07-26T19:00:00Z", "contentHash": "4444444444444444444444444444444444444444444444444444444444444444", "trust": "reviewed", "access": { "classification": "public", "principalIds": [] }
+    }
+  ],
+  "snapshots": [
+    { "schemaVersion": "2.0", "snapshotId": "snapshot_unverified", "sourceId": "source_unverified", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "snapshotHash": "5555555555555555555555555555555555555555555555555555555555555555", "capturedAt": "2026-07-26T19:00:01Z", "storageRef": "snapshot_unverified_ref", "mimeType": "text/html" }
+  ],
+  "evidence": [
+    { "schemaVersion": "2.0", "evidenceId": "evidence_unverified", "sourceId": "source_unverified", "snapshotId": "snapshot_unverified", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "locator": { "kind": "html_paragraph", "paragraphIndex": 2, "selector": "#content" }, "quote": "示例原文。", "passageHash": "6666666666666666666666666666666666666666666666666666666666666666", "quality": 0.8, "trust": "reviewed", "access": { "classification": "public", "principalIds": [] }, "verified": false }
+  ],
+  "claims": [
+    { "schemaVersion": "2.0", "id": "claim_unverified", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "text": "示例声明。", "importance": "critical", "status": "supported", "confidence": 0.8, "evidenceIds": ["evidence_unverified"], "citationIds": ["citation_unverified"] }
+  ],
+  "citations": [
+    { "schemaVersion": "2.0", "citationId": "citation_unverified", "claimId": "claim_unverified", "evidenceId": "evidence_unverified", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "label": "1", "title": "规范", "canonicalUrl": "https://example.com/spec", "artifactRef": null, "locator": { "kind": "html_paragraph", "paragraphIndex": 2, "selector": "#content" }, "locatorVerified": true, "publishedAt": null, "retrievedAt": "2026-07-26T19:00:00Z", "sourceType": "official_docs" }
+  ]
+}

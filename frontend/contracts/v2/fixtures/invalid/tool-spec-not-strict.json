@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "2.0",
+  "toolId": "web_search",
+  "version": "tool_v1",
+  "description": "搜索公开网页",
+  "capabilities": ["web.search"],
+  "sourceTypes": ["web"],
+  "permissions": ["network.public"],
+  "approval": "never",
+  "effect": "read",
+  "reversibility": "read_only",
+  "cost": { "estimatedUsd": "0.002", "unit": "call" },
+  "idempotency": "key_required",
+  "timeoutMs": 15000,
+  "parametersSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": { "query": { "type": "string" } }
+  },
+  "resultSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "strictModeBeta": true
+}

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "2.0",
+  "intentId": "intent_compare_1",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "taskType": "comparison",
+  "searchNeed": "required",
+  "freshness": "bounded",
+  "dateFrom": "2026-01-01",
+  "dateTo": "2026-07-26",
+  "sourceTypes": ["official_docs", "news", "code"],
+  "platforms": ["web", "github"],
+  "outputMode": "table",
+  "depth": "balanced",
+  "language": "zh-CN",
+  "riskFlags": ["time_sensitive"],
+  "missingCriticalFields": [],
+  "confidence": 0.93,
+  "reasonCodes": ["search_required", "freshness_required"],
+  "createdAt": "2026-07-26T12:00:00Z",
+  "versions": {
+    "contract": "2.0",
+    "release": "release_s00",
+    "graph": "graph_v2",
+    "prompt": "prompt_intent_v1",
+    "model": "deepseek_v4_flash",
+    "provider": "deepseek",
+    "toolRegistry": "tools_v1",
+    "parser": "parser_v1",
+    "index": null,
+    "evaluator": null
+  }
+}

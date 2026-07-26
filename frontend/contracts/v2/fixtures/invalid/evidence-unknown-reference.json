@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "claims": [
+    {
+      "schemaVersion": "2.0",
+      "id": "claim_unknown_evidence",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "text": "未知证据不应支持声明。",
+      "importance": "critical",
+      "status": "supported",
+      "confidence": 0.8,
+      "evidenceIds": ["evidence_missing"],
+      "citationIds": []
+    }
+  ]
+}

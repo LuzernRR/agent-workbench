@@ -1,0 +1,251 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "sources": [
+    {
+      "schemaVersion": "2.0",
+      "sourceId": "source_json_schema",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "sourceType": "official_docs",
+      "canonicalUrl": "https://json-schema.org/draft/2020-12/json-schema-core",
+      "artifactRef": null,
+      "title": "JSON Schema Core",
+      "publisher": "JSON Schema",
+      "publishedAt": null,
+      "retrievedAt": "2026-07-26T12:02:00Z",
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "trust": "authoritative",
+      "access": {
+        "classification": "public",
+        "principalIds": []
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "schemaVersion": "2.0",
+      "snapshotId": "snapshot_json_schema",
+      "sourceId": "source_json_schema",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "snapshotHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capturedAt": "2026-07-26T12:02:01Z",
+      "storageRef": "snapshot_store_1",
+      "mimeType": "text/html"
+    }
+  ],
+  "evidence": [
+    {
+      "schemaVersion": "2.0",
+      "evidenceId": "evidence_core_1",
+      "sourceId": "source_json_schema",
+      "snapshotId": "snapshot_json_schema",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "locator": {
+        "kind": "text_quote",
+        "exactQuote": "A JSON Schema MUST be an object or a boolean.",
+        "prefix": null,
+        "suffix": null
+      },
+      "quote": "A JSON Schema MUST be an object or a boolean.",
+      "passageHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "quality": 0.99,
+      "trust": "authoritative",
+      "access": {
+        "classification": "public",
+        "principalIds": []
+      },
+      "verified": true
+    }
+  ],
+  "response": {
+    "schemaVersion": "2.0",
+    "responseId": "response_1",
+    "runId": "run_1",
+    "scope": {
+      "tenantId": "tenant_1",
+      "actorId": "actor_1",
+      "visitorId": "visitor_1",
+      "projectId": "project_1",
+      "threadId": "thread_1"
+    },
+    "status": "completed",
+    "answerMarkdown": "JSON Schema 可以是对象或布尔值。[1]",
+    "claims": [
+      {
+        "schemaVersion": "2.0",
+        "id": "claim_schema_shape",
+        "scope": {
+          "tenantId": "tenant_1",
+          "actorId": "actor_1",
+          "visitorId": "visitor_1",
+          "projectId": "project_1",
+          "threadId": "thread_1"
+        },
+        "text": "JSON Schema 可以是对象或布尔值。",
+        "importance": "critical",
+        "status": "supported",
+        "confidence": 0.99,
+        "evidenceIds": ["evidence_core_1"],
+        "citationIds": ["citation_schema_shape"]
+      }
+    ],
+    "citations": [
+      {
+        "schemaVersion": "2.0",
+        "citationId": "citation_schema_shape",
+        "claimId": "claim_schema_shape",
+        "evidenceId": "evidence_core_1",
+        "scope": {
+          "tenantId": "tenant_1",
+          "actorId": "actor_1",
+          "visitorId": "visitor_1",
+          "projectId": "project_1",
+          "threadId": "thread_1"
+        },
+        "label": "1",
+        "title": "JSON Schema Core",
+        "canonicalUrl": "https://json-schema.org/draft/2020-12/json-schema-core",
+        "artifactRef": null,
+        "locator": {
+          "kind": "text_quote",
+          "exactQuote": "A JSON Schema MUST be an object or a boolean.",
+          "prefix": null,
+          "suffix": null
+        },
+        "locatorVerified": true,
+        "publishedAt": null,
+        "retrievedAt": "2026-07-26T12:02:00Z",
+        "sourceType": "official_docs"
+      }
+    ],
+    "limitations": [],
+    "conflicts": [],
+    "stopReason": "sufficient_evidence",
+    "artifacts": [],
+    "usage": {
+      "currency": "USD",
+      "modelBreakdown": [
+        {
+          "provider": "deepseek",
+          "model": "deepseek_v4_flash",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "inputTokens": 500,
+          "outputTokens": 100,
+          "totalTokens": 600,
+          "reasoningTokens": 60,
+          "cacheHitInputTokens": 100,
+          "cacheMissInputTokens": 300,
+          "estimatedCostUsd": "0.002",
+          "actualCostUsd": "0.0018",
+          "possibleDuplicateCostUsd": "0"
+        },
+        {
+          "provider": "deepseek",
+          "model": "deepseek_v4_pro",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "inputTokens": 300,
+          "outputTokens": 20,
+          "totalTokens": 320,
+          "reasoningTokens": 0,
+          "cacheHitInputTokens": 0,
+          "cacheMissInputTokens": 300,
+          "estimatedCostUsd": "0.001",
+          "actualCostUsd": null,
+          "possibleDuplicateCostUsd": "0"
+        }
+      ],
+      "toolBreakdown": [
+        {
+          "toolId": "web_search",
+          "toolVersion": "tool_v1",
+          "provider": "search_provider",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "attempts": 1,
+          "units": 1,
+          "bytes": 1000,
+          "resultCount": 1,
+          "searchQueries": 1,
+          "pageReads": 0,
+          "estimatedCostUsd": "0.002",
+          "actualCostUsd": "0.002",
+          "possibleDuplicateCostUsd": "0"
+        },
+        {
+          "toolId": "page_fetch",
+          "toolVersion": "tool_v1",
+          "provider": "fetch_provider",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "attempts": 1,
+          "units": 1,
+          "bytes": 4000,
+          "resultCount": 1,
+          "searchQueries": 0,
+          "pageReads": 1,
+          "estimatedCostUsd": "0.001",
+          "actualCostUsd": "0.001",
+          "possibleDuplicateCostUsd": "0"
+        }
+      ],
+      "totals": {
+        "modelCalls": 2,
+        "toolCalls": 2,
+        "searchQueries": 1,
+        "pageReads": 1,
+        "inputTokens": 800,
+        "outputTokens": 120,
+        "totalTokens": 920,
+        "reasoningTokens": 60,
+        "peakParallelTools": 1,
+        "elapsedMs": 2400,
+        "estimatedCostUsd": "0.006",
+        "actualCostUsd": null,
+        "possibleDuplicateCostUsd": "0"
+      }
+    },
+    "versions": {
+      "contract": "2.0",
+      "release": "release_s00",
+      "graph": "graph_v2",
+      "prompt": "prompt_writer_v1",
+      "model": "deepseek_v4_flash",
+      "provider": "deepseek",
+      "toolRegistry": "tools_v1",
+      "parser": "parser_v1",
+      "index": "index_v1",
+      "evaluator": "eval_v1"
+    },
+    "completedAt": "2026-07-26T12:03:00Z"
+  }
+}

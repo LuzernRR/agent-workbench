@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "context_estimate_1", "runId": "run_context_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T20:00:00Z", "type": "context.usage.updated", "kind": "context", "status": "completed",
+      "startedAt": "2026-07-26T20:00:00Z", "completedAt": "2026-07-26T20:00:00Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "modelLimitTokens": 1000, "estimatedInputTokens": 500, "actualInputTokens": null, "reservedOutputTokens": 200,
+        "safetyMarginTokens": 100, "remainingTokens": 200, "utilizationBasisPoints": 8000, "isEstimate": true, "contextRevision": 0,
+        "sections": {
+          "system": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" },
+          "history": { "originalTokens": 150, "retainedTokens": 150, "status": "retained" },
+          "projectMemory": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "retrieval": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "toolResults": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "attachments": { "originalTokens": 0, "retainedTokens": 0, "status": "retained" },
+          "userInput": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" }
+        },
+        "publicText": null, "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "context_actual_1", "runId": "run_context_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 2, "occurredAt": "2026-07-26T20:00:01Z", "type": "context.usage.updated", "kind": "context", "status": "completed",
+      "startedAt": "2026-07-26T20:00:01Z", "completedAt": "2026-07-26T20:00:01Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "modelLimitTokens": 1000, "estimatedInputTokens": 500, "actualInputTokens": 480, "reservedOutputTokens": 200,
+        "safetyMarginTokens": 100, "remainingTokens": 220, "utilizationBasisPoints": 7800, "isEstimate": false, "contextRevision": 0,
+        "sections": {
+          "system": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" },
+          "history": { "originalTokens": 150, "retainedTokens": 150, "status": "retained" },
+          "projectMemory": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "retrieval": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "toolResults": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "attachments": { "originalTokens": 0, "retainedTokens": 0, "status": "retained" },
+          "userInput": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" }
+        },
+        "publicText": null, "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "context_near_limit_1", "runId": "run_context_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 3, "occurredAt": "2026-07-26T20:00:02Z", "type": "context.usage.updated", "kind": "context", "status": "completed",
+      "startedAt": "2026-07-26T20:00:02Z", "completedAt": "2026-07-26T20:00:02Z", "inputRevision": 1, "refs": {}, "source": "fixture",
+      "payload": {
+        "modelLimitTokens": 1000, "estimatedInputTokens": 750, "actualInputTokens": null, "reservedOutputTokens": 150,
+        "safetyMarginTokens": 50, "remainingTokens": 50, "utilizationBasisPoints": 9500, "isEstimate": true, "contextRevision": 1,
+        "sections": {
+          "system": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" },
+          "history": { "originalTokens": 400, "retainedTokens": 250, "status": "truncated" },
+          "projectMemory": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" },
+          "retrieval": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" },
+          "toolResults": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "attachments": { "originalTokens": 50, "retainedTokens": 50, "status": "retained" },
+          "userInput": { "originalTokens": 100, "retainedTokens": 100, "status": "retained" }
+        },
+        "publicText": null, "reasonCodes": []
+      }
+    }
+  ]
+}

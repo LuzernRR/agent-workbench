@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "2.0", "eventId": "tool_unknown_raw_error", "runId": "run_tool_error_leak",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "seq": 1, "occurredAt": "2026-07-26T21:20:00Z", "type": "tool.unknown", "kind": "tool", "status": "unknown",
+  "startedAt": "2026-07-26T21:19:30Z", "completedAt": "2026-07-26T21:20:00Z", "inputRevision": 0,
+  "refs": { "toolCallId": "call_error_leak" }, "source": "fixture",
+  "payload": {
+    "toolCallId": "call_error_leak", "toolId": "external_publish", "operationRef": "operation_error_leak",
+    "display": {
+      "registryTitle": "外部发布", "category": "other", "parameterSummary": null, "resultSummary": null,
+      "errorMessage": "操作结果待核验", "resultCount": null, "resultType": null, "sourceTypes": [],
+      "durationMs": 30000, "costUsd": "0.01", "attemptStatus": "unknown", "approvalStatus": "approved", "errorCode": "OUTCOME_UNKNOWN"
+    },
+    "errorCode": "OUTCOME_UNKNOWN", "nextAction": "check_operation", "durationMs": 30000, "attempt": 1,
+    "usage": {
+      "toolId": "external_publish", "toolVersion": "tool_v1", "provider": "publisher", "pricingVersion": "pricing_2026_07",
+      "currency": "USD", "calls": 1, "attempts": 1, "units": 1, "bytes": 0, "resultCount": 0,
+      "searchQueries": 0, "pageReads": 0, "estimatedCostUsd": "0.01", "actualCostUsd": null, "possibleDuplicateCostUsd": "0.01"
+    },
+    "rawProviderError": { "message": "internal upstream stack" },
+    "publicText": null, "reasonCodes": ["tool_error"]
+  }
+}

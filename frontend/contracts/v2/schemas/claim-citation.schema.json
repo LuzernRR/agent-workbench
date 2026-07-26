@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/claim-citation.schema.json",
+  "title": "Claim and citation contracts v2",
+  "oneOf": [
+    { "$ref": "#/$defs/Claim" },
+    { "$ref": "#/$defs/Citation" }
+  ],
+  "$defs": {
+    "Claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "id", "scope", "text", "importance", "status", "confidence", "evidenceIds", "citationIds"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "id": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "importance": { "enum": ["critical", "supporting", "context"] },
+        "status": { "enum": ["supported", "unsupported", "conflicted"] },
+        "confidence": { "$ref": "common.schema.json#/$defs/confidence" },
+        "evidenceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
+        },
+        "citationIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
+        }
+      }
+    },
+    "Citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "citationId", "claimId", "evidenceId", "scope", "label", "title", "canonicalUrl", "artifactRef", "locator", "locatorVerified", "publishedAt", "retrievedAt", "sourceType"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "citationId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "claimId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+        "evidenceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "canonicalUrl": {
+          "oneOf": [
+            { "type": "string", "format": "uri", "pattern": "^https?://" },
+            { "type": "null" }
+          ]
+        },
+        "artifactRef": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ArtifactRef" },
+            { "type": "null" }
+          ]
+        },
+        "locator": { "$ref": "evidence.schema.json#/$defs/Locator" },
+        "locatorVerified": { "type": "boolean" },
+        "publishedAt": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "retrievedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "sourceType": { "$ref": "common.schema.json#/$defs/sourceType" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "sourceType": { "enum": ["private", "user_attachment"] } },
+            "required": ["sourceType"]
+          },
+          "then": {
+            "properties": {
+              "canonicalUrl": { "type": "null" },
+              "artifactRef": { "$ref": "common.schema.json#/$defs/ArtifactRef" }
+            }
+          },
+          "else": {
+            "properties": {
+              "canonicalUrl": { "type": "string", "format": "uri", "pattern": "^https?://" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

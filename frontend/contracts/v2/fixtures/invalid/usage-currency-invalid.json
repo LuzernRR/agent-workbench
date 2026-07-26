@@ -1,0 +1,1 @@
+{"provider":"deepseek","model":"deepseek_v4_flash","pricingVersion":"pricing_2026_07","currency":"CNY","calls":1,"inputTokens":100,"outputTokens":20,"totalTokens":120,"reasoningTokens":10,"cacheHitInputTokens":0,"cacheMissInputTokens":100,"estimatedCostUsd":"0.002","actualCostUsd":"0.002","possibleDuplicateCostUsd":"0"}

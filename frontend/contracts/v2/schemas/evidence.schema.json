@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/evidence.schema.json",
+  "title": "Evidence contracts v2",
+  "oneOf": [
+    { "$ref": "#/$defs/SourceRef" },
+    { "$ref": "#/$defs/SnapshotRef" },
+    { "$ref": "#/$defs/PassageRef" }
+  ],
+  "$defs": {
+    "AccessMark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "principalIds"],
+      "properties": {
+        "classification": { "enum": ["public", "internal", "confidential", "restricted"] },
+        "principalIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
+        }
+      }
+    },
+    "SourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "sourceId", "scope", "sourceType", "canonicalUrl", "artifactRef", "title", "publisher", "publishedAt", "retrievedAt", "contentHash", "trust", "access"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+        "sourceType": { "$ref": "common.schema.json#/$defs/sourceType" },
+        "canonicalUrl": {
+          "oneOf": [
+            { "type": "string", "format": "uri", "pattern": "^https?://" },
+            { "type": "null" }
+          ]
+        },
+        "artifactRef": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ArtifactRef" },
+            { "type": "null" }
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "publisher": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "publishedAt": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "retrievedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "contentHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "trust": { "enum": ["untrusted", "reviewed", "authoritative"] },
+        "access": { "$ref": "#/$defs/AccessMark" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "sourceType": { "enum": ["private", "user_attachment"] } },
+            "required": ["sourceType"]
+          },
+          "then": {
+            "properties": {
+              "canonicalUrl": { "type": "null" },
+              "artifactRef": { "$ref": "common.schema.json#/$defs/ArtifactRef" }
+            }
+          },
+          "else": {
+            "properties": {
+              "canonicalUrl": { "type": "string", "format": "uri", "pattern": "^https?://" }
+            }
+          }
+        }
+      ]
+    },
+    "SnapshotRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "snapshotId", "sourceId", "scope", "snapshotHash", "capturedAt", "storageRef", "mimeType"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "snapshotId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+        "snapshotHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "capturedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "storageRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "mimeType": { "type": "string", "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$" }
+      }
+    },
+    "Locator": {
+      "oneOf": [
+        { "$ref": "#/$defs/HtmlParagraphLocator" },
+        { "$ref": "#/$defs/TextQuoteLocator" },
+        { "$ref": "#/$defs/PdfPageLocator" },
+        { "$ref": "#/$defs/CodeLineLocator" },
+        { "$ref": "#/$defs/MediaTimecodeLocator" }
+      ]
+    },
+    "HtmlParagraphLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "paragraphIndex", "selector"],
+      "properties": {
+        "kind": { "const": "html_paragraph" },
+        "paragraphIndex": { "type": "integer", "minimum": 0 },
+        "selector": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 500 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "TextQuoteLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "exactQuote", "prefix", "suffix"],
+      "properties": {
+        "kind": { "const": "text_quote" },
+        "exactQuote": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "prefix": { "oneOf": [{ "type": "string", "maxLength": 500 }, { "type": "null" }] },
+        "suffix": { "oneOf": [{ "type": "string", "maxLength": 500 }, { "type": "null" }] }
+      }
+    },
+    "PdfPageLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "page"],
+      "properties": {
+        "kind": { "const": "pdf_page" },
+        "page": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "CodeLineLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "startLine", "endLine"],
+      "properties": {
+        "kind": { "const": "code_line" },
+        "path": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "MediaTimecodeLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "startMs", "endMs"],
+      "properties": {
+        "kind": { "const": "media_timecode" },
+        "startMs": { "type": "integer", "minimum": 0 },
+        "endMs": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "PassageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "evidenceId", "sourceId", "snapshotId", "scope", "locator", "quote", "passageHash", "quality", "trust", "access", "verified"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "evidenceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "sourceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "snapshotId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+        "locator": { "$ref": "#/$defs/Locator" },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "passageHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "quality": { "$ref": "common.schema.json#/$defs/confidence" },
+        "trust": { "enum": ["untrusted", "reviewed", "authoritative"] },
+        "access": { "$ref": "#/$defs/AccessMark" },
+        "verified": { "type": "boolean" }
+      }
+    }
+  }
+}

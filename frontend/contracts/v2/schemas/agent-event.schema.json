@@ -1,0 +1,742 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/agent-event.schema.json",
+  "title": "AgentEvent v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "eventId", "runId", "scope", "seq", "occurredAt", "type", "kind", "status", "startedAt", "completedAt", "inputRevision", "refs", "source", "payload"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "eventId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "runId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "occurredAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "kind": { "enum": ["run", "node", "plan", "tool", "approval", "clarification", "context", "budget", "artifact", "citation", "verification", "memory", "message", "guidance"] },
+    "status": { "enum": ["pending", "running", "waiting", "waiting_approval", "waiting_clarification", "completed", "failed", "cancelled", "unknown", "rejected", "superseded"] },
+    "startedAt": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "completedAt": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "inputRevision": { "type": "integer", "minimum": 0 },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "planRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "artifactId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "citationId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "messageId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "responseId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "checkpointRef": { "$ref": "common.schema.json#/$defs/opaqueId" }
+      }
+    },
+    "source": { "enum": ["live", "fixture"] },
+    "type": {
+      "enum": [
+        "run.created",
+        "run.status",
+        "node.started",
+        "node.completed",
+        "node.failed",
+        "plan.updated",
+        "tool.started",
+        "tool.updated",
+        "tool.completed",
+        "tool.failed",
+        "tool.unknown",
+        "approval.required",
+        "approval.decided",
+        "clarification.required",
+        "clarification.resumed",
+        "context.usage.updated",
+        "budget.updated",
+        "artifact.created",
+        "citation.created",
+        "verification.completed",
+        "memory.updated",
+        "message.started",
+        "message.completed",
+        "guidance.accepted",
+        "guidance.applied",
+        "guidance.superseded",
+        "guidance.rejected",
+        "guidance.failed",
+        "run.completed",
+        "run.cancelled",
+        "run.failed"
+      ]
+    },
+    "payload": {
+      "oneOf": [
+        { "$ref": "#/$defs/RunCreatedPayload" },
+        { "$ref": "#/$defs/RunStatusPayload" },
+        { "$ref": "#/$defs/NodeStartedPayload" },
+        { "$ref": "#/$defs/NodeCompletedPayload" },
+        { "$ref": "#/$defs/NodeFailedPayload" },
+        { "$ref": "#/$defs/PlanUpdatedPayload" },
+        { "$ref": "#/$defs/ToolStartedPayload" },
+        { "$ref": "#/$defs/ToolUpdatedPayload" },
+        { "$ref": "#/$defs/ToolCompletedPayload" },
+        { "$ref": "#/$defs/ToolFailedPayload" },
+        { "$ref": "#/$defs/ToolUnknownPayload" },
+        { "$ref": "#/$defs/ApprovalRequiredPayload" },
+        { "$ref": "#/$defs/ApprovalDecidedPayload" },
+        { "$ref": "#/$defs/ClarificationRequiredPayload" },
+        { "$ref": "#/$defs/ClarificationResumedPayload" },
+        { "$ref": "#/$defs/ContextUsageUpdatedPayload" },
+        { "$ref": "#/$defs/BudgetUpdatedPayload" },
+        { "$ref": "#/$defs/ArtifactCreatedPayload" },
+        { "$ref": "#/$defs/CitationCreatedPayload" },
+        { "$ref": "#/$defs/VerificationCompletedPayload" },
+        { "$ref": "#/$defs/MemoryUpdatedPayload" },
+        { "$ref": "#/$defs/MessageStartedPayload" },
+        { "$ref": "#/$defs/MessageCompletedPayload" },
+        { "$ref": "#/$defs/GuidanceAcceptedPayload" },
+        { "$ref": "#/$defs/GuidanceAppliedPayload" },
+        { "$ref": "#/$defs/GuidanceSupersededPayload" },
+        { "$ref": "#/$defs/GuidanceRejectedPayload" },
+        { "$ref": "#/$defs/GuidanceFailedPayload" },
+        { "$ref": "#/$defs/RunCompletedPayload" },
+        { "$ref": "#/$defs/RunCancelledPayload" },
+        { "$ref": "#/$defs/RunFailedPayload" }
+      ]
+    }
+  },
+  "oneOf": [
+    { "properties": { "type": { "const": "run.created" }, "kind": { "const": "run" }, "status": { "const": "pending" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/RunCreatedPayload" } } },
+    { "properties": { "type": { "const": "run.status" }, "kind": { "const": "run" }, "status": { "enum": ["running", "waiting", "waiting_approval", "waiting_clarification"] }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/RunStatusPayload" } } },
+    { "properties": { "type": { "const": "node.started" }, "kind": { "const": "node" }, "status": { "const": "running" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/NodeStartedPayload" } } },
+    { "properties": { "type": { "const": "node.completed" }, "kind": { "const": "node" }, "status": { "const": "completed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/NodeCompletedPayload" } } },
+    { "properties": { "type": { "const": "node.failed" }, "kind": { "const": "node" }, "status": { "const": "failed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/NodeFailedPayload" } } },
+    { "properties": { "type": { "const": "plan.updated" }, "kind": { "const": "plan" }, "status": { "const": "completed" }, "payload": { "$ref": "#/$defs/PlanUpdatedPayload" } } },
+    { "properties": { "type": { "const": "tool.started" }, "kind": { "const": "tool" }, "status": { "const": "running" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/ToolStartedPayload" } } },
+    { "properties": { "type": { "const": "tool.updated" }, "kind": { "const": "tool" }, "status": { "enum": ["running", "waiting_approval"] }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/ToolUpdatedPayload" } } },
+    { "properties": { "type": { "const": "tool.completed" }, "kind": { "const": "tool" }, "status": { "const": "completed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ToolCompletedPayload" } } },
+    { "properties": { "type": { "const": "tool.failed" }, "kind": { "const": "tool" }, "status": { "const": "failed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ToolFailedPayload" } } },
+    { "properties": { "type": { "const": "tool.unknown" }, "kind": { "const": "tool" }, "status": { "const": "unknown" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ToolUnknownPayload" } } },
+    { "properties": { "type": { "const": "approval.required" }, "kind": { "const": "approval" }, "status": { "const": "waiting_approval" }, "payload": { "$ref": "#/$defs/ApprovalRequiredPayload" } } },
+    { "properties": { "type": { "const": "approval.decided" }, "kind": { "const": "approval" }, "status": { "const": "completed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ApprovalDecidedPayload" } } },
+    { "properties": { "type": { "const": "clarification.required" }, "kind": { "const": "clarification" }, "status": { "const": "waiting_clarification" }, "payload": { "$ref": "#/$defs/ClarificationRequiredPayload" } } },
+    { "properties": { "type": { "const": "clarification.resumed" }, "kind": { "const": "clarification" }, "status": { "const": "completed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ClarificationResumedPayload" } } },
+    { "properties": { "type": { "const": "context.usage.updated" }, "kind": { "const": "context" }, "status": { "const": "completed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/ContextUsageUpdatedPayload" } } },
+    { "properties": { "type": { "const": "budget.updated" }, "kind": { "const": "budget" }, "status": { "const": "completed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/BudgetUpdatedPayload" } } },
+    { "properties": { "type": { "const": "artifact.created" }, "kind": { "const": "artifact" }, "status": { "const": "completed" }, "payload": { "$ref": "#/$defs/ArtifactCreatedPayload" } } },
+    { "properties": { "type": { "const": "citation.created" }, "kind": { "const": "citation" }, "status": { "const": "completed" }, "payload": { "$ref": "#/$defs/CitationCreatedPayload" } } },
+    { "properties": { "type": { "const": "verification.completed" }, "kind": { "const": "verification" }, "status": { "const": "completed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/VerificationCompletedPayload" } } },
+    { "properties": { "type": { "const": "memory.updated" }, "kind": { "const": "memory" }, "status": { "const": "completed" }, "payload": { "$ref": "#/$defs/MemoryUpdatedPayload" } } },
+    { "properties": { "type": { "const": "message.started" }, "kind": { "const": "message" }, "status": { "const": "running" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/MessageStartedPayload" } } },
+    { "properties": { "type": { "const": "message.completed" }, "kind": { "const": "message" }, "status": { "const": "completed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/MessageCompletedPayload" } } },
+    { "properties": { "type": { "const": "guidance.accepted" }, "kind": { "const": "guidance" }, "status": { "const": "pending" }, "completedAt": { "type": "null" }, "payload": { "$ref": "#/$defs/GuidanceAcceptedPayload" } } },
+    { "properties": { "type": { "const": "guidance.applied" }, "kind": { "const": "guidance" }, "status": { "const": "completed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/GuidanceAppliedPayload" } } },
+    { "properties": { "type": { "const": "guidance.superseded" }, "kind": { "const": "guidance" }, "status": { "const": "superseded" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/GuidanceSupersededPayload" } } },
+    { "properties": { "type": { "const": "guidance.rejected" }, "kind": { "const": "guidance" }, "status": { "const": "rejected" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/GuidanceRejectedPayload" } } },
+    { "properties": { "type": { "const": "guidance.failed" }, "kind": { "const": "guidance" }, "status": { "const": "failed" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/GuidanceFailedPayload" } } },
+    { "properties": { "type": { "const": "run.completed" }, "kind": { "const": "run" }, "status": { "const": "completed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/RunCompletedPayload" } } },
+    { "properties": { "type": { "const": "run.cancelled" }, "kind": { "const": "run" }, "status": { "const": "cancelled" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/RunCancelledPayload" } } },
+    { "properties": { "type": { "const": "run.failed" }, "kind": { "const": "run" }, "status": { "const": "failed" }, "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }, "payload": { "$ref": "#/$defs/RunFailedPayload" } } }
+  ],
+  "$defs": {
+    "RunCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId", "modelId", "graphVersion", "runRevision", "budget"],
+      "properties": {
+        "agentId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "modelId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "graphVersion": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "runRevision": { "type": "integer", "minimum": 0 },
+        "budget": { "$ref": "common.schema.json#/$defs/Budget" }
+      }
+    },
+    "RunStatusPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "stateRevision", "node", "publicText", "reasonCodes"],
+      "properties": {
+        "status": { "enum": ["queued", "running", "waiting"] },
+        "stateRevision": { "type": "integer", "minimum": 0 },
+        "node": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "publicText": { "$ref": "common.schema.json#/$defs/publicText" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "NodeStartedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "nodeExecutionId", "executionKind", "ordinal", "attemptNumber", "publicText", "reasonCodes"],
+      "properties": {
+        "node": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "nodeExecutionId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "executionKind": { "enum": ["model", "deterministic"] },
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "attemptNumber": { "type": "integer", "minimum": 1 },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "NodeCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "nodeExecutionId", "executionKind", "ordinal", "attemptNumber", "resultRef", "resultHash", "publicText", "reasonCodes", "durationMs", "modelUsage", "modelAttempt"],
+      "properties": {
+        "node": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "nodeExecutionId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "executionKind": { "enum": ["model", "deterministic"] },
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "attemptNumber": { "type": "integer", "minimum": 1 },
+        "resultRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "resultHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "publicText": { "$ref": "common.schema.json#/$defs/publicText" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "modelUsage": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ModelUsage" },
+            { "type": "null" }
+          ]
+        },
+        "modelAttempt": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ModelAttempt" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/NodeExecutionUsageInvariant" },
+        {
+          "if": {
+            "type": "object",
+            "properties": { "executionKind": { "const": "model" } },
+            "required": ["executionKind"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "publicText": { "$ref": "common.schema.json#/$defs/publicParagraph" }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "publicText": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "NodeFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "nodeExecutionId", "executionKind", "ordinal", "attemptNumber", "errorCode", "publicText", "reasonCodes", "durationMs", "retryable", "modelUsage", "modelAttempt"],
+      "properties": {
+        "node": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "nodeExecutionId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "executionKind": { "enum": ["model", "deterministic"] },
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "attemptNumber": { "type": "integer", "minimum": 1 },
+        "errorCode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "publicText": { "$ref": "common.schema.json#/$defs/publicText" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "retryable": { "type": "boolean" },
+        "modelUsage": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ModelUsage" },
+            { "type": "null" }
+          ]
+        },
+        "modelAttempt": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/ModelAttempt" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [{ "$ref": "#/$defs/NodeExecutionUsageInvariant" }]
+    },
+    "NodeExecutionUsageInvariant": {
+      "type": "object",
+      "if": { "type": "object", "properties": { "executionKind": { "const": "model" } }, "required": ["executionKind"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "modelUsage": { "$ref": "common.schema.json#/$defs/ModelUsage" },
+          "modelAttempt": { "$ref": "common.schema.json#/$defs/ModelAttempt" }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "modelUsage": { "type": "null" },
+          "modelAttempt": { "type": "null" }
+        }
+      }
+    },
+    "PlanUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planRef", "revision", "publicText", "reasonCodes"],
+      "properties": {
+        "planRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "publicText": { "$ref": "common.schema.json#/$defs/publicText" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolStartedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "toolId", "planStepId", "inputHash", "display", "attempt", "publicText", "reasonCodes"],
+      "properties": {
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "planStepId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "inputHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "display": { "$ref": "#/$defs/ToolDisplay" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "toolId", "phase", "display", "attempt", "publicText", "reasonCodes"],
+      "properties": {
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "phase": { "enum": ["progress", "retrying", "waiting_approval"] },
+        "display": { "$ref": "#/$defs/ToolDisplay" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "toolId", "resultRef", "outputHash", "display", "resultCount", "artifactCount", "evidenceCount", "durationMs", "attempt", "usage", "publicText", "reasonCodes"],
+      "properties": {
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "resultRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "outputHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "display": { "$ref": "#/$defs/ToolDisplay" },
+        "resultCount": { "type": "integer", "minimum": 0 },
+        "artifactCount": { "type": "integer", "minimum": 0 },
+        "evidenceCount": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "usage": { "$ref": "common.schema.json#/$defs/ToolUsage" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "toolId", "display", "errorCode", "retryable", "durationMs", "attempt", "usage", "publicText", "reasonCodes"],
+      "properties": {
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "display": { "$ref": "#/$defs/ToolDisplay" },
+        "errorCode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "retryable": { "type": "boolean" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "usage": { "$ref": "common.schema.json#/$defs/ToolUsage" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolUnknownPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolCallId", "toolId", "operationRef", "display", "errorCode", "nextAction", "durationMs", "attempt", "usage", "publicText", "reasonCodes"],
+      "properties": {
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "operationRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "display": { "$ref": "#/$defs/ToolDisplay" },
+        "errorCode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "nextAction": { "const": "check_operation" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "usage": {
+          "allOf": [
+            { "$ref": "common.schema.json#/$defs/ToolUsage" },
+            { "type": "object", "properties": { "actualCostUsd": { "type": "null" } } }
+          ]
+        },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ToolDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registryTitle", "category", "parameterSummary", "resultSummary", "errorMessage", "resultCount", "resultType", "sourceTypes", "durationMs", "costUsd", "attemptStatus", "approvalStatus", "errorCode"],
+      "properties": {
+        "registryTitle": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "category": { "enum": ["search", "fetch", "retrieve", "transform", "verify", "other"] },
+        "parameterSummary": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 300 }, { "type": "null" }] },
+        "resultSummary": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 300 }, { "type": "null" }] },
+        "errorMessage": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] },
+        "resultCount": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "resultType": { "oneOf": [{ "enum": ["links", "pages", "passages", "records", "artifacts", "none"] }, { "type": "null" }] },
+        "sourceTypes": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/sourceType" } },
+        "durationMs": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+        "costUsd": { "oneOf": [{ "$ref": "common.schema.json#/$defs/decimalUsd" }, { "type": "null" }] },
+        "attemptStatus": { "enum": ["pending", "confirmed", "unknown"] },
+        "approvalStatus": { "enum": ["none", "required", "approved", "denied"] },
+        "errorCode": { "oneOf": [{ "$ref": "common.schema.json#/$defs/opaqueId" }, { "type": "null" }] }
+      }
+    },
+    "ApprovalRequiredPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvalId", "toolCallId", "toolName", "actionSummary", "permissionSummary", "expiresAt", "publicText", "reasonCodes"],
+      "properties": {
+        "approvalId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actionSummary": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "permissionSummary": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "expiresAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ApprovalDecidedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvalId", "toolCallId", "decision", "decidedBy", "decidedAt", "publicText", "reasonCodes"],
+      "properties": {
+        "approvalId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "toolCallId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "decision": { "enum": ["allow_once", "deny", "edit"] },
+        "decidedBy": { "$ref": "common.schema.json#/$defs/Actor" },
+        "decidedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ClarificationRequiredPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clarificationId", "question", "checkpointRef", "stateRevision", "expiresAt", "publicText", "reasonCodes"],
+      "properties": {
+        "clarificationId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "checkpointRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "stateRevision": { "type": "integer", "minimum": 0 },
+        "expiresAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ClarificationResumedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clarificationId", "checkpointRef", "responseMessageRef", "responseHash", "resumedAtStateRevision", "idempotencyKey", "publicText", "reasonCodes"],
+      "properties": {
+        "clarificationId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "checkpointRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "responseMessageRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "responseHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "resumedAtStateRevision": { "type": "integer", "minimum": 0 },
+        "idempotencyKey": { "$ref": "common.schema.json#/$defs/idempotencyKey" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ContextSectionUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["originalTokens", "retainedTokens", "status"],
+      "properties": {
+        "originalTokens": { "type": "integer", "minimum": 0 },
+        "retainedTokens": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["retained", "truncated", "omitted"] }
+      }
+    },
+    "ContextUsageUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelLimitTokens",
+        "estimatedInputTokens",
+        "actualInputTokens",
+        "reservedOutputTokens",
+        "safetyMarginTokens",
+        "remainingTokens",
+        "utilizationBasisPoints",
+        "isEstimate",
+        "contextRevision",
+        "sections",
+        "publicText",
+        "reasonCodes"
+      ],
+      "properties": {
+        "modelLimitTokens": { "type": "integer", "minimum": 1 },
+        "estimatedInputTokens": { "type": "integer", "minimum": 0 },
+        "actualInputTokens": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "reservedOutputTokens": { "type": "integer", "minimum": 0 },
+        "safetyMarginTokens": { "type": "integer", "minimum": 0 },
+        "remainingTokens": { "type": "integer", "minimum": 0 },
+        "utilizationBasisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "isEstimate": { "type": "boolean" },
+        "contextRevision": { "type": "integer", "minimum": 0 },
+        "sections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["system", "history", "projectMemory", "retrieval", "toolResults", "attachments", "userInput"],
+          "properties": {
+            "system": { "$ref": "#/$defs/ContextSectionUsage" },
+            "history": { "$ref": "#/$defs/ContextSectionUsage" },
+            "projectMemory": { "$ref": "#/$defs/ContextSectionUsage" },
+            "retrieval": { "$ref": "#/$defs/ContextSectionUsage" },
+            "toolResults": { "$ref": "#/$defs/ContextSectionUsage" },
+            "attachments": { "$ref": "#/$defs/ContextSectionUsage" },
+            "userInput": { "$ref": "#/$defs/ContextSectionUsage" }
+          }
+        },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "BudgetUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["budgetRevision", "pricingVersion", "budget", "usage", "possibleDuplicateCostUsd", "exhausted", "publicText", "reasonCodes"],
+      "properties": {
+        "budgetRevision": { "type": "integer", "minimum": 0 },
+        "pricingVersion": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "budget": { "$ref": "common.schema.json#/$defs/Budget" },
+        "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+        "possibleDuplicateCostUsd": { "$ref": "common.schema.json#/$defs/decimalUsd" },
+        "exhausted": { "type": "boolean" },
+        "publicText": { "type": "null" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "ArtifactCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "artifact": { "$ref": "common.schema.json#/$defs/ArtifactRef" }
+      }
+    },
+    "CitationCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["citationId", "claimId", "evidenceId", "locatorVerified"],
+      "properties": {
+        "citationId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "claimId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "evidenceId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "locatorVerified": { "type": "boolean" }
+      }
+    },
+    "VerificationCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "unsupportedClaimIds", "verifiedCitationIds", "draftRevision", "publicText", "reasonCodes"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "unsupportedClaimIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "verifiedCitationIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "draftRevision": { "type": "integer", "minimum": 0 },
+        "publicText": { "$ref": "common.schema.json#/$defs/publicText" },
+        "reasonCodes": { "$ref": "common.schema.json#/$defs/reasonCodes" }
+      }
+    },
+    "MemoryUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memoryRef", "sourceResponseId", "exchangeVerified"],
+      "properties": {
+        "memoryRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "sourceResponseId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "exchangeVerified": { "const": true }
+      }
+    },
+    "MessageStartedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageId", "role", "steeringRevision"],
+      "properties": {
+        "messageId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "role": { "enum": ["user", "assistant"] },
+        "steeringRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "MessageCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageId", "role", "contentRef", "contentHash", "responseId", "steeringRevision", "verified"],
+      "properties": {
+        "messageId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "role": { "enum": ["user", "assistant"] },
+        "contentRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "contentHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "responseId": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        },
+        "steeringRevision": { "type": "integer", "minimum": 0 },
+        "verified": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "assistant" } }, "required": ["role"] },
+        "then": {
+          "properties": {
+            "verified": { "const": true },
+            "responseId": { "$ref": "common.schema.json#/$defs/opaqueId" }
+          }
+        },
+        "else": { "properties": { "responseId": { "type": "null" } } }
+        }
+      ]
+    },
+    "GuidanceAcceptedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commandId", "commandSeq", "expectedSteeringRevision", "acceptedAtStateRevision", "currentSteeringRevision", "pendingApply", "idempotencyKey"],
+      "properties": {
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandSeq": { "type": "integer", "minimum": 1 },
+        "expectedSteeringRevision": { "type": "integer", "minimum": 0 },
+        "acceptedAtStateRevision": { "type": "integer", "minimum": 0 },
+        "currentSteeringRevision": { "type": "integer", "minimum": 0 },
+        "pendingApply": { "const": true },
+        "idempotencyKey": { "$ref": "common.schema.json#/$defs/idempotencyKey" }
+      }
+    },
+    "GuidanceAppliedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchId", "commandId", "commandSeq", "previousSteeringRevision", "newSteeringRevision", "acceptedAtStateRevision", "appliedAtStateRevision", "appliedAtNode", "checkpointRef", "impact", "invalidatedPlanRefs", "invalidatedDraftRefs", "invalidatedVerificationRefs", "invalidatedArtifactRefs", "newPlanRef"],
+      "properties": {
+        "batchId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandSeq": { "type": "integer", "minimum": 1 },
+        "previousSteeringRevision": { "type": "integer", "minimum": 0 },
+        "newSteeringRevision": { "type": "integer", "minimum": 1 },
+        "acceptedAtStateRevision": { "type": "integer", "minimum": 0 },
+        "appliedAtStateRevision": { "type": "integer", "minimum": 0 },
+        "appliedAtNode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "checkpointRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "impact": { "enum": ["format_only", "replan", "permission_change", "cancel_requested"] },
+        "invalidatedPlanRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "invalidatedDraftRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "invalidatedVerificationRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "invalidatedArtifactRefs": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "newPlanRef": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "GuidanceSupersededPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchId", "commandId", "commandSeq", "previousSteeringRevision", "newSteeringRevision", "supersededByCommandId", "reason"],
+      "properties": {
+        "batchId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandSeq": { "type": "integer", "minimum": 1 },
+        "previousSteeringRevision": { "type": "integer", "minimum": 0 },
+        "newSteeringRevision": { "type": "integer", "minimum": 1 },
+        "supersededByCommandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "reason": { "enum": ["last_write_wins", "permission_precedence", "cancel_precedence", "terminal"] }
+      }
+    },
+    "GuidanceRejectedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commandId", "commandSeq", "code", "actualSteeringRevision"],
+      "properties": {
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandSeq": { "type": "integer", "minimum": 1 },
+        "code": { "enum": ["COMMAND_REVISION_CONFLICT", "COMMAND_AFTER_TERMINAL", "COMMAND_SCOPE_MISMATCH"] },
+        "actualSteeringRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "GuidanceFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commandId", "commandSeq", "errorCode", "errorMessage", "retryable"],
+      "properties": {
+        "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "commandSeq": { "type": "integer", "minimum": 1 },
+        "errorCode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "errorMessage": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "RunCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["responseId", "responseStatus", "stopReason", "usage", "budget"],
+      "properties": {
+        "responseId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "responseStatus": { "enum": ["completed", "partial"] },
+        "stopReason": { "$ref": "common.schema.json#/$defs/stopCode" },
+        "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+        "budget": { "$ref": "common.schema.json#/$defs/Budget" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "responseStatus": { "const": "completed" } }, "required": ["responseStatus"] },
+          "then": { "properties": { "stopReason": { "enum": ["sufficient_evidence", "no_search_needed"] } } },
+          "else": { "properties": { "stopReason": { "enum": ["deadline_exceeded", "budget_exhausted", "no_accessible_sources", "low_marginal_gain", "policy_denied", "conflicting_evidence"] } } }
+        }
+      ]
+    },
+    "RunCancelledPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stopReason", "usage", "budget"],
+      "properties": {
+        "stopReason": { "const": "user_cancelled" },
+        "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+        "budget": { "$ref": "common.schema.json#/$defs/Budget" }
+      }
+    },
+    "RunFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stopReason", "errorCode", "usage", "budget"],
+      "properties": {
+        "stopReason": { "enum": ["deadline_exceeded", "budget_exhausted", "no_accessible_sources", "low_marginal_gain", "policy_denied", "conflicting_evidence", "failed"] },
+        "errorCode": { "$ref": "common.schema.json#/$defs/opaqueId" },
+        "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+        "budget": { "$ref": "common.schema.json#/$defs/Budget" }
+      }
+    }
+  }
+}

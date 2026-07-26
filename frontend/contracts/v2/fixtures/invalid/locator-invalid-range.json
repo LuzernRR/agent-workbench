@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "sources": [
+    { "schemaVersion": "2.0", "sourceId": "source_code", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "sourceType": "code", "canonicalUrl": "https://github.com/example/repo", "artifactRef": null, "title": "示例代码", "publisher": "GitHub", "publishedAt": null, "retrievedAt": "2026-07-26T19:30:00Z", "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "trust": "reviewed", "access": { "classification": "public", "principalIds": [] } }
+  ],
+  "snapshots": [
+    { "schemaVersion": "2.0", "snapshotId": "snapshot_code", "sourceId": "source_code", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "snapshotHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "capturedAt": "2026-07-26T19:30:01Z", "storageRef": "snapshot_code_ref", "mimeType": "text/plain" }
+  ],
+  "evidence": [
+    { "schemaVersion": "2.0", "evidenceId": "evidence_code", "sourceId": "source_code", "snapshotId": "snapshot_code", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "locator": { "kind": "code_line", "path": "src/app.ts", "startLine": 20, "endLine": 10 }, "quote": "export const value = 1;", "passageHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "quality": 0.9, "trust": "reviewed", "access": { "classification": "public", "principalIds": [] }, "verified": true }
+  ]
+}

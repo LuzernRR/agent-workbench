@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "node_load_started", "runId": "run_nodes_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T20:30:00Z", "type": "node.started", "kind": "node", "status": "running",
+      "startedAt": "2026-07-26T20:30:00Z", "completedAt": null, "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "node": "load_context", "nodeExecutionId": "node_execution_load_1", "executionKind": "deterministic",
+        "ordinal": 1, "attemptNumber": 1, "publicText": null, "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "node_load_completed", "runId": "run_nodes_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 2, "occurredAt": "2026-07-26T20:30:00.100Z", "type": "node.completed", "kind": "node", "status": "completed",
+      "startedAt": "2026-07-26T20:30:00Z", "completedAt": "2026-07-26T20:30:00.100Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "node": "load_context", "nodeExecutionId": "node_execution_load_1", "executionKind": "deterministic",
+        "ordinal": 1, "attemptNumber": 1, "resultRef": "context_ref_1",
+        "resultHash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "publicText": null, "reasonCodes": [], "durationMs": 100, "modelUsage": null, "modelAttempt": null
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "node_classify_started", "runId": "run_nodes_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 3, "occurredAt": "2026-07-26T20:30:01Z", "type": "node.started", "kind": "node", "status": "running",
+      "startedAt": "2026-07-26T20:30:01Z", "completedAt": null, "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "node": "classify_intent", "nodeExecutionId": "node_execution_classify_1", "executionKind": "model",
+        "ordinal": 2, "attemptNumber": 1, "publicText": null, "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "node_classify_completed", "runId": "run_nodes_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 4, "occurredAt": "2026-07-26T20:30:02Z", "type": "node.completed", "kind": "node", "status": "completed",
+      "startedAt": "2026-07-26T20:30:01Z", "completedAt": "2026-07-26T20:30:02Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "node": "classify_intent", "nodeExecutionId": "node_execution_classify_1", "executionKind": "model",
+        "ordinal": 2, "attemptNumber": 1, "resultRef": "intent_ref_1",
+        "resultHash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "publicText": "该问题可直接回答，不需要外部搜索。", "reasonCodes": ["direct_answer"], "durationMs": 1000,
+        "modelUsage": {
+          "provider": "deepseek", "model": "deepseek_v4_flash", "pricingVersion": "pricing_2026_07", "currency": "USD",
+          "calls": 1, "inputTokens": 100, "outputTokens": 20, "totalTokens": 120, "reasoningTokens": 10,
+          "cacheHitInputTokens": 0, "cacheMissInputTokens": 100,
+          "estimatedCostUsd": "0.001", "actualCostUsd": "0.001", "possibleDuplicateCostUsd": "0"
+        },
+        "modelAttempt": { "attemptId": "attempt_classify_1", "ordinal": 1, "status": "confirmed", "possibleDuplicateCostUsd": null }
+      }
+    }
+  ]
+}

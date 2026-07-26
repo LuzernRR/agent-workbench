@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "toolSpecs": [
+    {
+      "schemaVersion": "2.0", "toolId": "external_publish", "version": "tool_v1", "description": "向外部系统发布内容。",
+      "capabilities": ["content.publish"], "sourceTypes": [], "permissions": ["external.write"], "approval": "always",
+      "effect": "external_side_effect", "reversibility": "irreversible", "cost": { "estimatedUsd": "0.01", "unit": "call" },
+      "idempotency": "none", "timeoutMs": 30000,
+      "parametersSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": {} },
+      "resultSchema": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": {} },
+      "strictModeBeta": false
+    }
+  ],
+  "toolCalls": [
+    {
+      "schemaVersion": "2.0", "toolCallId": "call_unknown_zero", "operationRef": "operation_unknown_zero", "toolId": "external_publish",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "arguments": {}, "idempotencyKey": null, "createdAt": "2026-07-26T21:10:00Z"
+    }
+  ],
+  "toolResults": [
+    {
+      "schemaVersion": "2.0", "toolCallId": "call_unknown_zero", "operationRef": "operation_unknown_zero", "toolId": "external_publish",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "status": "unknown", "outputRef": null, "artifactIds": [], "evidenceIds": [], "summary": "结果未知",
+      "error": {
+        "code": "OUTCOME_UNKNOWN", "category": "outcome_unknown", "message": "结果未知。", "fieldPath": null, "expected": null,
+        "retryable": false, "retryAfterMs": null, "nextAction": "check_operation", "providerStatus": null
+      },
+      "attempt": 1,
+      "usage": {
+        "toolId": "external_publish", "toolVersion": "tool_v1", "provider": "publisher", "pricingVersion": "pricing_2026_07",
+        "currency": "USD", "calls": 1, "attempts": 1, "units": 1, "bytes": 0, "resultCount": 0, "searchQueries": 0, "pageReads": 0,
+        "estimatedCostUsd": "0.01", "actualCostUsd": null, "possibleDuplicateCostUsd": "0"
+      },
+      "completedAt": "2026-07-26T21:10:30Z"
+    }
+  ]
+}

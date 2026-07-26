@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "plan": {
+    "schemaVersion": "2.0",
+    "planId": "plan_duplicate",
+    "briefId": "brief_1",
+    "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+    "revision": 1,
+    "steps": [
+      { "id": "step_same", "facet": "来源", "objective": "查找来源", "queries": ["A"], "preferredTools": ["web_search"], "dependsOn": [], "evidenceNeeded": 1, "status": "todo" },
+      { "id": "step_same", "facet": "核验", "objective": "核验来源", "queries": [], "preferredTools": [], "dependsOn": [], "evidenceNeeded": 1, "status": "todo" }
+    ],
+    "stopConditions": ["获得证据"],
+    "reasonCodes": ["search_required"],
+    "createdAt": "2026-07-26T17:10:00Z",
+    "versions": { "contract": "2.0", "release": "release_s00", "graph": "graph_v2", "prompt": "prompt_plan_v1", "model": "deepseek_v4_flash", "provider": "deepseek", "toolRegistry": "tools_v1", "parser": "parser_v1", "index": null, "evaluator": null }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "code": "RATE_LIMITED",
+  "category": "rate_limited",
+  "message": "搜索服务暂时限流。",
+  "fieldPath": null,
+  "expected": null,
+  "retryable": true,
+  "retryAfterMs": 1200,
+  "nextAction": "retry_wait",
+  "providerStatus": 429
+}

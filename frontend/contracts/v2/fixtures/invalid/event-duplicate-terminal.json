@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "event_terminal_1", "runId": "run_duplicate_terminal", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T18:40:00Z", "type": "run.cancelled", "kind": "run", "status": "cancelled", "startedAt": "2026-07-26T18:39:00Z", "completedAt": "2026-07-26T18:40:00Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "stopReason": "user_cancelled",
+        "usage": { "currency": "USD", "modelBreakdown": [], "toolBreakdown": [], "totals": { "modelCalls": 0, "toolCalls": 0, "searchQueries": 0, "pageReads": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "reasoningTokens": 0, "peakParallelTools": 0, "elapsedMs": 0, "estimatedCostUsd": "0", "actualCostUsd": "0", "possibleDuplicateCostUsd": "0" } },
+        "budget": { "deadlineAt": "2026-07-26T18:41:00Z", "modelCalls": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "inputTokens": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "outputTokens": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "costUsd": { "max": "0", "used": "0", "reserved": "0", "remaining": "0" }, "planRevisions": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "searchQueries": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "pageReads": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "toolCalls": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "parallelTools": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "wallTimeMs": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "exhausted": false }
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "event_terminal_2", "runId": "run_duplicate_terminal", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 2, "occurredAt": "2026-07-26T18:40:01Z", "type": "run.cancelled", "kind": "run", "status": "cancelled", "startedAt": "2026-07-26T18:39:00Z", "completedAt": "2026-07-26T18:40:01Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "stopReason": "user_cancelled",
+        "usage": { "currency": "USD", "modelBreakdown": [], "toolBreakdown": [], "totals": { "modelCalls": 0, "toolCalls": 0, "searchQueries": 0, "pageReads": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "reasoningTokens": 0, "peakParallelTools": 0, "elapsedMs": 0, "estimatedCostUsd": "0", "actualCostUsd": "0", "possibleDuplicateCostUsd": "0" } },
+        "budget": { "deadlineAt": "2026-07-26T18:41:00Z", "modelCalls": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "inputTokens": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "outputTokens": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "costUsd": { "max": "0", "used": "0", "reserved": "0", "remaining": "0" }, "planRevisions": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "searchQueries": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "pageReads": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "toolCalls": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "parallelTools": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "wallTimeMs": { "max": 1, "used": 0, "reserved": 0, "remaining": 1 }, "exhausted": false }
+      }
+    }
+  ]
+}

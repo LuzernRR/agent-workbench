@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "queueEvents": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "queue_lifecycle_1",
+      "threadId": "thread_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "queueCursor": 1,
+      "queueRevision": 1,
+      "occurredAt": "2026-07-26T16:00:00Z",
+      "type": "queue.updated",
+      "source": "fixture",
+      "payload": {
+        "transition": "enqueued",
+        "expectedPreviousRevision": 0,
+        "trigger": null,
+        "entries": [
+          {
+            "schemaVersion": "2.0",
+            "queueEntryId": "queue_entry_1",
+            "threadId": "thread_1",
+            "messageRef": "message_queue_1",
+            "runId": null,
+            "position": 0,
+            "queueRevision": 1,
+            "status": "queued",
+            "createdAt": "2026-07-26T16:00:00Z",
+            "startedAt": null,
+            "idempotencyKey": "idem_queue_entry_1",
+            "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+            "publicDisplay": { "messagePreview": "第一条排队任务", "attachmentCount": 0 }
+          }
+        ],
+        "activeRunIds": [],
+        "autoStartNext": false,
+        "paused": false,
+        "pauseReason": null
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "queue_lifecycle_2",
+      "threadId": "thread_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "queueCursor": 2,
+      "queueRevision": 2,
+      "occurredAt": "2026-07-26T16:00:01Z",
+      "type": "queue.updated",
+      "source": "fixture",
+      "payload": {
+        "transition": "edited",
+        "expectedPreviousRevision": 1,
+        "trigger": null,
+        "entries": [
+          {
+            "schemaVersion": "2.0",
+            "queueEntryId": "queue_entry_1",
+            "threadId": "thread_1",
+            "messageRef": "message_queue_1_edited",
+            "runId": null,
+            "position": 0,
+            "queueRevision": 2,
+            "status": "queued",
+            "createdAt": "2026-07-26T16:00:00Z",
+            "startedAt": null,
+            "idempotencyKey": "idem_queue_entry_1",
+            "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+            "publicDisplay": { "messagePreview": "编辑后的排队任务", "attachmentCount": 0 }
+          }
+        ],
+        "activeRunIds": [],
+        "autoStartNext": false,
+        "paused": false,
+        "pauseReason": null
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "queue_lifecycle_3",
+      "threadId": "thread_1",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "queueCursor": 3,
+      "queueRevision": 3,
+      "occurredAt": "2026-07-26T16:00:02Z",
+      "type": "queue.updated",
+      "source": "fixture",
+      "payload": {
+        "transition": "cancelled",
+        "expectedPreviousRevision": 2,
+        "trigger": null,
+        "entries": [],
+        "activeRunIds": [],
+        "autoStartNext": false,
+        "paused": false,
+        "pauseReason": null
+      }
+    }
+  ]
+}

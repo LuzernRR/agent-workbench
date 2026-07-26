@@ -1,0 +1,11 @@
+{
+  "code": "TOOL_INPUT_INVALID",
+  "category": "invalid_arguments",
+  "message": "参数不合法。",
+  "fieldPath": null,
+  "expected": null,
+  "retryable": true,
+  "retryAfterMs": null,
+  "nextAction": "retry_same",
+  "providerStatus": 422
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/thread-queue-event.schema.json",
+  "title": "ThreadQueueEvent v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "eventId", "threadId", "scope", "queueCursor", "queueRevision", "occurredAt", "type", "source", "payload"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "eventId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "threadId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "queueCursor": { "type": "integer", "minimum": 1 },
+    "queueRevision": { "type": "integer", "minimum": 0 },
+    "occurredAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "type": { "const": "queue.updated" },
+    "source": { "enum": ["live", "fixture"] },
+    "payload": { "$ref": "#/$defs/QueueUpdatedPayload" }
+  },
+  "$defs": {
+    "QueueUpdatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transition", "expectedPreviousRevision", "trigger", "entries", "activeRunIds", "autoStartNext", "paused", "pauseReason"],
+      "properties": {
+        "transition": { "enum": ["enqueued", "edited", "cancelled", "dequeued", "paused", "resumed", "snapshot"] },
+        "expectedPreviousRevision": { "type": "integer", "minimum": 0 },
+        "trigger": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["runId", "terminalStatus"],
+              "properties": {
+                "runId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+                "terminalStatus": { "enum": ["completed", "cancelled", "failed"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "entries": { "type": "array", "items": { "$ref": "run-queue-entry.schema.json" } },
+        "activeRunIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/opaqueId" } },
+        "autoStartNext": { "type": "boolean" },
+        "paused": { "type": "boolean" },
+        "pauseReason": {
+          "oneOf": [
+            { "enum": ["stopped", "failed", "manual", "revision_conflict"] },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "paused": { "const": true } }, "required": ["paused"] },
+          "then": { "properties": { "pauseReason": { "enum": ["stopped", "failed", "manual", "revision_conflict"] } } },
+          "else": { "properties": { "pauseReason": { "type": "null" } } }
+        }
+      ]
+    }
+  }
+}

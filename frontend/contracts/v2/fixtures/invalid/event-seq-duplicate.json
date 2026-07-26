@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "event_seq_1", "runId": "run_seq", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T18:20:00Z", "type": "message.started", "kind": "message", "status": "running", "startedAt": "2026-07-26T18:20:00Z", "completedAt": null, "inputRevision": 0, "refs": { "messageId": "message_seq_1" }, "source": "fixture",
+      "payload": { "messageId": "message_seq_1", "role": "user", "steeringRevision": 0 }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "event_seq_2", "runId": "run_seq", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T18:20:01Z", "type": "message.started", "kind": "message", "status": "running", "startedAt": "2026-07-26T18:20:01Z", "completedAt": null, "inputRevision": 0, "refs": { "messageId": "message_seq_2" }, "source": "fixture",
+      "payload": { "messageId": "message_seq_2", "role": "user", "steeringRevision": 0 }
+    }
+  ]
+}

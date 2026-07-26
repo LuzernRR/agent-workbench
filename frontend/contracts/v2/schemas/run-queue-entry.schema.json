@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/run-queue-entry.schema.json",
+  "title": "RunQueueEntry v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "queueEntryId",
+    "threadId",
+    "messageRef",
+    "runId",
+    "position",
+    "queueRevision",
+    "status",
+    "createdAt",
+    "startedAt",
+    "idempotencyKey",
+    "scope",
+    "publicDisplay"
+  ],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "queueEntryId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "threadId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "messageRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "runId": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/opaqueId" },
+        { "type": "null" }
+      ]
+    },
+    "position": { "type": "integer", "minimum": 0 },
+    "queueRevision": { "type": "integer", "minimum": 0 },
+    "status": { "enum": ["queued", "starting", "running", "cancelled", "failed", "completed"] },
+    "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "startedAt": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "idempotencyKey": { "$ref": "common.schema.json#/$defs/idempotencyKey" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "publicDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messagePreview", "attachmentCount"],
+      "properties": {
+        "messagePreview": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 200 }, { "type": "null" }] },
+        "attachmentCount": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["queued", "cancelled"] } }, "required": ["status"] },
+      "then": { "properties": { "runId": { "type": "null" } } },
+      "else": { "properties": { "runId": { "$ref": "common.schema.json#/$defs/opaqueId" } } }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["starting", "running", "failed", "completed"] } }, "required": ["status"] },
+      "then": { "properties": { "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" } } }
+    }
+  ]
+}

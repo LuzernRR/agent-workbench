@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "2.0",
+  "commandId": "command_bad_date",
+  "runId": "run_1",
+  "threadId": "thread_1",
+  "expectedSteeringRevision": 0,
+  "kind": "steer",
+  "mode": "at_next_checkpoint",
+  "content": "只看官方文档。",
+  "attachmentRefs": [],
+  "createdAt": "not-a-date",
+  "idempotencyKey": "idem_command_bad_date",
+  "contentHash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "actor": { "actorId": "actor_1", "actorType": "user" },
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }
+}

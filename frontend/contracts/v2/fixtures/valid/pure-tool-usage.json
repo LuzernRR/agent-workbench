@@ -1,0 +1,81 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "response": {
+    "schemaVersion": "2.0",
+    "responseId": "response_tool_only",
+    "runId": "run_tool_only",
+    "scope": {
+      "tenantId": "tenant_1",
+      "actorId": "actor_1",
+      "visitorId": "visitor_1",
+      "projectId": "project_1",
+      "threadId": "thread_1"
+    },
+    "status": "completed",
+    "answerMarkdown": "已有结构化工具结果可直接返回。",
+    "claims": [],
+    "citations": [],
+    "limitations": [],
+    "conflicts": [],
+    "stopReason": "sufficient_evidence",
+    "artifacts": [],
+    "usage": {
+      "currency": "USD",
+      "modelBreakdown": [],
+      "toolBreakdown": [
+        {
+          "toolId": "private_lookup",
+          "toolVersion": "tool_v2",
+          "provider": "internal",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "attempts": 1,
+          "units": 2,
+          "bytes": 2048,
+          "resultCount": 2,
+          "searchQueries": 0,
+          "pageReads": 0,
+          "estimatedCostUsd": "0.003",
+          "actualCostUsd": "0.0025",
+          "possibleDuplicateCostUsd": "0"
+        }
+      ],
+      "totals": {
+        "modelCalls": 0,
+        "toolCalls": 1,
+        "searchQueries": 0,
+        "pageReads": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "reasoningTokens": 0,
+        "peakParallelTools": 1,
+        "elapsedMs": 300,
+        "estimatedCostUsd": "0.003",
+        "actualCostUsd": "0.0025",
+        "possibleDuplicateCostUsd": "0"
+      }
+    },
+    "versions": {
+      "contract": "2.0",
+      "release": "release_s00",
+      "graph": "graph_v2",
+      "prompt": "prompt_none",
+      "model": "model_none",
+      "provider": "provider_none",
+      "toolRegistry": "tools_v2",
+      "parser": "parser_v2",
+      "index": "index_v2",
+      "evaluator": "eval_v1"
+    },
+    "completedAt": "2026-07-26T13:40:00Z"
+  }
+}

@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/common.schema.json",
+  "title": "Search Agent v2 common definitions",
+  "$defs": {
+    "schemaVersion": {
+      "const": "2.0"
+    },
+    "opaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "decimalUsd": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,6})?$"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "languageTag": {
+      "type": "string",
+      "pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$"
+    },
+    "sourceType": {
+      "enum": [
+        "web",
+        "official_docs",
+        "news",
+        "academic",
+        "code",
+        "dataset",
+        "private",
+        "user_attachment",
+        "social"
+      ]
+    },
+    "publicParagraph": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^(?!.*[\\r\\n])(?!.*```)(?!\\s*(?:#{1,6}\\s|[-*+]\\s|[0-9]+[.)]\\s)).{1,500}$"
+    },
+    "publicText": {
+      "oneOf": [
+        { "$ref": "#/$defs/publicParagraph" },
+        { "type": "null" }
+      ]
+    },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/reasonCode" }
+    },
+    "reasonCode": {
+      "enum": [
+        "direct_answer",
+        "search_required",
+        "missing_critical_field",
+        "freshness_required",
+        "source_policy",
+        "insufficient_evidence",
+        "conflicting_evidence",
+        "unsupported_claim",
+        "user_cancelled",
+        "budget_exhausted",
+        "provider_error",
+        "schema_invalid",
+        "tool_error",
+        "verification_failed",
+        "completed",
+        "partial"
+      ]
+    },
+    "stopCode": {
+      "enum": [
+        "sufficient_evidence",
+        "no_search_needed",
+        "deadline_exceeded",
+        "no_accessible_sources",
+        "low_marginal_gain",
+        "user_cancelled",
+        "budget_exhausted",
+        "policy_denied",
+        "conflicting_evidence",
+        "failed"
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenantId", "actorId", "visitorId", "projectId", "threadId"],
+      "properties": {
+        "tenantId": { "$ref": "#/$defs/opaqueId" },
+        "actorId": { "$ref": "#/$defs/opaqueId" },
+        "visitorId": { "$ref": "#/$defs/opaqueId" },
+        "projectId": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        },
+        "threadId": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "Actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actorId", "actorType"],
+      "properties": {
+        "actorId": { "$ref": "#/$defs/opaqueId" },
+        "actorType": { "enum": ["visitor", "user", "service"] }
+      }
+    },
+    "Versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "release", "graph", "prompt", "model", "provider"],
+      "properties": {
+        "contract": { "const": "2.0" },
+        "release": { "$ref": "#/$defs/opaqueId" },
+        "graph": { "$ref": "#/$defs/opaqueId" },
+        "prompt": { "$ref": "#/$defs/opaqueId" },
+        "model": { "$ref": "#/$defs/opaqueId" },
+        "provider": { "$ref": "#/$defs/opaqueId" },
+        "toolRegistry": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        },
+        "parser": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        },
+        "index": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        },
+        "evaluator": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaqueId" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "ModelUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "pricingVersion",
+        "currency",
+        "calls",
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "reasoningTokens",
+        "cacheHitInputTokens",
+        "cacheMissInputTokens",
+        "estimatedCostUsd",
+        "actualCostUsd",
+        "possibleDuplicateCostUsd"
+      ],
+      "properties": {
+        "provider": { "$ref": "#/$defs/opaqueId" },
+        "model": { "$ref": "#/$defs/opaqueId" },
+        "pricingVersion": { "$ref": "#/$defs/opaqueId" },
+        "currency": { "const": "USD" },
+        "calls": { "type": "integer", "minimum": 0 },
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "reasoningTokens": { "type": "integer", "minimum": 0 },
+        "cacheHitInputTokens": { "type": "integer", "minimum": 0 },
+        "cacheMissInputTokens": { "type": "integer", "minimum": 0 },
+        "estimatedCostUsd": { "$ref": "#/$defs/decimalUsd" },
+        "actualCostUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/decimalUsd" },
+            { "type": "null" }
+          ]
+        },
+        "possibleDuplicateCostUsd": { "$ref": "#/$defs/decimalUsd" }
+      }
+    },
+    "ToolUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolId", "toolVersion", "provider", "pricingVersion", "currency", "calls", "attempts", "units", "bytes", "resultCount", "searchQueries", "pageReads", "estimatedCostUsd", "actualCostUsd", "possibleDuplicateCostUsd"],
+      "properties": {
+        "toolId": { "$ref": "#/$defs/opaqueId" },
+        "toolVersion": { "$ref": "#/$defs/opaqueId" },
+        "provider": { "$ref": "#/$defs/opaqueId" },
+        "pricingVersion": { "$ref": "#/$defs/opaqueId" },
+        "currency": { "const": "USD" },
+        "calls": { "type": "integer", "minimum": 0 },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "units": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "resultCount": { "type": "integer", "minimum": 0 },
+        "searchQueries": { "type": "integer", "minimum": 0 },
+        "pageReads": { "type": "integer", "minimum": 0 },
+        "estimatedCostUsd": { "$ref": "#/$defs/decimalUsd" },
+        "actualCostUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/decimalUsd" },
+            { "type": "null" }
+          ]
+        },
+        "possibleDuplicateCostUsd": { "$ref": "#/$defs/decimalUsd" }
+      }
+    },
+    "RunUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "modelBreakdown", "toolBreakdown", "totals"],
+      "properties": {
+        "currency": { "const": "USD" },
+        "modelBreakdown": { "type": "array", "items": { "$ref": "#/$defs/ModelUsage" } },
+        "toolBreakdown": { "type": "array", "items": { "$ref": "#/$defs/ToolUsage" } },
+        "totals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modelCalls", "toolCalls", "searchQueries", "pageReads", "inputTokens", "outputTokens", "totalTokens", "reasoningTokens", "peakParallelTools", "elapsedMs", "estimatedCostUsd", "actualCostUsd", "possibleDuplicateCostUsd"],
+          "properties": {
+            "modelCalls": { "type": "integer", "minimum": 0 },
+            "toolCalls": { "type": "integer", "minimum": 0 },
+            "searchQueries": { "type": "integer", "minimum": 0 },
+            "pageReads": { "type": "integer", "minimum": 0 },
+            "inputTokens": { "type": "integer", "minimum": 0 },
+            "outputTokens": { "type": "integer", "minimum": 0 },
+            "totalTokens": { "type": "integer", "minimum": 0 },
+            "reasoningTokens": { "type": "integer", "minimum": 0 },
+            "peakParallelTools": { "type": "integer", "minimum": 0 },
+            "elapsedMs": { "type": "integer", "minimum": 0 },
+            "estimatedCostUsd": { "$ref": "#/$defs/decimalUsd" },
+            "actualCostUsd": {
+              "oneOf": [
+                { "$ref": "#/$defs/decimalUsd" },
+                { "type": "null" }
+              ]
+            },
+            "possibleDuplicateCostUsd": { "$ref": "#/$defs/decimalUsd" }
+          }
+        }
+      }
+    },
+    "Budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deadlineAt",
+        "modelCalls",
+        "inputTokens",
+        "outputTokens",
+        "costUsd",
+        "planRevisions",
+        "searchQueries",
+        "pageReads",
+        "toolCalls",
+        "parallelTools",
+        "wallTimeMs",
+        "exhausted"
+      ],
+      "properties": {
+        "deadlineAt": { "$ref": "#/$defs/timestamp" },
+        "modelCalls": { "$ref": "#/$defs/BudgetCounter" },
+        "inputTokens": { "$ref": "#/$defs/BudgetCounter" },
+        "outputTokens": { "$ref": "#/$defs/BudgetCounter" },
+        "costUsd": { "$ref": "#/$defs/MoneyBudgetCounter" },
+        "planRevisions": { "$ref": "#/$defs/BudgetCounter" },
+        "searchQueries": { "$ref": "#/$defs/BudgetCounter" },
+        "pageReads": { "$ref": "#/$defs/BudgetCounter" },
+        "toolCalls": { "$ref": "#/$defs/BudgetCounter" },
+        "parallelTools": { "$ref": "#/$defs/BudgetCounter" },
+        "wallTimeMs": { "$ref": "#/$defs/BudgetCounter" },
+        "exhausted": { "type": "boolean" }
+      }
+    },
+    "BudgetCounter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max", "used", "reserved", "remaining"],
+      "properties": {
+        "max": { "type": "integer", "minimum": 0 },
+        "used": { "type": "integer", "minimum": 0 },
+        "reserved": { "type": "integer", "minimum": 0 },
+        "remaining": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "MoneyBudgetCounter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max", "used", "reserved", "remaining"],
+      "properties": {
+        "max": { "$ref": "#/$defs/decimalUsd" },
+        "used": { "$ref": "#/$defs/decimalUsd" },
+        "reserved": { "$ref": "#/$defs/decimalUsd" },
+        "remaining": { "$ref": "#/$defs/decimalUsd" }
+      }
+    },
+    "ModelAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attemptId", "ordinal", "status", "possibleDuplicateCostUsd"],
+      "properties": {
+        "attemptId": { "$ref": "#/$defs/opaqueId" },
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["confirmed", "unknown"] },
+        "possibleDuplicateCostUsd": {
+          "oneOf": [
+            { "$ref": "#/$defs/decimalUsd" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "ArtifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "kind", "contentHash", "storageRef"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/opaqueId" },
+        "kind": { "enum": ["document", "table", "dataset", "snapshot", "report"] },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "storageRef": { "$ref": "#/$defs/opaqueId" }
+      }
+    }
+  }
+}

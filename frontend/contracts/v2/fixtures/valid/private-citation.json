@@ -1,0 +1,183 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_private",
+    "threadId": "thread_private"
+  },
+  "sources": [
+    {
+      "schemaVersion": "2.0",
+      "sourceId": "source_private_1",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_private",
+        "threadId": "thread_private"
+      },
+      "sourceType": "private",
+      "canonicalUrl": null,
+      "artifactRef": {
+        "artifactId": "artifact_private_1",
+        "kind": "document",
+        "contentHash": "4444444444444444444444444444444444444444444444444444444444444444",
+        "storageRef": "private_storage_1"
+      },
+      "title": "项目内部规范",
+      "publisher": "项目资料",
+      "publishedAt": null,
+      "retrievedAt": "2026-07-26T14:00:00Z",
+      "contentHash": "4444444444444444444444444444444444444444444444444444444444444444",
+      "trust": "reviewed",
+      "access": {
+        "classification": "internal",
+        "principalIds": ["actor_1"]
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "schemaVersion": "2.0",
+      "snapshotId": "snapshot_private_1",
+      "sourceId": "source_private_1",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_private",
+        "threadId": "thread_private"
+      },
+      "snapshotHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "capturedAt": "2026-07-26T14:00:01Z",
+      "storageRef": "private_snapshot_1",
+      "mimeType": "application/pdf"
+    }
+  ],
+  "evidence": [
+    {
+      "schemaVersion": "2.0",
+      "evidenceId": "evidence_private_1",
+      "sourceId": "source_private_1",
+      "snapshotId": "snapshot_private_1",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_private",
+        "threadId": "thread_private"
+      },
+      "locator": { "kind": "pdf_page", "page": 3 },
+      "quote": "项目资料只允许在当前项目范围内使用。",
+      "passageHash": "6666666666666666666666666666666666666666666666666666666666666666",
+      "quality": 0.95,
+      "trust": "reviewed",
+      "access": {
+        "classification": "internal",
+        "principalIds": ["actor_1"]
+      },
+      "verified": true
+    }
+  ],
+  "response": {
+    "schemaVersion": "2.0",
+    "responseId": "response_private_1",
+    "runId": "run_private_1",
+    "scope": {
+      "tenantId": "tenant_1",
+      "actorId": "actor_1",
+      "visitorId": "visitor_1",
+      "projectId": "project_private",
+      "threadId": "thread_private"
+    },
+    "status": "completed",
+    "answerMarkdown": "项目资料只能在当前项目内使用。[1]",
+    "claims": [
+      {
+        "schemaVersion": "2.0",
+        "id": "claim_private_1",
+        "scope": {
+          "tenantId": "tenant_1",
+          "actorId": "actor_1",
+          "visitorId": "visitor_1",
+          "projectId": "project_private",
+          "threadId": "thread_private"
+        },
+        "text": "项目资料只能在当前项目内使用。",
+        "importance": "critical",
+        "status": "supported",
+        "confidence": 0.95,
+        "evidenceIds": ["evidence_private_1"],
+        "citationIds": ["citation_private_1"]
+      }
+    ],
+    "citations": [
+      {
+        "schemaVersion": "2.0",
+        "citationId": "citation_private_1",
+        "claimId": "claim_private_1",
+        "evidenceId": "evidence_private_1",
+        "scope": {
+          "tenantId": "tenant_1",
+          "actorId": "actor_1",
+          "visitorId": "visitor_1",
+          "projectId": "project_private",
+          "threadId": "thread_private"
+        },
+        "label": "1",
+        "title": "项目内部规范",
+        "canonicalUrl": null,
+        "artifactRef": {
+          "artifactId": "artifact_private_1",
+          "kind": "document",
+          "contentHash": "4444444444444444444444444444444444444444444444444444444444444444",
+          "storageRef": "private_storage_1"
+        },
+        "locator": { "kind": "pdf_page", "page": 3 },
+        "locatorVerified": true,
+        "publishedAt": null,
+        "retrievedAt": "2026-07-26T14:00:00Z",
+        "sourceType": "private"
+      }
+    ],
+    "limitations": [],
+    "conflicts": [],
+    "stopReason": "sufficient_evidence",
+    "artifacts": [],
+    "usage": {
+      "currency": "USD",
+      "modelBreakdown": [],
+      "toolBreakdown": [],
+      "totals": {
+        "modelCalls": 0,
+        "toolCalls": 0,
+        "searchQueries": 0,
+        "pageReads": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "reasoningTokens": 0,
+        "peakParallelTools": 0,
+        "elapsedMs": 0,
+        "estimatedCostUsd": "0",
+        "actualCostUsd": "0",
+        "possibleDuplicateCostUsd": "0"
+      }
+    },
+    "versions": {
+      "contract": "2.0",
+      "release": "release_s00",
+      "graph": "graph_v2",
+      "prompt": "prompt_writer_v1",
+      "model": "deepseek_v4_flash",
+      "provider": "deepseek",
+      "toolRegistry": "tools_v1",
+      "parser": "parser_v1",
+      "index": "index_v1",
+      "evaluator": "eval_v1"
+    },
+    "completedAt": "2026-07-26T14:00:02Z"
+  }
+}

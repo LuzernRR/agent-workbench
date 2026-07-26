@@ -1,0 +1,11 @@
+{
+  "code": "AUTH_REQUIRED",
+  "category": "auth_required",
+  "message": "该数据源尚未连接。",
+  "fieldPath": null,
+  "expected": null,
+  "retryable": false,
+  "retryAfterMs": null,
+  "nextAction": "connect_account",
+  "providerStatus": 401
+}

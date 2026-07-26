@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/agent-state.schema.json",
+  "title": "AgentState public references v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stateId",
+    "runId",
+    "scope",
+    "stateRevision",
+    "checkpointRevision",
+    "fencingToken",
+    "inputRevision",
+    "steeringRevision",
+    "lastAppliedCommandSeq",
+    "currentNode",
+    "nextNode",
+    "pendingClarificationRef",
+    "pendingApprovalRef",
+    "cancelRequested",
+    "intentRef",
+    "briefRef",
+    "planRef",
+    "draftRef",
+    "draftRevision",
+    "verifiedDraftRevision",
+    "responseRef",
+    "budget",
+    "usage",
+    "terminalStatus",
+    "stopReason",
+    "versions",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "stateId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "runId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" },
+    "stateRevision": { "type": "integer", "minimum": 0 },
+    "checkpointRevision": { "type": "integer", "minimum": 0 },
+    "fencingToken": { "type": "integer", "minimum": 1 },
+    "inputRevision": { "type": "integer", "minimum": 0 },
+    "steeringRevision": { "type": "integer", "minimum": 0 },
+    "lastAppliedCommandSeq": { "type": "integer", "minimum": 0 },
+    "currentNode": { "$ref": "#/$defs/nodeName" },
+    "nextNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/nodeName" },
+        { "type": "null" }
+      ]
+    },
+    "pendingClarificationRef": { "$ref": "#/$defs/nullableRef" },
+    "pendingApprovalRef": { "$ref": "#/$defs/nullableRef" },
+    "cancelRequested": { "type": "boolean" },
+    "intentRef": { "$ref": "#/$defs/nullableRef" },
+    "briefRef": { "$ref": "#/$defs/nullableRef" },
+    "planRef": { "$ref": "#/$defs/nullableRef" },
+    "draftRef": { "$ref": "#/$defs/nullableRef" },
+    "draftRevision": { "$ref": "#/$defs/nullableRevision" },
+    "verifiedDraftRevision": { "$ref": "#/$defs/nullableRevision" },
+    "responseRef": { "$ref": "#/$defs/nullableRef" },
+    "budget": { "$ref": "common.schema.json#/$defs/Budget" },
+    "usage": { "$ref": "common.schema.json#/$defs/RunUsage" },
+    "terminalStatus": {
+      "oneOf": [
+        { "enum": ["completed", "cancelled", "failed"] },
+        { "type": "null" }
+      ]
+    },
+    "stopReason": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/stopCode" },
+        { "type": "null" }
+      ]
+    },
+    "versions": { "$ref": "common.schema.json#/$defs/Versions" },
+    "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+  },
+  "$defs": {
+    "nodeName": {
+      "enum": [
+        "load_context",
+        "classify_intent",
+        "interrupt_for_clarification",
+        "build_brief",
+        "build_plan",
+        "execute_plan",
+        "interrupt_for_approval",
+        "verify_evidence",
+        "compose_response",
+        "verify_response",
+        "finalize",
+        "terminal"
+      ]
+    },
+    "nullableRef": {
+      "oneOf": [
+        { "$ref": "common.schema.json#/$defs/opaqueId" },
+        { "type": "null" }
+      ]
+    },
+    "nullableRevision": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "type": "object",
+        "properties": {
+          "pendingClarificationRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+          "pendingApprovalRef": { "$ref": "common.schema.json#/$defs/opaqueId" }
+        },
+        "required": ["pendingClarificationRef", "pendingApprovalRef"]
+      }
+    },
+    {
+      "if": { "properties": { "currentNode": { "const": "interrupt_for_clarification" } }, "required": ["currentNode"] },
+      "then": {
+        "properties": {
+          "pendingClarificationRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+          "pendingApprovalRef": { "type": "null" }
+        }
+      },
+      "else": {
+        "if": { "properties": { "currentNode": { "const": "interrupt_for_approval" } }, "required": ["currentNode"] },
+        "then": {
+          "properties": {
+            "pendingApprovalRef": { "$ref": "common.schema.json#/$defs/opaqueId" },
+            "pendingClarificationRef": { "type": "null" }
+          }
+        },
+        "else": {
+          "properties": {
+            "pendingClarificationRef": { "type": "null" },
+            "pendingApprovalRef": { "type": "null" }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "currentNode": { "const": "terminal" } }, "required": ["currentNode"] },
+      "then": {
+        "properties": {
+          "terminalStatus": { "enum": ["completed", "cancelled", "failed"] },
+          "stopReason": { "$ref": "common.schema.json#/$defs/stopCode" },
+          "nextNode": { "type": "null" },
+          "pendingClarificationRef": { "type": "null" },
+          "pendingApprovalRef": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "terminalStatus": { "type": "null" },
+          "stopReason": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "terminalStatus": { "const": "completed" } }, "required": ["terminalStatus"] },
+      "then": { "properties": { "cancelRequested": { "const": false } } }
+    },
+    {
+      "if": { "properties": { "terminalStatus": { "const": "cancelled" } }, "required": ["terminalStatus"] },
+      "then": { "properties": { "cancelRequested": { "const": true } } }
+    }
+  ]
+}

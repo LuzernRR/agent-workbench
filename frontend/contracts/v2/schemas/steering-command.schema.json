@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.agent-workbench.invalid/contracts/v2/schemas/steering-command.schema.json",
+  "title": "SteeringCommand v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "commandId",
+    "runId",
+    "threadId",
+    "expectedSteeringRevision",
+    "kind",
+    "mode",
+    "content",
+    "attachmentRefs",
+    "createdAt",
+    "idempotencyKey",
+    "contentHash",
+    "actor",
+    "scope"
+  ],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "commandId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "runId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "threadId": { "$ref": "common.schema.json#/$defs/opaqueId" },
+    "expectedSteeringRevision": { "type": "integer", "minimum": 0 },
+    "kind": { "const": "steer" },
+    "mode": { "const": "at_next_checkpoint" },
+    "content": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "attachmentRefs": {
+      "type": "array",
+      "maxItems": 0,
+      "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
+    },
+    "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "idempotencyKey": { "$ref": "common.schema.json#/$defs/idempotencyKey" },
+    "contentHash": { "$ref": "common.schema.json#/$defs/sha256" },
+    "actor": { "$ref": "common.schema.json#/$defs/Actor" },
+    "scope": { "$ref": "common.schema.json#/$defs/Scope" }
+  }
+}

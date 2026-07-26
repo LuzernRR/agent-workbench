@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "2.0",
+  "briefId": "brief_direct_1",
+  "intentId": "intent_direct_1",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "objective": "直接解释 JSON Schema 的作用，不调用外部搜索。",
+  "deliverables": ["一段准确的中文说明"],
+  "facets": ["定义", "用途"],
+  "mustInclude": ["结构校验"],
+  "mustExclude": ["实时资料"],
+  "sourcePolicy": {
+    "allowedTypes": [],
+    "requiredTypes": [],
+    "allowedDomains": [],
+    "deniedDomains": []
+  },
+  "freshness": {
+    "requirement": "timeless",
+    "maxAgeDays": null,
+    "asOf": null
+  },
+  "depth": "quick",
+  "acceptance": ["解释定义与用途"],
+  "assumptions": ["用户需要概念说明"],
+  "constraints": ["不调用搜索"],
+  "createdAt": "2026-07-26T12:00:01Z",
+  "versions": {
+    "contract": "2.0",
+    "release": "release_s00",
+    "graph": "graph_v2",
+    "prompt": "prompt_brief_v1",
+    "model": "deepseek_v4_flash",
+    "provider": "deepseek",
+    "toolRegistry": null,
+    "parser": "parser_v1",
+    "index": null,
+    "evaluator": null
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "schemaVersion": "2.0",
+  "scope": {
+    "tenantId": "tenant_1",
+    "actorId": "actor_1",
+    "visitorId": "visitor_1",
+    "projectId": "project_1",
+    "threadId": "thread_1"
+  },
+  "events": [
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_model_unknown_started",
+      "runId": "run_model_unknown",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 1,
+      "occurredAt": "2026-07-26T13:50:00Z",
+      "type": "node.started",
+      "kind": "node",
+      "status": "running",
+      "startedAt": "2026-07-26T13:50:00Z",
+      "completedAt": null,
+      "inputRevision": 0,
+      "refs": {},
+      "source": "fixture",
+      "payload": {
+        "node": "classify_intent",
+        "nodeExecutionId": "node_execution_unknown_1",
+        "executionKind": "model",
+        "ordinal": 1,
+        "attemptNumber": 1,
+        "publicText": null,
+        "reasonCodes": []
+      }
+    },
+    {
+      "schemaVersion": "2.0",
+      "eventId": "event_model_unknown",
+      "runId": "run_model_unknown",
+      "scope": {
+        "tenantId": "tenant_1",
+        "actorId": "actor_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1"
+      },
+      "seq": 2,
+      "occurredAt": "2026-07-26T13:50:01Z",
+      "type": "node.failed",
+      "kind": "node",
+      "status": "failed",
+      "startedAt": "2026-07-26T13:50:00Z",
+      "completedAt": "2026-07-26T13:50:01Z",
+      "inputRevision": 0,
+      "refs": {},
+      "source": "fixture",
+      "payload": {
+        "node": "classify_intent",
+        "nodeExecutionId": "node_execution_unknown_1",
+        "executionKind": "model",
+        "ordinal": 1,
+        "attemptNumber": 1,
+        "errorCode": "PROVIDER_RESULT_UNKNOWN",
+        "publicText": null,
+        "reasonCodes": ["provider_error"],
+        "durationMs": 1000,
+        "retryable": true,
+        "modelUsage": {
+          "provider": "deepseek",
+          "model": "deepseek_v4_flash",
+          "pricingVersion": "pricing_2026_07",
+          "currency": "USD",
+          "calls": 1,
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0,
+          "reasoningTokens": 0,
+          "cacheHitInputTokens": 0,
+          "cacheMissInputTokens": 0,
+          "estimatedCostUsd": "0.001",
+          "actualCostUsd": null,
+          "possibleDuplicateCostUsd": "0.001"
+        },
+        "modelAttempt": {
+          "attemptId": "attempt_unknown_1",
+          "ordinal": 1,
+          "status": "unknown",
+          "possibleDuplicateCostUsd": "0.001"
+        }
+      }
+    }
+  ]
+}

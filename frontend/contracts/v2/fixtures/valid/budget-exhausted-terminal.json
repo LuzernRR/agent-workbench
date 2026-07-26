@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "events": [
+    {
+      "schemaVersion": "2.0", "eventId": "budget_exhausted_1", "runId": "run_budget_exhausted",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 1, "occurredAt": "2026-07-26T20:20:01Z", "type": "budget.updated", "kind": "budget", "status": "completed",
+      "startedAt": "2026-07-26T20:20:01Z", "completedAt": "2026-07-26T20:20:01Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "budgetRevision": 1, "pricingVersion": "pricing_2026_07",
+        "budget": {
+          "deadlineAt": "2026-07-26T20:20:01Z",
+          "modelCalls": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "inputTokens": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "outputTokens": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "costUsd": { "max": "0", "used": "0", "reserved": "0", "remaining": "0" },
+          "planRevisions": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "searchQueries": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "pageReads": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "toolCalls": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "parallelTools": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "wallTimeMs": { "max": 1000, "used": 1000, "reserved": 0, "remaining": 0 },
+          "exhausted": true
+        },
+        "usage": {
+          "currency": "USD", "modelBreakdown": [], "toolBreakdown": [],
+          "totals": {
+            "modelCalls": 0, "toolCalls": 0, "searchQueries": 0, "pageReads": 0, "inputTokens": 0, "outputTokens": 0,
+            "totalTokens": 0, "reasoningTokens": 0, "peakParallelTools": 0, "elapsedMs": 1000,
+            "estimatedCostUsd": "0", "actualCostUsd": "0", "possibleDuplicateCostUsd": "0"
+          }
+        },
+        "possibleDuplicateCostUsd": "0", "exhausted": true, "publicText": null, "reasonCodes": ["budget_exhausted"]
+      }
+    },
+    {
+      "schemaVersion": "2.0", "eventId": "run_budget_exhausted_failed", "runId": "run_budget_exhausted",
+      "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+      "seq": 2, "occurredAt": "2026-07-26T20:20:01Z", "type": "run.failed", "kind": "run", "status": "failed",
+      "startedAt": "2026-07-26T20:20:00Z", "completedAt": "2026-07-26T20:20:01Z", "inputRevision": 0, "refs": {}, "source": "fixture",
+      "payload": {
+        "stopReason": "budget_exhausted", "errorCode": "BUDGET_EXHAUSTED",
+        "usage": {
+          "currency": "USD", "modelBreakdown": [], "toolBreakdown": [],
+          "totals": {
+            "modelCalls": 0, "toolCalls": 0, "searchQueries": 0, "pageReads": 0, "inputTokens": 0, "outputTokens": 0,
+            "totalTokens": 0, "reasoningTokens": 0, "peakParallelTools": 0, "elapsedMs": 1000,
+            "estimatedCostUsd": "0", "actualCostUsd": "0", "possibleDuplicateCostUsd": "0"
+          }
+        },
+        "budget": {
+          "deadlineAt": "2026-07-26T20:20:01Z",
+          "modelCalls": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "inputTokens": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "outputTokens": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "costUsd": { "max": "0", "used": "0", "reserved": "0", "remaining": "0" },
+          "planRevisions": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "searchQueries": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "pageReads": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "toolCalls": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "parallelTools": { "max": 0, "used": 0, "reserved": 0, "remaining": 0 },
+          "wallTimeMs": { "max": 1000, "used": 1000, "reserved": 0, "remaining": 0 },
+          "exhausted": true
+        }
+      }
+    }
+  ]
+}

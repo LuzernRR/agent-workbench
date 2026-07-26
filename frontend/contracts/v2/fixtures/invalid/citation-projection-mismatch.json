@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "2.0",
+  "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
+  "sources": [
+    { "schemaVersion": "2.0", "sourceId": "source_projection", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "sourceType": "official_docs", "canonicalUrl": "https://example.com/spec", "artifactRef": null, "title": "真实标题", "publisher": "示例", "publishedAt": null, "retrievedAt": "2026-07-26T19:10:00Z", "contentHash": "7777777777777777777777777777777777777777777777777777777777777777", "trust": "reviewed", "access": { "classification": "public", "principalIds": [] } }
+  ],
+  "snapshots": [
+    { "schemaVersion": "2.0", "snapshotId": "snapshot_projection", "sourceId": "source_projection", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "snapshotHash": "8888888888888888888888888888888888888888888888888888888888888888", "capturedAt": "2026-07-26T19:10:01Z", "storageRef": "snapshot_projection_ref", "mimeType": "text/html" }
+  ],
+  "evidence": [
+    { "schemaVersion": "2.0", "evidenceId": "evidence_projection", "sourceId": "source_projection", "snapshotId": "snapshot_projection", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "locator": { "kind": "html_paragraph", "paragraphIndex": 1, "selector": null }, "quote": "真实原文。", "passageHash": "9999999999999999999999999999999999999999999999999999999999999999", "quality": 0.9, "trust": "reviewed", "access": { "classification": "public", "principalIds": [] }, "verified": true }
+  ],
+  "claims": [
+    { "schemaVersion": "2.0", "id": "claim_projection", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "text": "真实声明。", "importance": "critical", "status": "supported", "confidence": 0.9, "evidenceIds": ["evidence_projection"], "citationIds": ["citation_projection"] }
+  ],
+  "citations": [
+    { "schemaVersion": "2.0", "citationId": "citation_projection", "claimId": "claim_projection", "evidenceId": "evidence_projection", "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" }, "label": "1", "title": "模型编造的标题", "canonicalUrl": "https://example.com/spec", "artifactRef": null, "locator": { "kind": "html_paragraph", "paragraphIndex": 1, "selector": null }, "locatorVerified": true, "publishedAt": null, "retrievedAt": "2026-07-26T19:10:00Z", "sourceType": "official_docs" }
+  ]
+}
