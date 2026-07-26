@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-07-26 |
 | Issue | [#1](https://github.com/LuzernRR/agent-workbench/issues/1) |
-| 状态 | awaiting-acceptance |
+| 状态 | accepted |
 | 目标环境 | local 与 GitHub public |
 
 ## 问题与目标
@@ -176,7 +176,7 @@ sequenceDiagram
 | 密钥扫描 | 扫描 Git 候选文件中的常见密钥值格式 | 0 命中 |
 | UTF-8 | 严格 UTF-8 解码 Git 候选文本文件 | 0 失败 |
 
-阶段 0 提交前后均需重新执行文档链接、安全扫描和 GitHub 远端状态验证；验证证据同步到 Issue #1，Issue 在用户明确验收前保持打开。
+阶段 0 提交前后均已执行文档链接、安全扫描和 GitHub 远端状态验证；验证证据同步到 Issue #1，用户于 2026-07-26 明确验收后关闭 Issue。
 
 ## 回滚
 
@@ -186,6 +186,7 @@ sequenceDiagram
 
 ## 用户验收
 
-- 状态：阶段 0 已进入人工验收，等待用户明确确认。
-- 下一功能：新建项目对话框视觉修复。
-- 下一功能执行门：阻塞，直到用户明确验收阶段 0。
+- 状态：用户已于 2026-07-26 明确回复“阶段 0 验收通过”。
+- 验收证据：[Issue #1](https://github.com/LuzernRR/agent-workbench/issues/1) 与提交 `c42f5e7`。
+- 下一功能：阶段 1，真实会话连续性与工作台交互修复。
+- 下一功能执行门：用户已允许开始。
