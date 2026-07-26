@@ -74,3 +74,4 @@ sequenceDiagram
 - 全量 UI：16 项 Playwright 全部通过，覆盖后台输出、停止、滚动、切换、刷新、直接拖拽、附件和移动端。
 - 真实 Flash：SSE 顺序为 `thinking.started`、两个 `thinking.paragraph`、`thinking.completed`、正文增量和唯一 `run.completed`；SSE 与快照均不含 `reasoning_content`。
 - 真实浏览器：3100 完成思考后按钮为折叠态，展开后只有模型自然段，控制台无错误，正文继续流式输出。
+- 真实 Pro 停止：数据库观察到 `thinking.started` 后调用停止；事件固定为 6 条，等待 2 秒后数量和最大序号均不变；只有一个 `run.cancelled`，没有 `thinking.paragraph`、`run.completed`、空思考块、原始推理或项目记忆。
