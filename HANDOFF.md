@@ -3,7 +3,7 @@
 ## 当前结论
 
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
-- 当前唯一功能：Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2)，阶段 1 完成验证后等待用户验收。
+- 当前唯一功能：Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2)，阶段 1 已由提交 [`81dd154`](https://github.com/LuzernRR/agent-workbench/commit/81dd154) 交付，正在等待用户验收。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
 - 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
@@ -90,6 +90,7 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 真实刷新：14 次 DOM 文字采样无首页招呼语、禁用空状态文字、乱码或错误归属。
 - 真实身份：Cookie 刷新稳定、不同上下文不同、`HttpOnly`；数据库摘要长度固定 64。
 - 自动化：16 个 Vitest 文件共 76 项、类型检查、全仓 Lint、生产构建、16 项 Playwright 全部通过；生产依赖审计为 0 个漏洞。
+- Issue 证据：[阶段 1 验收记录](https://github.com/LuzernRR/agent-workbench/issues/2#issuecomment-5082415434)。
 
 ## 接手顺序
 

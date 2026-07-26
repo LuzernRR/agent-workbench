@@ -2,7 +2,7 @@
 
 ## 状态
 
-`ready_to_commit`：功能、真实链路、全量门禁和提交前审计已完成，正在提交并推送。用户验收前不得开始下一功能。
+`awaiting_acceptance`：功能、真实链路、全量门禁、提交、推送和 Issue 证据已完成。用户验收前不得开始下一功能。
 
 ## 入口
 
@@ -10,6 +10,8 @@
 - 研究：[RESEARCH.md](RESEARCH.md)
 - 实施：[IMPLEMENTATION.md](IMPLEMENTATION.md)
 - 开发记录：[阶段 1 中文记录](../development/2026-07-26-001-workbench-continuity.md)
+- 交付提交：[`81dd154`](https://github.com/LuzernRR/agent-workbench/commit/81dd154)
+- 验收证据：[Issue #2 评论](https://github.com/LuzernRR/agent-workbench/issues/2#issuecomment-5082415434)
 
 ## 已完成
 
@@ -47,8 +49,8 @@
 
 - [x] 最终执行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
 - [x] 扫描 UTF-8/LF、密钥、禁用文案、可见省略号、文档链接与 Git diff。
-- [ ] 提交并推送 `main`，在 Issue #2 写入验收证据。
-- [ ] 停止开发，等待用户验收阶段 1。
+- [x] 提交并推送 `main`，在 Issue #2 写入验收证据。
+- [x] 停止开发，等待用户验收阶段 1。
 
 ## 阻塞
 

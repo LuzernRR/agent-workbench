@@ -9,7 +9,7 @@
 | 执行门 | `allowed` |
 | 环境 | local live `3100`、Playwright mock `3110`、GitHub public |
 | 技术 | Next.js 16、React 19、assistant-ui、PostgreSQL 17、pgvector、DeepSeek SSE |
-| 状态 | 最终验证后等待用户验收 |
+| 状态 | 已推送 `81dd154`，等待用户验收 |
 
 ## 2. 交付目标
 
@@ -424,6 +424,6 @@ WHERE updated_at < now() - ($1::int * interval '1 day')
 
 ## 21. 用户验收门
 
-- 当前功能提交并推送后停止。
+- 当前功能已由提交 [`81dd154`](https://github.com/LuzernRR/agent-workbench/commit/81dd154) 推送，验收证据见 [Issue #2 评论](https://github.com/LuzernRR/agent-workbench/issues/2#issuecomment-5082415434)，现在停止开发。
 - Issue #2 保持打开，等待用户实际操作 `3100`。
 - 只有用户明确回复阶段 1 验收通过，才能关闭 Issue #2 并建立下一功能执行门。
