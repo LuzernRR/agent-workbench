@@ -4,12 +4,12 @@
 
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
 - 阶段 1 已由用户验收，Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2) 已关闭。
-- 当前唯一功能：Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3)，动态模型身份与分层记忆契约已完成，等待用户验收。
-- 功能提交：[`6b05a66`](https://github.com/LuzernRR/agent-workbench/commit/6b05a66)；[Issue 交付证据](https://github.com/LuzernRR/agent-workbench/issues/3#issuecomment-5082595426)。
+- 阶段 2 已由用户验收，Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3) 已关闭。
+- 当前唯一功能：Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4)，思考结果、完整项目记忆与稳定拖拽已实现并完成验证，等待用户验收。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
 - 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
-- 用户未明确验收阶段 2 前，不开始 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
+- 用户未明确验收阶段 3 前，不开始 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
 
 ## 已实现
 
@@ -22,14 +22,14 @@
 | 编辑 | 事务归档目标运行及下游活动分支，确认修改后旧回复立即消失 |
 | 导航 | 左栏项目树包含所属会话；无项目会话单列但没有“独立会话”标题；每行单行裁切且不显示省略号 |
 | 顶栏 | 项目名与会话名是两个独立点击目标；会话菜单只显示当前项目或无项目范围 |
-| 拖拽 | 无长按等待；项目直接排序；会话可拖入、拖出和跨项目移动；刷新后保持 |
+| 拖拽 | 1 像素移动直接启动；项目排序与会话拖入、拖出、跨项目移动先更新乐观缓存再清除覆盖层；无落点回放和旧位置回跳 |
 | 视觉 | 项目输入、消息编辑、按钮和菜单无矩形焦点框；空导航无说明占位；图片不显示文件名 |
-| 输出 | 回复不显示“智能助手”；按内容选择表格、步骤、列表或短段落；移动端表格内部滚动 |
+| 输出 | 回复不显示“智能助手”；DeepSeek 原始推理只在服务端运行内存，模型基于本轮真实推理生成 1 至 3 个自然文段；无标题模板、列表或 Markdown，完成后自动折叠 |
 | 滚动 | 用户向上滚动后停止底部跟随；只有点击底部按钮才恢复 |
 | 后台 | 页面隐藏时前端立即追平持久 delta；关闭页面和 SSE 后服务端仍生成并落库 |
 | 停止 | 有真实 `runId` 才显示停止；事件串行落库；停止、完成、失败原子竞争唯一终态；重复停止幂等 |
-| 记忆 | 同会话活动完成历史；同访客、同项目、跨会话共享；不跨项目、不跨访客；记忆内容按不可信事实背景注入 Prompt |
-| 保留 | 会话最后活动超过 3 天且不在运行时自动删除；运行、事件、附件级联；有界项目记忆保留 |
+| 记忆 | 每个成功交换完整归档；同访客、同项目跨会话共享；召回兼顾来源会话覆盖、当前问题相关性和最近内容；不跨项目、不跨访客 |
+| 保留 | 会话最后活动超过 3 天且不在运行时自动删除；运行、事件、附件级联；项目记忆完整归档与单轮上下文预算分离 |
 | mock | 仅 `WORKBENCH_LLM_MODE=mock` 与 Playwright `3110` 使用；live 不显示种子、模拟工具或虚构状态 |
 
 ## 尚未实现
@@ -50,7 +50,11 @@ flowchart LR
     I["本轮真实 Provider、模型名称和 ID"] --> P["系统 Prompt、历史、项目记忆、当前消息"]
     PG --> P
     P --> D["DeepSeek SSE"]
-    D --> E["AgentEvent 先持久化"]
+    D --> RR["reasoning_content 仅运行内存"]
+    RR --> RS["关闭思考的模型自然段归纳"]
+    RS --> E["thinking.paragraph 先持久化"]
+    D --> E2["content 增量"]
+    E2 --> E["AgentEvent 先持久化"]
     E --> S["可断开的浏览器 SSE"]
     E --> R["刷新或重开读取快照"]
     S --> UI["Zod、Reducer、渲染队列"]
@@ -68,7 +72,8 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 数据访问：`frontend/src/server/persistence/database.ts` 与 `frontend/src/server/live/store.ts`。
 - 清理入口：`ensureLiveRecovery()` 首次 live 请求触发，之后按 `cleanupIntervalMinutes` 限频。
 - 保留配置固定 `threadTtlDays: 3`；项目记忆默认最多 120 条、召回 24 条、上下文最多 16000 字符。
-- 项目记忆字符预算包含角色标签和分隔符；首条超长内容也不会突破预算。
+- `projectMemoryMaxItems` 当前仅为配置兼容字段，不再触发物理删除；召回使用 `projectMemoryRecallItems` 和 `projectMemoryMaxChars` 控制单轮上下文。
+- 项目记忆字符预算包含来源会话、角色标签和分隔符；首条超长内容也不会突破预算。
 - `wb_project_memories.embedding` 为 nullable `vector`，不得在未实现 embedding 时宣称语义召回。
 
 ## 核心代码
@@ -85,6 +90,8 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - Prompt 策略：`frontend/src/server/live/prompt-policy.ts`
 - 真实记忆集成契约：`frontend/src/server/live/store.integration.test.ts`
 - DeepSeek：`frontend/src/server/llm/deepseek-client.ts`
+- 阶段 3 研究与协议：`docs/reasoning-project-context/RESEARCH.md`
+- 阶段 3 中文开发记录：`docs/development/2026-07-26-003-reasoning-project-context.md`
 
 ## 已取得的验收证据
 
@@ -100,12 +107,17 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 阶段 2 真实身份：Flash 返回 `DeepSeek / DeepSeek V4 Flash / deepseek-v4-flash`；Pro 返回对应 Pro 名称和 ID。
 - 阶段 2 真实记忆：刷新后同会话和同项目另一会话均召回 `PJ-51062349`；其他项目只返回 `UNKNOWN`。
 - 阶段 2 全量门禁：85 项 Vitest、类型、Lint、生产构建、16 项 Playwright、UTF-8/LF、禁用文案、可见省略号、链接和依赖扫描全部通过。
+- 阶段 3 真实思考：Flash 与 Pro 均返回 `reasoning_content`；可见结果由关闭思考的同模型请求归纳，SSE 和 PostgreSQL 快照均没有原始推理。
+- 阶段 3 真实自然段：Flash 在 3100 返回 1 至 2 个随问题变化的自然文段，无固定阶段词、列表或 Markdown；完成后自动折叠，手动展开正常。
+- 阶段 3 真实记忆：同项目第三个新会话召回另两个会话的 `MEM-A-262626` 和 `MEM-B-262626`；另一项目返回 `UNKNOWN`。
+- 阶段 3 真实停止：Pro 思考期间停止后 2 秒事件序号不再增长，`run.cancelled` 唯一且没有 `run.completed`。
+- 阶段 3 全量门禁：90 项 Vitest、真实 PostgreSQL 集成测试、类型、全仓 Lint、生产构建和 16 项 Playwright 全部通过。
 
 ## 接手顺序
 
-1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-002-model-identity-memory.md`。
+1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-003-reasoning-project-context.md`。
 2. 运行 `git status --short`，保留用户改动和本地密钥。
 3. 确认 `docker ps --filter name=agent-workbench-postgres` 为 healthy。
 4. 在 `frontend/` 运行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
-5. 阶段 2 未验收时只修复 Issue #3 回归，不创建下一功能。
-6. 用户验收后关闭 Issue #3；建议下一功能是 Python/LangGraph 最小运行时与 PostgreSQL checkpoint，不同时接工具、搜索或 RAG。
+5. 阶段 3 未验收时只修复 Issue #4 回归，不创建下一功能。
+6. 用户验收后关闭 Issue #4；建议下一功能是 Python/LangGraph 最小运行时与 PostgreSQL checkpoint，不同时接工具、搜索或 RAG。

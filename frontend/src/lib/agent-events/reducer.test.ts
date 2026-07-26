@@ -33,6 +33,42 @@ describe("reduceAgentEvent", () => {
     expect(state.items["assistant-1"]).toMatchObject({ text: "已核验答复", status: "streaming" });
   });
 
+  it("只保存模型生成的自然段思考结果并在停止时收口", () => {
+    const running = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "run.started", {}),
+      event(2, "thinking.started", { thinkingId: "thinking-1" }),
+      event(3, "thinking.paragraph", { thinkingId: "thinking-1", paragraphId: "paragraph-1", text: "两个方案需要使用同一组标准进行比较。" }),
+      event(4, "thinking.paragraph", { thinkingId: "thinking-1", paragraphId: "paragraph-2", text: "现有信息适合先列出取舍条件，再给出适用场景。" })
+    ]);
+    expect(running.itemOrder).toEqual(["thinking-1"]);
+    expect(running.items["thinking-1"]).toMatchObject({
+      kind: "thinking",
+      status: "streaming",
+      paragraphs: [
+        { id: "paragraph-1", text: "两个方案需要使用同一组标准进行比较。" },
+        { id: "paragraph-2", text: "现有信息适合先列出取舍条件，再给出适用场景。" }
+      ]
+    });
+    expect(JSON.stringify(running)).not.toContain("reasoning_content");
+
+    const stopped = reduceAgentEvent(running, event(5, "run.cancelled", {}));
+    expect(stopped.items["thinking-1"]).toMatchObject({ status: "stopped" });
+  });
+
+  it("摘要失败或思考期间停止时删除没有模型内容的空块", () => {
+    const started = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "run.started", {}),
+      event(2, "thinking.started", { thinkingId: "thinking-empty" })
+    ]);
+    const failedSummary = reduceAgentEvent(started, event(3, "thinking.completed", { thinkingId: "thinking-empty", paragraphCount: 0 }));
+    expect(failedSummary.items["thinking-empty"]).toBeUndefined();
+    expect(failedSummary.itemOrder).not.toContain("thinking-empty");
+
+    const stopped = reduceAgentEvent(started, event(3, "run.cancelled", {}));
+    expect(stopped.items["thinking-empty"]).toBeUndefined();
+    expect(stopped.itemOrder).not.toContain("thinking-empty");
+  });
+
   it("resolves an inline approval and adds server-created artifacts", () => {
     const artifact = { id: "artifact-1", name: "Report", kind: "report" as const, mimeType: "text/markdown", content: "# Report", version: 1, createdAt: base.createdAt };
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [

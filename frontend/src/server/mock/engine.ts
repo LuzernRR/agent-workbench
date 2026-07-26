@@ -153,7 +153,7 @@ async function executeModel(run: MockRun, thread: MockThread, config: AgentRunti
     messages: [{ role: "system", content: config.assistant.systemPrompt }, ...messages],
     requestId: run.id,
     signal: run.abortController.signal,
-    onDelta: (delta) => {
+    onTextDelta: (delta) => {
       if (!run.cancelled) emit(run, "text.delta", { messageId, delta });
     }
   });
@@ -168,11 +168,27 @@ async function executeModel(run: MockRun, thread: MockThread, config: AgentRunti
   emit(run, "run.completed", { agentId: run.agent, modelId });
 }
 
-async function executeScript(run: MockRun, thread: MockThread, script: ScriptStep[]) {
+async function executeScript(run: MockRun, thread: MockThread, script: ScriptStep[], userMessage: string) {
   const messageId = newId("msg");
+  const thinkingId = newId("thinking");
   let messageOpen = false;
   const citations: Array<{ label: string; url: string }> = [];
   let fullText = "";
+
+  emit(run, "thinking.started", { thinkingId });
+  await sleep(70);
+  if (run.cancelled) return;
+  emit(run, "thinking.paragraph", {
+    thinkingId,
+    paragraphId: "paragraph-1",
+    text: `这次请求需要围绕“${userMessage.replace(/\s+/gu, " ").trim().slice(0, 140)}”组织可执行内容，并保持界面结果与交付内容一致。`
+  });
+  emit(run, "thinking.paragraph", {
+    thinkingId,
+    paragraphId: "paragraph-2",
+    text: "我会先读取当前可用上下文，再完成请求中的主要工作，最后核对结果是否覆盖了关键约束。"
+  });
+  emit(run, "thinking.completed", { thinkingId, paragraphCount: 2 });
 
   const openMessage = () => {
     if (messageOpen) return;
@@ -353,9 +369,9 @@ export function startRun(input: {
   logStep(run, "info", "助手", "开始处理当前消息");
 
   void (async () => {
-    if (process.env.WORKBENCH_LLM_MODE === "mock") return executeScript(run, thread, buildScript(message));
+    if (process.env.WORKBENCH_LLM_MODE === "mock") return executeScript(run, thread, buildScript(message), message);
     const config = await loadRuntimeConfig();
-    if (runtimeMode(config) === "mock") return executeScript(run, thread, buildScript(message));
+    if (runtimeMode(config) === "mock") return executeScript(run, thread, buildScript(message), message);
     return executeModel(run, thread, config, [...history, { role: "user", content: modelMessage }], input.modelId, input.reasoningEffort);
   })().catch((error) => {
     if (run.cancelled) return;

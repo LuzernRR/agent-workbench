@@ -8,6 +8,7 @@ import type {
   MessageAttachment,
   PlanStep,
   StatusItem,
+  ThinkingItem,
   ToolItem,
   WorkbenchFile
 } from "./types";
@@ -80,6 +81,27 @@ function planValue(value: unknown): PlanStep[] | null {
   return steps;
 }
 
+function removeTimelineItem(state: AgentThreadState, id: string) {
+  const items = { ...state.items };
+  delete items[id];
+  return { items, itemOrder: state.itemOrder.filter((itemId) => itemId !== id) };
+}
+
+function settleThinkingItems(state: AgentThreadState, runId: string, status: ThinkingItem["status"]) {
+  const emptyIds = new Set(Object.values(state.items)
+    .filter((item): item is ThinkingItem => item.kind === "thinking" && item.runId === runId && item.status === "streaming" && item.paragraphs.length === 0)
+    .map((item) => item.id));
+  return {
+    items: Object.fromEntries(Object.entries(state.items)
+      .filter(([id]) => !emptyIds.has(id))
+      .map(([id, item]) => [
+        id,
+        item.kind === "thinking" && item.runId === runId && item.status === "streaming" ? { ...item, status } : item
+      ])),
+    itemOrder: state.itemOrder.filter((id) => !emptyIds.has(id))
+  };
+}
+
 export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): AgentThreadState {
   if (event.threadId !== state.threadId || event.projectId !== state.projectId) return state;
   if (event.seq <= state.lastSeq) return state;
@@ -107,6 +129,38 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         runStatuses: { ...next.runStatuses, [event.runId]: status },
         runTimings: timing && terminal ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings
       };
+    }
+    case "thinking.started": {
+      const item: ThinkingItem = {
+        kind: "thinking",
+        id: stringValue(payload.thinkingId, `thinking:${event.runId}`),
+        runId: event.runId,
+        paragraphs: [],
+        status: "streaming",
+        createdAt: event.createdAt
+      };
+      return { ...next, ...appendItem(next, item) };
+    }
+    case "thinking.paragraph": {
+      const id = stringValue(payload.thinkingId, `thinking:${event.runId}`);
+      const current = next.items[id];
+      if (!current || current.kind !== "thinking") return next;
+      const paragraphId = stringValue(payload.paragraphId, event.id);
+      const text = stringValue(payload.text).trim();
+      if (!text) return next;
+      const paragraph = { id: paragraphId, text };
+      const existing = current.paragraphs.findIndex((candidate) => candidate.id === paragraphId);
+      const paragraphs = existing < 0
+        ? [...current.paragraphs, paragraph]
+        : current.paragraphs.map((candidate, index) => index === existing ? paragraph : candidate);
+      return { ...next, items: { ...next.items, [id]: { ...current, paragraphs, status: "streaming" } } };
+    }
+    case "thinking.completed": {
+      const id = stringValue(payload.thinkingId, `thinking:${event.runId}`);
+      const current = next.items[id];
+      if (!current || current.kind !== "thinking") return next;
+      if (current.paragraphs.length === 0) return { ...next, ...removeTimelineItem(next, id) };
+      return { ...next, items: { ...next.items, [id]: { ...current, status: "completed" } } };
     }
     case "message.started": {
       const item: MessageItem = {
@@ -265,7 +319,8 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         ...next,
         runStatus: "completed",
         runStatuses: { ...next.runStatuses, [event.runId]: "completed" },
-        runTimings: timing ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings
+        runTimings: timing ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings,
+        ...settleThinkingItems(next, event.runId, "completed")
       };
     }
     case "run.cancelled": {
@@ -274,7 +329,8 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         ...next,
         runStatus: "stopped",
         runStatuses: { ...next.runStatuses, [event.runId]: "stopped" },
-        runTimings: timing ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings
+        runTimings: timing ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings,
+        ...settleThinkingItems(next, event.runId, "stopped")
       };
     }
     case "run.failed": {
@@ -287,12 +343,13 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         createdAt: event.createdAt
       };
       const timing = next.runTimings[event.runId];
+      const settled = { ...next, ...settleThinkingItems(next, event.runId, "error") };
       return {
-        ...next,
+        ...settled,
         runStatus: "failed",
-        runStatuses: { ...next.runStatuses, [event.runId]: "failed" },
-        runTimings: timing ? { ...next.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : next.runTimings,
-        ...appendItem(next, statusItem)
+        runStatuses: { ...settled.runStatuses, [event.runId]: "failed" },
+        runTimings: timing ? { ...settled.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : settled.runTimings,
+        ...appendItem(settled, statusItem)
       };
     }
     default:

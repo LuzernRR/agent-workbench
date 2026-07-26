@@ -144,6 +144,17 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await page.getByLabel("任务输入").fill("请运行代码实现一个任务面板页面，并整理方案文档");
   await page.getByRole("button", { name: "发送", exact: true }).click();
 
+  const thinking = page.getByRole("button", { name: /思考结果/u });
+  await expect(thinking).toBeVisible();
+  await expect(thinking).toHaveAttribute("aria-expanded", "false");
+  await thinking.click();
+  const thinkingBlock = page.locator("[data-thinking-id]").first();
+  await expect(thinkingBlock).toContainText("这次请求需要围绕");
+  await expect(thinkingBlock).toContainText("我会先读取当前可用上下文");
+  await expect(thinkingBlock).toContainText("请运行代码实现一个任务面板页面，并整理方案文档");
+  expect(await thinkingBlock.innerText()).not.toMatch(/问题判断|能力限制|建议方案|处理计划|回答重点|^\s*(?:[-*#]|\d+[.、])\s+/mu);
+  expect(await page.getByTestId("conversation-viewport").innerText()).not.toContain("reasoning_content");
+
   await expect(page.getByRole("button", { name: "展开工具调用：上下文读取" })).toBeVisible();
   await page.getByRole("button", { name: "展开工具调用：上下文读取" }).click();
   await expect(page.getByText("执行耗时", { exact: true })).toBeVisible();
@@ -188,6 +199,13 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await expect(page.getByRole("button", { name: "展开工作区" })).toBeVisible();
   await page.getByRole("button", { name: "展开工作区" }).click();
   await expect(workspace).toBeVisible();
+
+  await page.reload();
+  const restoredThinking = page.getByRole("button", { name: /思考结果/u });
+  await expect(restoredThinking).toBeVisible();
+  await expect(restoredThinking).toHaveAttribute("aria-expanded", "false");
+  await restoredThinking.click();
+  await expect(page.getByText(/这次请求需要围绕/u)).toBeVisible();
 });
 
 test("运行可停止并恢复发送状态", async ({ page }) => {
@@ -560,6 +578,16 @@ test("直接拖拽具有动画并持久化项目排序与会话拖入拖出", as
     expect(await threadRow.evaluate((element) => window.getComputedStyle(element).opacity)).toBe("0.2");
   });
   await expect(threadRow).toHaveAttribute("data-project-id", first.id);
+  const movedFrames = await page.evaluate(async (threadId) => {
+    const frames: Array<{ count: number; projectIds: string[]; text: string }> = [];
+    for (let index = 0; index < 12; index += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const rows = [...document.querySelectorAll<HTMLElement>(`[data-thread-id="${threadId}"]`)];
+      frames.push({ count: rows.length, projectIds: rows.map((row) => row.dataset.projectId || ""), text: rows.map((row) => row.innerText).join("|") });
+    }
+    return frames;
+  }, thread.id);
+  expect(movedFrames.every((frame) => frame.count === 1 && frame.projectIds[0] === first.id && frame.text === threadTitle)).toBe(true);
   await expect.poll(async () => {
     const snapshot = await (await page.request.get(`/api/v1/threads/${thread.id}`)).json() as { thread: { projectId: string | null } };
     return snapshot.thread.projectId;
@@ -571,6 +599,16 @@ test("直接拖拽具有动画并持久化项目排序与会话拖入拖出", as
     await expect(page.getByText("移出项目", { exact: true })).toBeVisible();
   });
   await expect(threadRow).toHaveAttribute("data-project-id", "");
+  const exitedFrames = await page.evaluate(async (threadId) => {
+    const frames: Array<{ count: number; projectIds: string[] }> = [];
+    for (let index = 0; index < 12; index += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const rows = [...document.querySelectorAll<HTMLElement>(`[data-thread-id="${threadId}"]`)];
+      frames.push({ count: rows.length, projectIds: rows.map((row) => row.dataset.projectId || "") });
+    }
+    return frames;
+  }, thread.id);
+  expect(exitedFrames.every((frame) => frame.count === 1 && frame.projectIds[0] === "")).toBe(true);
   await expect.poll(async () => {
     const snapshot = await (await page.request.get(`/api/v1/threads/${thread.id}`)).json() as { thread: { projectId: string | null } };
     return snapshot.thread.projectId;
@@ -587,7 +625,7 @@ test("直接拖拽具有动画并持久化项目排序与会话拖入拖出", as
   await page.mouse.up();
   await expect(page.getByText(threadTitle, { exact: true })).toHaveCount(1);
   await expect(threadRow).toHaveCSS("opacity", "1");
-  expect(await threadRow.evaluate((element) => window.getComputedStyle(element).transitionDuration)).toContain("0.18s");
+  expect(await threadRow.evaluate((element) => window.getComputedStyle(element).transitionDuration)).toContain("0.12s");
 });
 
 test("项目创建、重命名、会话移动与项目删除", async ({ page }) => {

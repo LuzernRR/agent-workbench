@@ -2,6 +2,9 @@ export const AGENT_EVENT_TYPES = [
   "run.created",
   "run.started",
   "run.status",
+  "thinking.started",
+  "thinking.paragraph",
+  "thinking.completed",
   "message.started",
   "message.reset",
   "message.delta",
@@ -65,6 +68,20 @@ export type MessageItem = {
   attachments?: MessageAttachment[];
 };
 
+export type ThinkingParagraph = {
+  id: string;
+  text: string;
+};
+
+export type ThinkingItem = {
+  kind: "thinking";
+  id: string;
+  runId: string;
+  paragraphs: ThinkingParagraph[];
+  status: "streaming" | "completed" | "stopped" | "error";
+  createdAt: string;
+};
+
 export type ToolItem = {
   kind: "tool";
   id: string;
@@ -103,7 +120,7 @@ export type StatusItem = {
   createdAt: string;
 };
 
-export type TimelineItem = MessageItem | ToolItem | ApprovalItem | StatusItem;
+export type TimelineItem = MessageItem | ThinkingItem | ToolItem | ApprovalItem | StatusItem;
 
 export type Artifact = {
   id: string;

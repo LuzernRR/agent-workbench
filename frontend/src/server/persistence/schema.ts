@@ -45,9 +45,10 @@ CREATE TABLE IF NOT EXISTS wb_project_memories (
   visitor_id uuid NOT NULL REFERENCES wb_visitors(id) ON DELETE CASCADE,
   project_id text NOT NULL,
   source_thread_id text NOT NULL,
+  source_thread_title text NOT NULL DEFAULT '会话',
   source_run_id text NOT NULL,
   role text NOT NULL CHECK (role IN ('user', 'assistant')),
-  content text NOT NULL CHECK (length(btrim(content)) BETWEEN 1 AND 8000),
+  content text NOT NULL CHECK (length(btrim(content)) >= 1),
   content_hash char(64) NOT NULL,
   embedding vector,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -62,6 +63,29 @@ CREATE INDEX IF NOT EXISTS wb_project_memories_recall_idx
   WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS wb_project_memories_source_idx
   ON wb_project_memories(visitor_id, source_thread_id, source_run_id);
+
+ALTER TABLE wb_project_memories
+  ADD COLUMN IF NOT EXISTS source_thread_title text NOT NULL DEFAULT '会话';
+
+UPDATE wb_project_memories memory
+SET source_thread_title = thread.title
+FROM wb_threads thread
+WHERE memory.visitor_id = thread.visitor_id
+  AND memory.source_thread_id = thread.id
+  AND memory.source_thread_title = '会话';
+
+ALTER TABLE wb_project_memories
+  DROP CONSTRAINT IF EXISTS wb_project_memories_content_check;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_project_memories_content_nonempty'
+  ) THEN
+    ALTER TABLE wb_project_memories
+      ADD CONSTRAINT wb_project_memories_content_nonempty CHECK (length(btrim(content)) >= 1);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS wb_runs (
   id text PRIMARY KEY,

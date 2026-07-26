@@ -44,7 +44,7 @@ async function complete(prepared: PreparedRun, userMessage: string, assistantMes
       { type: "message.started", payload: { messageId: assistantMessageId, role: "assistant", text: "" } },
       { type: "message.completed", payload: { messageId: assistantMessageId, text: assistantMessage, citations: [] } }
     ],
-    memory: { userMessage, assistantMessage, maxItems: 120, maxChars: 16_000 }
+    memory: { userMessage, assistantMessage }
   });
   expect(events?.at(-1)?.type).toBe("run.completed");
 }

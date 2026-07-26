@@ -1,6 +1,6 @@
 import type { AgentEvent, ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig } from "@/server/config/runtime-config";
-import { streamDeepSeekChat, type DeepSeekChatMessage } from "@/server/llm/deepseek-client";
+import { streamDeepSeekChat, summarizeDeepSeekReasoning, type DeepSeekChatMessage } from "@/server/llm/deepseek-client";
 import {
   deleteExpiredLiveThreads,
   finalizeLiveRun,
@@ -96,9 +96,44 @@ async function finalize(
 async function execute(runtime: LiveRuntime, input: { message: string; history: DeepSeekChatMessage[]; attachmentContext: string; projectMemoryContext: string; reasoningEffort: ReasoningEffort }) {
   const config = await loadRuntimeConfig();
   const messageId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+  const thinkingId = `thinking_${crypto.randomUUID().replaceAll("-", "")}`;
+  let reasoningText = "";
+  let thinkingStarted = false;
+  let thinkingCompleted = false;
+  let thinkingCompletion: Promise<void> | null = null;
+  let messageStarted = false;
   await emit(runtime, "run.started", { agentId: "chat", modelId: runtime.run.modelId });
-  await emit(runtime, "message.started", { messageId, role: "assistant", text: "", agentId: "chat" });
   const currentMessage = input.attachmentContext ? `${input.message}\n\n${input.attachmentContext}` : input.message;
+
+  const completeThinking = () => {
+    if (!thinkingStarted || thinkingCompleted) return Promise.resolve();
+    thinkingCompletion ??= (async () => {
+      let paragraphs;
+      try {
+        paragraphs = await summarizeDeepSeekReasoning({
+          config,
+          modelId: runtime.run.modelId,
+          userMessage: input.message,
+          reasoningText,
+          requestId: runtime.run.id,
+          signal: runtime.abortController.signal
+        });
+      } catch {
+        if (runtime.cancelled) return;
+        await emit(runtime, "thinking.completed", { thinkingId, paragraphCount: 0 });
+        thinkingCompleted = true;
+        return;
+      }
+      if (runtime.cancelled) return;
+      for (const paragraph of paragraphs) {
+        await emit(runtime, "thinking.paragraph", { thinkingId, paragraphId: paragraph.id, text: paragraph.text });
+      }
+      await emit(runtime, "thinking.completed", { thinkingId, paragraphCount: paragraphs.length });
+      thinkingCompleted = true;
+    })();
+    return thinkingCompletion;
+  };
+
   const result = await streamDeepSeekChat({
     config,
     modelId: runtime.run.modelId,
@@ -114,11 +149,27 @@ async function execute(runtime: LiveRuntime, input: { message: string; history: 
     ],
     requestId: runtime.run.id,
     signal: runtime.abortController.signal,
-    onDelta: async (delta) => {
+    onReasoningDelta: async (delta) => {
+      if (runtime.cancelled) return;
+      reasoningText += delta;
+      if (!thinkingStarted) {
+        thinkingStarted = true;
+        await emit(runtime, "thinking.started", { thinkingId });
+      }
+    },
+    onTextDelta: async (delta) => {
+      await completeThinking();
+      if (runtime.cancelled) return;
+      if (!messageStarted) {
+        messageStarted = true;
+        await emit(runtime, "message.started", { messageId, role: "assistant", text: "", agentId: "chat" });
+      }
       if (!runtime.cancelled) await emit(runtime, "text.delta", { messageId, delta });
     }
   });
   if (runtime.cancelled) return;
+  await completeThinking();
+  if (!messageStarted) await emit(runtime, "message.started", { messageId, role: "assistant", text: "", agentId: "chat" });
   await finalize(runtime, "completed", {
     agentId: "chat",
     modelId: runtime.run.modelId,
@@ -128,9 +179,7 @@ async function execute(runtime: LiveRuntime, input: { message: string; history: 
     events: [{ type: "message.completed", payload: { messageId, text: result.text, citations: [] } }],
     memory: {
       userMessage: input.message,
-      assistantMessage: result.text,
-      maxItems: config.retention.projectMemoryMaxItems,
-      maxChars: config.retention.projectMemoryMaxChars
+      assistantMessage: result.text
     }
   });
 }

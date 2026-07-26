@@ -4,8 +4,8 @@
 // ThreadPrimitive, MessagePrimitive, action bar, and composer composition here.
 import { useEffect, useMemo, useState } from "react";
 import { ActionBarPrimitive, AssistantRuntimeProvider, AuiIf, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react";
-import { ArrowDown, Check, Copy, FileText, Pencil, X } from "lucide-react";
-import type { AgentThreadState, MessageAttachment, MessageItem, RunTiming, TimelineItem } from "@/lib/agent-events/types";
+import { ArrowDown, Check, ChevronDown, ChevronRight, Copy, FileText, Pencil, X } from "lucide-react";
+import type { AgentThreadState, MessageAttachment, MessageItem, RunTiming, ThinkingItem, TimelineItem } from "@/lib/agent-events/types";
 import { MarkdownRenderer } from "@/components/workbench/renderers/MarkdownRenderer";
 import { ApprovalPart } from "./ApprovalPart";
 import { AgentComposer } from "@/components/workbench/composer/AgentComposer";
@@ -27,6 +27,15 @@ function timelineMessageLike(item: TimelineItem): ThreadMessageLike {
       content: item.text,
       createdAt: new Date(item.createdAt),
       status: item.role === "assistant" ? (item.status === "streaming" ? { type: "running" } : { type: "complete", reason: "stop" }) : undefined
+    };
+  }
+  if (item.kind === "thinking") {
+    return {
+      id: item.id,
+      role: "assistant",
+      content: [{ type: "reasoning", text: item.paragraphs.map((paragraph) => paragraph.text).join("\n\n") }],
+      createdAt: new Date(item.createdAt),
+      status: item.status === "streaming" ? { type: "running" } : { type: "complete", reason: "stop" }
     };
   }
   if (item.kind === "tool") {
@@ -117,13 +126,14 @@ function RuntimeMessage({ state, onStartRun, onResolveApproval, isResolvingAppro
   const messageId = useAuiState((snapshot) => snapshot.message.id);
   const item = state.items[messageId];
   if (!item) return null;
+  if (item.kind === "thinking") return <MessagePrimitive.Root><ThinkingResult key={`${item.id}:${item.status}`} item={item} timing={state.runTimings[item.runId]} /></MessagePrimitive.Root>;
   if (item.kind === "tool") return <MessagePrimitive.Root><ActivityRow item={item} /></MessagePrimitive.Root>;
   if (item.kind === "approval") return <MessagePrimitive.Root className="mb-1"><ApprovalPart item={item} disabled={isResolvingApproval} onResolve={(decision) => void onResolveApproval(item.approvalId, decision)} /></MessagePrimitive.Root>;
   if (item.kind === "status") return <MessagePrimitive.Root className="conversation-lane mb-2 py-1 text-[14px] leading-5 text-danger">{getRunFailureMessage(item.label)}</MessagePrimitive.Root>;
   const itemIndex = state.itemOrder.indexOf(item.id);
   const isFirstAssistant = item.role === "assistant" && !state.itemOrder.slice(0, itemIndex).some((id) => {
     const previous = state.items[id];
-    return previous?.kind === "message" && previous.role === "assistant" && previous.runId === item.runId;
+    return previous?.runId === item.runId && (previous.kind === "thinking" || (previous.kind === "message" && previous.role === "assistant"));
   });
   const isLastAssistant = item.role === "assistant" && !state.itemOrder.slice(itemIndex + 1).some((id) => {
     const following = state.items[id];
@@ -168,6 +178,28 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply }: { 
       </div>
     </MessagePrimitive.Root>
   );
+}
+
+function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: RunTiming }) {
+  const [open, setOpen] = useState(item.status === "streaming");
+  const label = item.status === "streaming"
+    ? "正在思考"
+    : item.status === "stopped"
+      ? "思考已停止"
+      : item.status === "error"
+        ? "思考未完成"
+        : "思考结果";
+  return <div className="conversation-lane mb-2 text-[15px] leading-6 text-secondary" data-thinking-id={item.id}>
+    {timing ? <RunElapsed timing={timing} /> : null}
+    <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" title={open ? "收起思考结果" : "展开思考结果"}>
+      {open ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
+      <span>{label}</span>
+      {item.paragraphs.length ? <span className="tabular-nums text-[13px] font-normal text-tertiary">{item.paragraphs.length} 段</span> : null}
+    </button>
+    {open && item.paragraphs.length ? <div className="ml-2 mt-1 space-y-2.5 border-l border-line pl-4">
+      {item.paragraphs.map((paragraph) => <p key={paragraph.id} className="text-pretty text-secondary">{paragraph.text}</p>)}
+    </div> : null}
+  </div>;
 }
 
 function MessageCitations({ citations }: { citations: NonNullable<MessageItem["citations"]> }) {

@@ -31,6 +31,10 @@ import { cn } from "@/lib/utils";
 type ProjectDialogState = { mode: "create" | "rename"; project?: ProjectSummary } | null;
 type SelectionHandler = (projectId: string | null, threadId: string | null) => void;
 type ActiveDrag = { type: "project"; projectId: string } | { type: "thread"; threadId: string };
+type ThreadCacheContext = { previous: ThreadSummary[] | undefined; key: readonly ["threads", "all", string[]] };
+type ProjectCacheContext = { previous: ProjectSummary[] | undefined };
+type MoveThreadInput = { id: string; destinationProjectId: string | null; optimistic?: ThreadCacheContext };
+type ReorderProjectsInput = { ids: string[]; optimistic?: ProjectCacheContext };
 
 const projectDragId = (id: string) => `project:${id}`;
 const threadDragId = (id: string) => `thread:${id}`;
@@ -47,7 +51,7 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
     staleTime: 15_000
   });
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 3 } }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 1 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null);
@@ -80,16 +84,27 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
     ]);
   };
 
+  const optimisticallyMoveThread = (id: string, destinationProjectId: string | null): ThreadCacheContext => {
+    const cancellation = queryClient.cancelQueries({ queryKey: ["threads"] });
+    const key = ["threads", "all", projectIds] as const;
+    const previous = queryClient.getQueryData<ThreadSummary[]>(key);
+    queryClient.setQueryData<ThreadSummary[]>(key, (current) => (current || []).map((thread) => thread.id === id ? { ...thread, projectId: destinationProjectId, updatedAt: new Date().toISOString() } : thread));
+    if (id === threadId) onSelectThread?.(destinationProjectId, id);
+    void cancellation;
+    return { previous, key };
+  };
+  const optimisticallyReorderProjects = (ids: string[]): ProjectCacheContext => {
+    const cancellation = queryClient.cancelQueries({ queryKey: ["projects"] });
+    const previous = queryClient.getQueryData<ProjectSummary[]>(["projects"]);
+    const byId = new Map((previous || []).map((project) => [project.id, project]));
+    queryClient.setQueryData<ProjectSummary[]>(["projects"], ids.map((id) => byId.get(id)).filter((project): project is ProjectSummary => Boolean(project)));
+    void cancellation;
+    return { previous };
+  };
+
   const moveThread = useMutation({
-    mutationFn: ({ id, destinationProjectId }: { id: string; destinationProjectId: string | null }) => workbenchApi.moveThread(id, destinationProjectId),
-    onMutate: async ({ id, destinationProjectId }) => {
-      await queryClient.cancelQueries({ queryKey: ["threads"] });
-      const key = ["threads", "all", projectIds] as const;
-      const previous = queryClient.getQueryData<ThreadSummary[]>(key);
-      queryClient.setQueryData<ThreadSummary[]>(key, (current) => (current || []).map((thread) => thread.id === id ? { ...thread, projectId: destinationProjectId, updatedAt: new Date().toISOString() } : thread));
-      if (id === threadId) onSelectThread?.(destinationProjectId, id);
-      return { previous, key };
-    },
+    mutationFn: ({ id, destinationProjectId }: MoveThreadInput) => workbenchApi.moveThread(id, destinationProjectId),
+    onMutate: ({ id, destinationProjectId, optimistic }) => optimistic ?? optimisticallyMoveThread(id, destinationProjectId),
     onError: (_error, _variables, context) => {
       if (context?.previous) queryClient.setQueryData(context.key, context.previous);
     },
@@ -97,15 +112,9 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
   });
 
   const reorderProjects = useMutation({
-    mutationFn: (ids: string[]) => workbenchApi.reorderProjects(ids),
-    onMutate: async (ids) => {
-      await queryClient.cancelQueries({ queryKey: ["projects"] });
-      const previous = queryClient.getQueryData<ProjectSummary[]>(["projects"]);
-      const byId = new Map((previous || []).map((project) => [project.id, project]));
-      queryClient.setQueryData<ProjectSummary[]>(["projects"], ids.map((id) => byId.get(id)).filter((project): project is ProjectSummary => Boolean(project)));
-      return { previous };
-    },
-    onError: (_error, _ids, context) => {
+    mutationFn: ({ ids }: ReorderProjectsInput) => workbenchApi.reorderProjects(ids),
+    onMutate: ({ ids, optimistic }) => optimistic ?? optimisticallyReorderProjects(ids),
+    onError: (_error, _input, context) => {
       if (context?.previous) queryClient.setQueryData(["projects"], context.previous);
     },
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["projects"] })
@@ -185,12 +194,17 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
       const overData = event.over.data.current;
       const targetProjectId = overData?.type === "project" ? String(overData.projectId) : overData?.type === "thread" ? (threads.data || []).find((thread) => thread.id === overData.threadId)?.projectId : null;
       const to = current.findIndex((project) => project.id === targetProjectId);
-      if (from >= 0 && to >= 0 && from !== to) reorderProjects.mutate(arrayMove(current, from, to).map((project) => project.id));
+      if (from >= 0 && to >= 0 && from !== to) {
+        const ids = arrayMove(current, from, to).map((project) => project.id);
+        reorderProjects.mutate({ ids, optimistic: optimisticallyReorderProjects(ids) });
+      }
     }
     if (active?.type === "thread") {
       const source = (threads.data || []).find((thread) => thread.id === active.threadId);
       const destination = destinationFor(event);
-      if (source && destination !== undefined && source.projectId !== destination) moveThread.mutate({ id: source.id, destinationProjectId: destination });
+      if (source && destination !== undefined && source.projectId !== destination) {
+        moveThread.mutate({ id: source.id, destinationProjectId: destination, optimistic: optimisticallyMoveThread(source.id, destination) });
+      }
     }
     resetDrag();
   };
@@ -247,8 +261,8 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
             </section>
           </UnassignedDropZone>
         </div>
-        <DragOverlay dropAnimation={{ duration: 190, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" }}>
-          {activeLabel ? <div className="flex h-9 max-w-60 items-center gap-2 rounded-lg bg-white px-3 text-[14px] font-medium text-ink shadow-popover"><GripVertical className="size-4 text-tertiary" /><span className="min-w-0 overflow-hidden text-clip whitespace-nowrap">{activeLabel}</span></div> : null}
+        <DragOverlay dropAnimation={null} adjustScale={false}>
+          {activeLabel ? <div className="pointer-events-none flex h-9 max-w-60 items-center gap-2 rounded-lg bg-white px-3 text-[14px] font-medium text-ink shadow-popover"><GripVertical className="size-4 text-tertiary" /><span className="min-w-0 overflow-hidden text-clip whitespace-nowrap">{activeLabel}</span></div> : null}
         </DragOverlay>
       </DndContext>
 
@@ -262,8 +276,8 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
 
 function ProjectTreeItem({ project, expanded, selected, dropTarget, onToggle, onSelect, onRename, onDelete, children }: { project: ProjectSummary; expanded: boolean; selected: boolean; dropTarget: boolean; onToggle: () => void; onSelect: () => void; onRename: (project: ProjectSummary) => void; onDelete: (project: ProjectSummary) => void; children: React.ReactNode }) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: projectDragId(project.id), data: { type: "project", projectId: project.id } });
-  const style = { transform: CSS.Transform.toString(transform), transition: transition || "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)", zIndex: isDragging ? 10 : undefined };
-  return <div ref={setNodeRef} style={style} role="treeitem" aria-expanded={expanded} aria-selected={selected} className={cn("relative", isDragging && "opacity-25")}>
+  const style = { transform: isDragging ? undefined : CSS.Transform.toString(transform), transition: isDragging ? "opacity 120ms ease-out" : transition || "transform 160ms ease-out, opacity 120ms ease-out", zIndex: isDragging ? 10 : undefined };
+  return <div ref={setNodeRef} style={style} role="treeitem" aria-expanded={expanded} aria-selected={selected} className={cn("relative motion-reduce:!transition-none", isDragging && "opacity-25")}>
     <div className={cn("group flex h-9 min-w-0 items-center rounded-md pr-1 transition-colors duration-150", selected && "bg-[#ececea] text-ink", dropTarget && "bg-[#e5e5e2] shadow-[inset_0_0_0_1px_#8f8f8b]")}>
       <button type="button" aria-label={`${expanded ? "收起" : "展开"}项目 ${project.name}`} className="grid size-8 shrink-0 place-items-center rounded-md text-tertiary hover:bg-white/80 hover:text-ink" onClick={onToggle}>{expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}</button>
       <button type="button" onClick={onSelect} className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[14px] leading-5 text-secondary hover:text-ink" title={project.name}>{expanded ? <FolderOpen className="size-4 shrink-0" /> : <Folder className="size-4 shrink-0" />}<span className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{project.name}</span><span className="shrink-0 tabular-nums text-[12px] text-tertiary">{Children.count(children)}</span></button>
@@ -275,9 +289,9 @@ function ProjectTreeItem({ project, expanded, selected, dropTarget, onToggle, on
 }
 
 function ThreadTreeRow({ thread, projectName, selected, projects, onSelect, onRename, onMove, onDelete }: { thread: ThreadSummary; projectName?: string; selected: boolean; projects: ProjectSummary[]; onSelect: () => void; onRename: (thread: ThreadSummary) => void; onMove: (projectId: string | null) => void; onDelete: (thread: ThreadSummary) => void }) {
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, isDragging } = useDraggable({ id: threadDragId(thread.id), data: { type: "thread", threadId: thread.id } });
-  const style = { transform: CSS.Translate.toString(transform), transition: isDragging ? undefined : "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)" };
-  return <div ref={setNodeRef} style={style} data-testid="thread-row" data-thread-id={thread.id} data-project-id={thread.projectId ?? ""} className={cn("group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-[14px] leading-5 text-secondary transition-colors duration-150 hover:bg-white hover:text-ink", selected && "bg-[#ececea] text-ink", isDragging && "opacity-20")}>
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({ id: threadDragId(thread.id), data: { type: "thread", threadId: thread.id } });
+  const style = { transition: "opacity 120ms ease-out" };
+  return <div ref={setNodeRef} style={style} data-testid="thread-row" data-thread-id={thread.id} data-project-id={thread.projectId ?? ""} className={cn("group flex h-9 w-full min-w-0 items-center rounded-md pr-1 text-[14px] leading-5 text-secondary transition-colors duration-150 motion-reduce:!transition-none hover:bg-white hover:text-ink", selected && "bg-[#ececea] text-ink", isDragging && "opacity-20")}>
     <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} className="grid size-7 touch-none shrink-0 place-items-center rounded-md text-tertiary opacity-0 transition-opacity hover:bg-white focus:opacity-100 group-hover:opacity-100" aria-label={`拖动会话 ${thread.title}`} title="拖动会话"><GripVertical className="size-3.5" /></button>
     <button type="button" aria-label={projectName ? `${thread.title} ${projectName}` : thread.title} onClick={onSelect} className="flex h-full min-w-0 flex-1 items-center px-1 text-left" title={thread.title}><span data-testid="thread-title" className="block min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap">{thread.title}</span></button>
     <ThreadMenu thread={thread} projects={projects} onRename={onRename} onMove={onMove} onDelete={onDelete} />

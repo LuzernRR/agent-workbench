@@ -34,8 +34,22 @@ type AttachmentRow = {
 };
 type ProjectMemoryRow = {
   id: string;
+  source_thread_id: string;
+  source_thread_title: string;
+  source_run_id: string;
   role: "user" | "assistant";
   content: string;
+  created_at: Date | string;
+};
+
+type ProjectMemoryExchange = {
+  sourceThreadId: string;
+  sourceThreadTitle: string;
+  sourceRunId: string;
+  createdAt: string;
+  user: string;
+  assistant: string;
+  rowIds: string[];
 };
 
 export type LiveRunRecord = {
@@ -51,8 +65,6 @@ export type LiveRunStatus = "queued" | "running" | "waiting" | "completed" | "fa
 type ProjectExchangeInput = {
   userMessage: string;
   assistantMessage: string;
-  maxItems: number;
-  maxChars: number;
 };
 
 export type PreparedRun = {
@@ -199,6 +211,12 @@ export async function updateLiveThread(visitorId: string, threadId: string, patc
       WHERE id = $1 AND visitor_id = $2
       RETURNING id, project_id, title, status, updated_at, last_user_message_at
     `, [threadId, visitorId, patch.title ?? null, Object.prototype.hasOwnProperty.call(patch, "projectId"), patch.projectId ?? null]);
+    if (patch.title && result.rows[0]) {
+      await client.query(
+        "UPDATE wb_project_memories SET source_thread_title = $3 WHERE source_thread_id = $1 AND visitor_id = $2",
+        [threadId, visitorId, result.rows[0].title]
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(patch, "projectId") && result.rows[0]) {
       await client.query("UPDATE wb_runs SET project_id = $3 WHERE thread_id = $1 AND visitor_id = $2", [threadId, visitorId, patch.projectId ?? null]);
       await client.query("UPDATE wb_agent_events SET project_id = $3 WHERE thread_id = $1 AND visitor_id = $2", [threadId, visitorId, patch.projectId ?? null]);
@@ -305,60 +323,144 @@ export async function persistLiveEvent(run: LiveRunRecord, type: AgentEventType,
 async function recallProjectMemory(client: PoolClient, input: {
   visitorId: string;
   projectId: string | null;
-  threadId: string;
+  query: string;
+  excludedRunIds: string[];
   recallItems: number;
   maxChars: number;
 }) {
   if (!input.projectId) return "";
   const result = await client.query<ProjectMemoryRow>(`
-    SELECT id, role, content
+    SELECT id, source_thread_id, source_thread_title, source_run_id, role, content, created_at
     FROM wb_project_memories
-    WHERE visitor_id = $1 AND project_id = $2 AND source_thread_id <> $3 AND archived_at IS NULL
+    WHERE visitor_id = $1 AND project_id = $2 AND archived_at IS NULL
+      AND NOT (source_run_id = ANY($3::text[]))
     ORDER BY created_at DESC
-    LIMIT $4
-  `, [input.visitorId, input.projectId, input.threadId, input.recallItems]);
-  const selected: ProjectMemoryRow[] = [];
-  let characters = 0;
-  for (const row of result.rows) {
-    const labelLength = row.role === "user" ? "用户：".length : "助手：".length;
-    const separatorLength = selected.length ? 2 : 0;
-    const available = input.maxChars - characters - labelLength - separatorLength;
-    if (available <= 0) break;
-    if (row.content.length > available && selected.length) continue;
-    selected.push({ ...row, content: row.content.slice(0, available) });
-    characters += labelLength + separatorLength + Math.min(row.content.length, available);
-    if (characters >= input.maxChars) break;
+  `, [input.visitorId, input.projectId, input.excludedRunIds]);
+  const selected = buildProjectMemoryContext(result.rows, input.query, input.recallItems, input.maxChars);
+  if (selected.rowIds.length) {
+    await client.query("UPDATE wb_project_memories SET last_accessed_at = now() WHERE id = ANY($1::text[])", [selected.rowIds]);
   }
-  if (!selected.length) return "";
-  await client.query("UPDATE wb_project_memories SET last_accessed_at = now() WHERE id = ANY($1::text[])", [selected.map((row) => row.id)]);
-  return selected.reverse().map((row) => `${row.role === "user" ? "用户" : "助手"}：${row.content}`).join("\n\n");
+  return selected.context;
+}
+
+function queryTerms(queryText: string) {
+  const normalized = queryText.toLocaleLowerCase("zh-CN");
+  const terms = new Set(normalized.split(/[\p{P}\p{S}\s]+/gu).map((term) => term.trim()).filter((term) => term.length >= 2));
+  for (const match of normalized.matchAll(/[\p{Script=Han}]{2,}/gu)) {
+    const value = match[0];
+    for (let index = 0; index < value.length - 1 && terms.size < 80; index += 1) terms.add(value.slice(index, index + 2));
+  }
+  return [...terms];
+}
+
+function relevanceScore(exchange: ProjectMemoryExchange, terms: string[]) {
+  const content = `${exchange.sourceThreadTitle}\n${exchange.user}\n${exchange.assistant}`.toLocaleLowerCase("zh-CN");
+  return terms.reduce((score, term) => content.includes(term) ? score + Math.min(term.length, 8) : score, 0);
+}
+
+function exchangeBlock(exchange: ProjectMemoryExchange, maxChars = Number.POSITIVE_INFINITY) {
+  const header = `[会话：${exchange.sourceThreadTitle} | 时间：${exchange.createdAt}]`;
+  const userLabel = exchange.user ? "\n用户：" : "";
+  const assistantLabel = exchange.assistant ? "\n助手：" : "";
+  if (!Number.isFinite(maxChars)) return `${header}${userLabel}${exchange.user}${assistantLabel}${exchange.assistant}`;
+  const fixed = header.length + userLabel.length + assistantLabel.length;
+  if (fixed >= maxChars) return header.slice(0, Math.max(0, maxChars));
+  const available = maxChars - fixed;
+  const userBudget = exchange.user && exchange.assistant ? Math.floor(available / 2) : exchange.user ? available : 0;
+  const assistantBudget = available - userBudget;
+  return `${header}${userLabel}${exchange.user.slice(0, userBudget)}${assistantLabel}${exchange.assistant.slice(0, assistantBudget)}`;
+}
+
+export function buildProjectMemoryContext(rows: ProjectMemoryRow[], queryText: string, recallItems: number, maxChars: number) {
+  if (!rows.length || maxChars <= 0) return { context: "", rowIds: [] as string[] };
+  const exchangesByRun = new Map<string, ProjectMemoryExchange>();
+  for (const row of rows) {
+    const createdAt = iso(row.created_at);
+    const exchange = exchangesByRun.get(row.source_run_id) ?? {
+      sourceThreadId: row.source_thread_id,
+      sourceThreadTitle: row.source_thread_title,
+      sourceRunId: row.source_run_id,
+      createdAt,
+      user: "",
+      assistant: "",
+      rowIds: []
+    };
+    exchange.createdAt = exchange.createdAt > createdAt ? exchange.createdAt : createdAt;
+    exchange.sourceThreadTitle = row.source_thread_title;
+    exchange[row.role] = row.content;
+    exchange.rowIds.push(row.id);
+    exchangesByRun.set(row.source_run_id, exchange);
+  }
+
+  const exchanges = [...exchangesByRun.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const sourceThreads = new Map<string, { title: string; latestAt: string }>();
+  for (const exchange of exchanges) {
+    if (!sourceThreads.has(exchange.sourceThreadId)) sourceThreads.set(exchange.sourceThreadId, { title: exchange.sourceThreadTitle, latestAt: exchange.createdAt });
+  }
+  const directory = `项目来源会话：\n${[...sourceThreads.values()].sort((left, right) => right.latestAt.localeCompare(left.latestAt)).map((thread) => `- ${thread.title}`).join("\n")}`;
+  if (directory.length >= maxChars) return { context: directory.slice(0, maxChars), rowIds: [] as string[] };
+
+  const maxExchanges = Math.max(1, Math.floor(recallItems / 2));
+  const selected: ProjectMemoryExchange[] = [];
+  const selectedRuns = new Set<string>();
+  const add = (exchange: ProjectMemoryExchange) => {
+    if (selected.length >= maxExchanges || selectedRuns.has(exchange.sourceRunId)) return;
+    selected.push(exchange);
+    selectedRuns.add(exchange.sourceRunId);
+  };
+  const latestThreads = new Set<string>();
+  for (const exchange of exchanges) {
+    if (latestThreads.has(exchange.sourceThreadId)) continue;
+    latestThreads.add(exchange.sourceThreadId);
+    add(exchange);
+  }
+  const terms = queryTerms(queryText);
+  exchanges
+    .filter((exchange) => !selectedRuns.has(exchange.sourceRunId))
+    .map((exchange) => ({ exchange, score: relevanceScore(exchange, terms) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || right.exchange.createdAt.localeCompare(left.exchange.createdAt))
+    .forEach((candidate) => add(candidate.exchange));
+  exchanges.forEach(add);
+
+  const ordered = selected.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const fullBlocks = ordered.map((exchange) => exchangeBlock(exchange));
+  const fullContext = `${directory}\n\n${fullBlocks.join("\n\n")}`;
+  if (fullContext.length <= maxChars) return { context: fullContext, rowIds: ordered.flatMap((exchange) => exchange.rowIds) };
+
+  const blocks: string[] = [];
+  let remaining = maxChars - directory.length - 2;
+  for (const [index, exchange] of ordered.entries()) {
+    const separators = index ? 2 : 0;
+    remaining -= separators;
+    if (remaining <= 0) break;
+    const remainingItems = ordered.length - index;
+    const budget = Math.max(1, Math.floor(remaining / remainingItems));
+    const block = exchangeBlock(exchange, budget);
+    blocks.push(block);
+    remaining -= block.length;
+  }
+  const context = `${directory}\n\n${blocks.join("\n\n")}`.slice(0, maxChars);
+  return { context, rowIds: ordered.slice(0, blocks.length).flatMap((exchange) => exchange.rowIds) };
 }
 
 async function rememberProjectExchangeWithClient(client: PoolClient, run: LiveRunRecord, input: ProjectExchangeInput) {
   if (!run.projectId) return 0;
-  const itemLimit = Math.min(8_000, Math.max(1_000, Math.floor(input.maxChars / 4)));
   const entries = [
-    { role: "user" as const, content: input.userMessage.trim().slice(0, itemLimit) },
-    { role: "assistant" as const, content: input.assistantMessage.trim().slice(0, itemLimit) }
+    { role: "user" as const, content: input.userMessage.trim() },
+    { role: "assistant" as const, content: input.assistantMessage.trim() }
   ].filter((entry) => entry.content);
   for (const entry of entries) {
     const hash = createHash("sha256").update(`${entry.role}\0${entry.content}`, "utf8").digest("hex");
     await client.query(`
-      INSERT INTO wb_project_memories (id, visitor_id, project_id, source_thread_id, source_run_id, role, content, content_hash)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO wb_project_memories (id, visitor_id, project_id, source_thread_id, source_thread_title, source_run_id, role, content, content_hash)
+      SELECT $1, $2, $3, $4,
+        COALESCE((SELECT title FROM wb_threads WHERE id = $4 AND visitor_id = $2), '会话'),
+        $5, $6, $7, $8
       ON CONFLICT (source_run_id, role)
-      DO UPDATE SET content = EXCLUDED.content, content_hash = EXCLUDED.content_hash, last_accessed_at = now(), archived_at = NULL
+      DO UPDATE SET source_thread_title = EXCLUDED.source_thread_title, content = EXCLUDED.content, content_hash = EXCLUDED.content_hash, last_accessed_at = now(), archived_at = NULL
     `, [liveId("memory"), run.visitorId, run.projectId, run.threadId, run.id, entry.role, entry.content, hash]);
   }
-  await client.query(`
-    DELETE FROM wb_project_memories
-    WHERE visitor_id = $1 AND project_id = $2 AND id IN (
-      SELECT id FROM wb_project_memories
-      WHERE visitor_id = $1 AND project_id = $2
-      ORDER BY created_at DESC
-      OFFSET $3
-    )
-  `, [run.visitorId, run.projectId, input.maxItems]);
   return entries.length;
 }
 
@@ -424,7 +526,8 @@ export async function prepareLiveRun(input: {
     const projectMemoryContext = await recallProjectMemory(client, {
       visitorId: input.visitorId,
       projectId: thread.project_id,
-      threadId: input.threadId,
+      query: input.message,
+      excludedRunIds: [...new Set(limited.map((message) => message.runId))],
       recallItems: input.memoryRecallItems,
       maxChars: input.memoryMaxChars
     });

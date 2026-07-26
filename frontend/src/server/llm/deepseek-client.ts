@@ -1,5 +1,6 @@
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import type { AgentRuntimeConfig } from "@/server/config/runtime-config";
+import { z } from "zod";
 
 export type DeepSeekChatMessage = {
   role: "system" | "user" | "assistant";
@@ -8,6 +9,7 @@ export type DeepSeekChatMessage = {
 
 export type DeepSeekStreamResult = {
   text: string;
+  reasoningText: string;
   finishReason: string | null;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
 };
@@ -26,8 +28,23 @@ type StreamInput = {
   messages: DeepSeekChatMessage[];
   requestId: string;
   signal?: AbortSignal;
-  onDelta: (delta: string) => void | Promise<void>;
+  onTextDelta: (delta: string) => void | Promise<void>;
+  onReasoningDelta?: (delta: string) => void | Promise<void>;
 };
+
+export type ThinkingParagraphSummary = {
+  id: string;
+  text: string;
+};
+
+const thinkingParagraphSchema = z.string().trim().min(1).max(600)
+  .refine((value) => !/[\r\n]/u.test(value), "每个数组元素只能包含一个自然段")
+  .refine((value) => !/(?:^|\s)(?:[#>*+-]|\d+[.、）)])\s+/u.test(value) && !/[`*_]{2,}/u.test(value), "思考结果不能使用列表或 Markdown")
+  .refine((value) => !/^\s*(?:问题判断|能力限制|建议方案|处理计划|回答重点)\s*[:：]?/u.test(value), "思考结果不能使用固定阶段标题");
+
+const thinkingSummarySchema = z.object({
+  paragraphs: z.array(thinkingParagraphSchema).min(1).max(3)
+});
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
@@ -102,7 +119,7 @@ export async function streamDeepSeekChat(input: StreamInput): Promise<DeepSeekSt
 
   for (let attempt = 0; attempt <= input.config.provider.request.maxRetries; attempt += 1) {
     const activeSignal = requestSignal(input.signal, input.config.provider.request.timeoutMs);
-    let receivedContent = false;
+    let receivedOutput = false;
     try {
       const response = await fetch(input.config.provider.endpoint, {
         method: "POST",
@@ -128,15 +145,21 @@ export async function streamDeepSeekChat(input: StreamInput): Promise<DeepSeekSt
         throw new DeepSeekApiError(safeApiError(response.status), response.status);
       }
       if (!response.body) throw new DeepSeekApiError("模型未返回流式响应");
-      return await consumeDeepSeekSse(response.body, async (delta) => {
-        receivedContent = true;
-        await input.onDelta(delta);
+      return await consumeDeepSeekSse(response.body, {
+        onTextDelta: async (delta) => {
+          receivedOutput = true;
+          await input.onTextDelta(delta);
+        },
+        onReasoningDelta: async (delta) => {
+          receivedOutput = true;
+          await input.onReasoningDelta?.(delta);
+        }
       }, activeSignal.signal);
     } catch (error) {
       if (input.signal?.aborted) throw error;
       if (activeSignal.timedOut()) throw new DeepSeekApiError("模型响应超时");
       if (error instanceof DeepSeekApiError) throw error;
-      if (receivedContent) throw new DeepSeekApiError("模型流式响应意外中断");
+      if (receivedOutput) throw new DeepSeekApiError("模型流式响应意外中断");
       if (attempt < input.config.provider.request.maxRetries) {
         await wait(Math.min(500 * (2 ** attempt), 4_000), input.signal);
         continue;
@@ -149,11 +172,12 @@ export async function streamDeepSeekChat(input: StreamInput): Promise<DeepSeekSt
   throw new DeepSeekApiError("模型请求失败");
 }
 
-export async function consumeDeepSeekSse(body: ReadableStream<Uint8Array>, onDelta: StreamInput["onDelta"], signal?: AbortSignal): Promise<DeepSeekStreamResult> {
+export async function consumeDeepSeekSse(body: ReadableStream<Uint8Array>, callbacks: Pick<StreamInput, "onTextDelta" | "onReasoningDelta">, signal?: AbortSignal): Promise<DeepSeekStreamResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let reasoningText = "";
   let finishReason: string | null = null;
   let usage: DeepSeekStreamResult["usage"] = null;
   let completed = false;
@@ -180,10 +204,15 @@ export async function consumeDeepSeekSse(body: ReadableStream<Uint8Array>, onDel
     const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
     const choice = choices[0] && typeof choices[0] === "object" ? choices[0] as Record<string, unknown> : null;
     const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta as Record<string, unknown> : null;
+    const reasoningContent = typeof delta?.reasoning_content === "string" ? delta.reasoning_content : "";
+    if (reasoningContent) {
+      reasoningText += reasoningContent;
+      await callbacks.onReasoningDelta?.(reasoningContent);
+    }
     const content = typeof delta?.content === "string" ? delta.content : "";
     if (content) {
       text += content;
-      await onDelta(content);
+      await callbacks.onTextDelta(content);
     }
     if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
     if (chunk.usage && typeof chunk.usage === "object") {
@@ -219,5 +248,79 @@ export async function consumeDeepSeekSse(body: ReadableStream<Uint8Array>, onDel
 
   if (!completed) throw new DeepSeekApiError("模型流式响应意外中断");
   if (!text.trim()) throw new DeepSeekApiError("模型没有返回可显示内容");
-  return { text, finishReason, usage };
+  return { text, reasoningText, finishReason, usage };
+}
+
+function boundedReasoningSource(reasoningText: string) {
+  const limit = 24_000;
+  if (reasoningText.length <= limit) return reasoningText;
+  return `${reasoningText.slice(0, 8_000)}\n\n${reasoningText.slice(-16_000)}`;
+}
+
+function parseThinkingSummary(content: string): ThinkingParagraphSummary[] {
+  const normalized = content.trim().replace(/^```(?:json)?\s*/iu, "").replace(/\s*```$/u, "");
+  const parsed = thinkingSummarySchema.parse(JSON.parse(normalized));
+  return parsed.paragraphs.map((text, index) => ({ id: `paragraph-${index + 1}`, text }));
+}
+
+export async function summarizeDeepSeekReasoning(input: {
+  config: AgentRuntimeConfig;
+  modelId: string;
+  userMessage: string;
+  reasoningText: string;
+  requestId: string;
+  signal?: AbortSignal;
+}) {
+  const model = input.config.provider.models.find((candidate) => candidate.id === input.modelId)
+    || input.config.provider.models.find((candidate) => candidate.id === input.config.provider.defaultModel);
+  if (!model) throw new DeepSeekApiError("模型配置不可用");
+  const payload = {
+    model: model.id,
+    messages: [
+      {
+        role: "system",
+        content: "请基于提供的真实内部推理，生成可供用户查看的简短思考结果。只归纳本轮确实发生的判断、取舍和处理方向，不复述详细思维链，不加入推理中没有的事实。只输出 JSON 对象，paragraphs 必须是 1 至 3 个自然文段组成的字符串数组。每个数组元素都是连续完整的文段，不得使用标题、标签、列表、编号、Markdown 或冒号式小标题，不得使用问题判断、能力限制、建议方案、处理计划、回答重点等固定阶段词。不得套用固定结构，段落数量和内容必须由本轮推理决定。"
+      },
+      {
+        role: "user",
+        content: `当前用户问题：\n${input.userMessage}\n\n仅供归纳的真实内部推理：\n${boundedReasoningSource(input.reasoningText)}\n\n返回的 JSON 只能包含 paragraphs 字符串数组。`
+      }
+    ],
+    stream: false,
+    temperature: 0,
+    max_tokens: 900,
+    thinking: { type: "disabled" },
+    response_format: { type: "json_object" }
+  };
+
+  const activeSignal = requestSignal(input.signal, input.config.provider.request.timeoutMs);
+  try {
+    const response = await fetch(input.config.provider.endpoint, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${input.config.provider.apiKey}`,
+        "content-type": "application/json; charset=utf-8",
+        "x-client-request-id": `${input.requestId}:thinking-summary`
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      signal: activeSignal.signal
+    });
+    if (!response.ok) throw new DeepSeekApiError(safeApiError(response.status), response.status);
+    const body = await response.json() as Record<string, unknown>;
+    const choices = Array.isArray(body.choices) ? body.choices : [];
+    const choice = choices[0] && typeof choices[0] === "object" ? choices[0] as Record<string, unknown> : null;
+    const message = choice?.message && typeof choice.message === "object" ? choice.message as Record<string, unknown> : null;
+    const content = typeof message?.content === "string" ? message.content : "";
+    if (!content) throw new DeepSeekApiError("模型没有返回思考结果");
+    return parseThinkingSummary(content);
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    if (activeSignal.timedOut()) throw new DeepSeekApiError("思考结果整理超时");
+    if (error instanceof DeepSeekApiError) throw error;
+    throw new DeepSeekApiError("无法整理思考结果");
+  } finally {
+    activeSignal.cleanup();
+  }
 }

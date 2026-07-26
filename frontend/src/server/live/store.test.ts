@@ -7,7 +7,7 @@ const database = vi.hoisted(() => ({
 
 vi.mock("@/server/persistence/database", () => database);
 
-import { deleteExpiredLiveThreads, finalizeLiveRun, prepareLiveRun, rememberProjectExchange, updateLiveThread } from "./store";
+import { buildProjectMemoryContext, deleteExpiredLiveThreads, finalizeLiveRun, prepareLiveRun, rememberProjectExchange, updateLiveThread } from "./store";
 
 const timestamp = new Date("2026-07-26T00:00:00.000Z");
 
@@ -56,7 +56,7 @@ describe("live 数据保留与项目记忆", () => {
     expect(values).toEqual([3]);
   });
 
-  it("按访客、项目、来源会话与运行保存有界共享记忆", async () => {
+  it("按访客、项目、来源会话与运行保存完整共享记忆", async () => {
     const clientQuery = vi.fn().mockResolvedValue({ rowCount: 1, rows: [] });
     database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
     const count = await rememberProjectExchange({
@@ -67,17 +67,14 @@ describe("live 数据保留与项目记忆", () => {
       modelId: "deepseek-v4-flash"
     }, {
       userMessage: "项目代号是北辰",
-      assistantMessage: "已记录项目代号北辰",
-      maxItems: 120,
-      maxChars: 16_000
+      assistantMessage: "已记录项目代号北辰"
     });
 
     expect(count).toBe(2);
     const inserts = clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_project_memories"));
     expect(inserts).toHaveLength(2);
     expect(inserts[0][1]).toEqual(expect.arrayContaining(["visitor-one", "project-one", "thread-one", "run-one", "user", "项目代号是北辰"]));
-    const cleanup = clientQuery.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM wb_project_memories"));
-    expect(cleanup?.[1]).toEqual(["visitor-one", "project-one", 120]);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("DELETE FROM wb_project_memories"))).toBe(false);
   });
 
   it("无项目会话不写入项目记忆", async () => {
@@ -87,7 +84,7 @@ describe("live 数据保留与项目记忆", () => {
       threadId: "thread-one",
       projectId: null,
       modelId: "deepseek-v4-flash"
-    }, { userMessage: "内容", assistantMessage: "回复", maxItems: 120, maxChars: 16_000 })).resolves.toBe(0);
+    }, { userMessage: "内容", assistantMessage: "回复" })).resolves.toBe(0);
     expect(database.transaction).not.toHaveBeenCalled();
   });
 
@@ -123,7 +120,7 @@ describe("live 数据保留与项目记忆", () => {
       modelId: "deepseek-v4-flash"
     }, "completed", { finishReason: "stop" }, {
       events: [{ type: "message.completed", payload: { messageId: "message-one", text: "完成内容" } }],
-      memory: { userMessage: "用户内容", assistantMessage: "完成内容", maxItems: 120, maxChars: 16_000 }
+      memory: { userMessage: "用户内容", assistantMessage: "完成内容" }
     });
 
     expect(result?.map((event) => event.type)).toEqual(["message.completed", "run.completed"]);
@@ -191,10 +188,10 @@ describe("live 数据保留与项目记忆", () => {
         return Promise.resolve({ rowCount: 1, rows: [{ id: "thread-current", project_id: "project-one", title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: null }] });
       }
       if (sql.includes("FROM wb_agent_events")) return Promise.resolve({ rowCount: 0, rows: [] });
-      if (sql.includes("FROM wb_project_memories") && sql.includes("source_thread_id <>")) {
+      if (sql.includes("SELECT id, source_thread_id") && sql.includes("FROM wb_project_memories")) {
         return Promise.resolve({ rowCount: 2, rows: [
-          { id: "memory-assistant", role: "assistant", content: "已记录代号北辰" },
-          { id: "memory-user", role: "user", content: "项目代号是北辰" }
+          { id: "memory-assistant", source_thread_id: "thread-source", source_thread_title: "来源会话", source_run_id: "run-source", role: "assistant", content: "已记录代号北辰", created_at: timestamp },
+          { id: "memory-user", source_thread_id: "thread-source", source_thread_title: "来源会话", source_run_id: "run-source", role: "user", content: "项目代号是北辰", created_at: timestamp }
         ] });
       }
       if (sql.includes("INSERT INTO wb_agent_events")) {
@@ -215,10 +212,12 @@ describe("live 数据保留与项目记忆", () => {
       memoryMaxChars: 16_000
     });
 
-    expect(prepared?.projectMemoryContext).toBe("用户：项目代号是北辰\n\n助手：已记录代号北辰");
-    const recall = clientQuery.mock.calls.find(([sql]) => String(sql).includes("source_thread_id <>"));
-    expect(String(recall?.[0])).toContain("visitor_id = $1 AND project_id = $2 AND source_thread_id <> $3 AND archived_at IS NULL");
-    expect(recall?.[1]).toEqual(["visitor-one", "project-one", "thread-current", 24]);
+    expect(prepared?.projectMemoryContext).toContain("项目来源会话：\n- 来源会话");
+    expect(prepared?.projectMemoryContext).toContain("用户：项目代号是北辰\n助手：已记录代号北辰");
+    const recall = clientQuery.mock.calls.find(([sql]) => String(sql).includes("SELECT id, source_thread_id"));
+    expect(String(recall?.[0])).toContain("visitor_id = $1 AND project_id = $2 AND archived_at IS NULL");
+    expect(String(recall?.[0])).toContain("source_run_id = ANY($3::text[])");
+    expect(recall?.[1]).toEqual(["visitor-one", "project-one", []]);
   });
 
   it("项目记忆上下文不会突破配置的字符预算", async () => {
@@ -228,8 +227,8 @@ describe("live 数据保留与项目记忆", () => {
         return Promise.resolve({ rowCount: 1, rows: [{ id: "thread-current", project_id: "project-one", title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: null }] });
       }
       if (sql.includes("FROM wb_agent_events")) return Promise.resolve({ rowCount: 0, rows: [] });
-      if (sql.includes("FROM wb_project_memories") && sql.includes("source_thread_id <>")) {
-        return Promise.resolve({ rowCount: 1, rows: [{ id: "memory-long", role: "user", content: "北".repeat(200) }] });
+      if (sql.includes("SELECT id, source_thread_id") && sql.includes("FROM wb_project_memories")) {
+        return Promise.resolve({ rowCount: 1, rows: [{ id: "memory-long", source_thread_id: "thread-source", source_thread_title: "来源会话", source_run_id: "run-source", role: "user", content: "北".repeat(200), created_at: timestamp }] });
       }
       if (sql.includes("INSERT INTO wb_agent_events")) {
         eventSequence += 1;
@@ -249,7 +248,25 @@ describe("live 数据保留与项目记忆", () => {
       memoryMaxChars: 40
     });
     expect(prepared?.projectMemoryContext).toHaveLength(40);
-    expect(prepared?.projectMemoryContext.startsWith("用户：")).toBe(true);
+    expect(prepared?.projectMemoryContext.startsWith("项目来源会话：")).toBe(true);
+  });
+
+  it("项目召回覆盖来源会话并让相关旧事实优先于无关近期内容", () => {
+    const rows = [
+      { id: "a-new-user", source_thread_id: "thread-a", source_thread_title: "需求讨论", source_run_id: "run-a-new", role: "user" as const, content: "最近讨论页面颜色", created_at: "2026-07-26T03:00:00.000Z" },
+      { id: "a-new-assistant", source_thread_id: "thread-a", source_thread_title: "需求讨论", source_run_id: "run-a-new", role: "assistant" as const, content: "确定使用中性色", created_at: "2026-07-26T03:00:01.000Z" },
+      { id: "b-new-user", source_thread_id: "thread-b", source_thread_title: "接口约定", source_run_id: "run-b-new", role: "user" as const, content: "接口返回 JSON", created_at: "2026-07-26T02:00:00.000Z" },
+      { id: "b-new-assistant", source_thread_id: "thread-b", source_thread_title: "接口约定", source_run_id: "run-b-new", role: "assistant" as const, content: "已记录结构", created_at: "2026-07-26T02:00:01.000Z" },
+      { id: "a-old-user", source_thread_id: "thread-a", source_thread_title: "需求讨论", source_run_id: "run-a-old", role: "user" as const, content: "项目密钥代号是霜塔", created_at: "2026-07-20T01:00:00.000Z" },
+      { id: "a-old-assistant", source_thread_id: "thread-a", source_thread_title: "需求讨论", source_run_id: "run-a-old", role: "assistant" as const, content: "已记录霜塔", created_at: "2026-07-20T01:00:01.000Z" }
+    ];
+
+    const recalled = buildProjectMemoryContext(rows, "项目密钥代号是什么", 6, 4000);
+
+    expect(recalled.context).toContain("- 需求讨论");
+    expect(recalled.context).toContain("- 接口约定");
+    expect(recalled.context).toContain("项目密钥代号是霜塔");
+    expect(recalled.rowIds).toEqual(expect.arrayContaining(["a-new-user", "b-new-user", "a-old-user"]));
   });
 
   it("编辑旧消息会归档该运行及其下游事件、运行和项目记忆", async () => {
@@ -264,7 +281,7 @@ describe("live 数据保留与项目记忆", () => {
       }
       if (sql.includes("FROM wb_agent_events")) return Promise.resolve({ rowCount: rows.length, rows });
       if (sql.includes("SELECT created_at FROM wb_runs")) return Promise.resolve({ rowCount: 1, rows: [{ created_at: timestamp }] });
-      if (sql.includes("FROM wb_project_memories") && sql.includes("source_thread_id <>")) return Promise.resolve({ rowCount: 0, rows: [] });
+      if (sql.includes("SELECT id, source_thread_id") && sql.includes("FROM wb_project_memories")) return Promise.resolve({ rowCount: 0, rows: [] });
       if (sql.includes("INSERT INTO wb_agent_events")) {
         eventSequence += 1;
         return Promise.resolve({ rowCount: 1, rows: [{ id: `event-${eventSequence}`, seq: eventSequence, project_id: "project-one", thread_id: "thread-current", run_id: "run-current", created_at: timestamp, event_type: values?.[5], payload: JSON.parse(String(values?.[6])) }] });
