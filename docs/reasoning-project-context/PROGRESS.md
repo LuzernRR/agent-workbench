@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-`awaiting_acceptance`：Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4) 已完成实现和验证，等待用户验收。
+`accepted`：用户已验收阶段 3，Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4) 已按 `completed` 关闭。
 
 ## 已确认
 
@@ -24,6 +24,7 @@
 - [x] 真实 PostgreSQL 集成测试。
 - [x] 3100 真实 Flash 自然段、折叠、事件顺序、快照和浏览器检查。
 
-## 待完成
+## 验收收口
 
-- [ ] 用户验收。
+- [x] 用户验收。
+- [x] 关闭 Issue #4。

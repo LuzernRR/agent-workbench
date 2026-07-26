@@ -4,7 +4,7 @@
 
 - GitHub Issue：[阶段 3：可见思考流、完整项目记忆与稳定拖拽](https://github.com/LuzernRR/agent-workbench/issues/4)
 - Execution Gate：`allowed`
-- 当前状态：实施中
+- 当前状态：用户已验收，Issue 已关闭
 - 非目标：Python/LangGraph 运行时、工具循环、搜索 Agent、embedding 生成、登录和多租户。
 
 ## 2. 开发前问题
@@ -75,3 +75,7 @@ sequenceDiagram
 - 真实 Flash：SSE 顺序为 `thinking.started`、两个 `thinking.paragraph`、`thinking.completed`、正文增量和唯一 `run.completed`；SSE 与快照均不含 `reasoning_content`。
 - 真实浏览器：3100 完成思考后按钮为折叠态，展开后只有模型自然段，控制台无错误，正文继续流式输出。
 - 真实 Pro 停止：数据库观察到 `thinking.started` 后调用停止；事件固定为 6 条，等待 2 秒后数量和最大序号均不变；只有一个 `run.cancelled`，没有 `thinking.paragraph`、`run.completed`、空思考块、原始推理或项目记忆。
+
+## 5. 验收结论
+
+用户明确回复“阶段 3 验收通过”。Issue #4 随后按 `completed` 关闭；下一功能必须重新创建唯一 Issue、定义可测试验收标准并取得 `Execution Gate: allowed`，不得直接在本阶段继续扩展。

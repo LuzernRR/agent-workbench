@@ -40,4 +40,4 @@
 - [x] 真实 Flash/Pro 与 PostgreSQL 验收。
 - [x] 完整 Vitest、类型、Lint、构建和 E2E 门禁。
 - [x] 更新 HANDOFF、进度和中文开发记录。
-- [ ] 用户验收后关闭 Issue #4。
+- [x] 用户验收并关闭 Issue #4。

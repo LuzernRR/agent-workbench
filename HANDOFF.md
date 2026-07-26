@@ -5,11 +5,12 @@
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
 - 阶段 1 已由用户验收，Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2) 已关闭。
 - 阶段 2 已由用户验收，Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3) 已关闭。
-- 当前唯一功能：Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4)，思考结果、完整项目记忆与稳定拖拽已实现并完成验证，等待用户验收。
+- 阶段 3 已由用户验收，Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4) 已关闭。
+- 当前没有活动功能；开始下一功能前必须新建唯一 GitHub Issue、写明可测试验收标准并设置 `Execution Gate: allowed`。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
 - 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
-- 用户未明确验收阶段 3 前，不开始 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
+- 不在同一 Issue 中混入 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
 
 ## 已实现
 
@@ -119,5 +120,5 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 2. 运行 `git status --short`，保留用户改动和本地密钥。
 3. 确认 `docker ps --filter name=agent-workbench-postgres` 为 healthy。
 4. 在 `frontend/` 运行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
-5. 阶段 3 未验收时只修复 Issue #4 回归，不创建下一功能。
-6. 用户验收后关闭 Issue #4；建议下一功能是 Python/LangGraph 最小运行时与 PostgreSQL checkpoint，不同时接工具、搜索或 RAG。
+5. 阶段 3 已验收且 Issue #4 已关闭；下一功能必须重新执行 Issue 与 Execution Gate 门禁。
+6. 建议下一功能是 Python/LangGraph 最小运行时与 PostgreSQL checkpoint，不同时接工具、搜索或 RAG。
