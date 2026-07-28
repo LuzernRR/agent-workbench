@@ -25,4 +25,8 @@
 - [阶段 0：公开仓库、文档与交接基线](2026-07-26-000-public-baseline.md)
 - [阶段 1：真实会话连续性与工作台交互修复](2026-07-26-001-workbench-continuity.md)
 - [阶段 2：动态模型身份与分层记忆契约](2026-07-26-002-model-identity-memory.md)
+- [阶段 3：推理摘要与项目上下文](2026-07-26-003-reasoning-project-context.md)
+- [共享搜索 Agent 合同](2026-07-26-004-search-agent-contracts.md)
+- [前端 Agent 工作台：过程、引导与消息队列](2026-07-27-005-agent-frontend.md)
+- [真实 LangGraph 多 Agent 搜索闭环与递增展示](2026-07-28-006-langgraph-search-agent.md)
 - [开发记录模板](TEMPLATE.md)

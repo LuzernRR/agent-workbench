@@ -1,0 +1,32 @@
+# Search Agent 镜像使用仓库根作为 build context；默认拒绝全部内容，
+# 仅开放 Dockerfile 实际 COPY 的源码、锁文件、迁移与运维脚本。
+**
+
+!services/
+services/*
+!services/search-agent/
+services/search-agent/*
+!services/search-agent/pyproject.toml
+!services/search-agent/uv.lock
+!services/search-agent/app/
+!services/search-agent/app/**
+services/search-agent/app/**/__pycache__/
+services/search-agent/app/**/__pycache__/**
+services/search-agent/app/**/*.pyc
+services/search-agent/app/**/*.pyo
+
+!database/
+database/*
+!database/migrations/
+!database/migrations/**
+
+!deploy/
+deploy/*
+!deploy/search-agent.Dockerfile
+!deploy/search-agent.Dockerfile.dockerignore
+!deploy/ops/
+!deploy/ops/**
+deploy/ops/**/__pycache__/
+deploy/ops/**/__pycache__/**
+deploy/ops/**/*.pyc
+deploy/ops/**/*.pyo

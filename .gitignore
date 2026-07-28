@@ -1,18 +1,26 @@
 # 本地密钥与环境配置
 config/*.local.json
+config/*.local.env
 .env
 .env.*
 !.env.example
 
-# 依赖与构建产物
-frontend/node_modules/
-frontend/.next/
-frontend/dist/
-frontend/build/
-frontend/coverage/
-frontend/playwright-report/
-frontend/test-results/
-frontend/*.tsbuildinfo
+# 前端依赖与构建产物
+apps/web/node_modules/
+apps/web/.next/
+apps/web/dist/
+apps/web/build/
+apps/web/coverage/
+apps/web/playwright-report/
+apps/web/test-results/
+apps/web/*.tsbuildinfo
+
+# Python 后端与契约测试的虚拟环境和缓存
+services/**/.venv/
+packages/**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
 
 # 本地运行产物
 *.log

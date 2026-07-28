@@ -4,6 +4,8 @@
 > 核验日期：2026-07-26
 > 适用范围：当前工作台的外部网页、垂直平台、项目资料与长期知识检索
 > 核心原则：先定义可验证的研究任务，再搜索；先形成可追溯证据，再生成答案；没有足够证据时明确停止，而不是补写推测。
+>
+> 目录迁移说明（2026-07-28）：本文中的 `frontend/` 路径是研究时的历史快照。当前代码映射为 `apps/web/`、`services/search-agent/`、`packages/contracts/`、`deploy/`、`config/`；实施命令与当前进度以 [端到端开发流程](./万能搜索Agent端到端开发流程.md) 和根目录 `HANDOFF.md` 为准。
 
 本文是当前项目“万能搜索 Agent”的完整实施蓝图。它补充 [LangGraph 运行时](./02-langgraph-agent-runtime.md)、[上下文、记忆与 RAG](./03-memory-and-rag.md)、[评测、安全与可观测性](./04-evaluation-security-and-observability.md) 与 [配置与调优](./07-configuration-and-tuning.md)，不替代这些通用基线。
 

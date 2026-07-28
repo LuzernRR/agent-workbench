@@ -1,0 +1,264 @@
+name: 001-agent-live
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: agent-workbench-live-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agent_workbench}
+      POSTGRES_USER: ${POSTGRES_USER:-workbench}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+    volumes:
+      - agent-workbench-live-postgres:/var/lib/postgresql/data
+    networks:
+      - agent-backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: agent-workbench-live-milvus-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >-
+      etcd --advertise-client-urls=http://etcd:2379
+      --listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - type: bind
+        source: ${MILVUS_DATA_DIRECTORY:?MILVUS_DATA_DIRECTORY is required}/etcd
+        target: /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - agent-milvus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: agent-workbench-live-milvus-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MILVUS_MINIO_ROOT_USER:?MILVUS_MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MILVUS_MINIO_ROOT_PASSWORD:?MILVUS_MINIO_ROOT_PASSWORD is required}
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - type: bind
+        source: ${MILVUS_DATA_DIRECTORY:?MILVUS_DATA_DIRECTORY is required}/minio
+        target: /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - agent-milvus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  milvus:
+    image: milvusdb/milvus:v2.6.21
+    container_name: agent-workbench-live-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      ETCD_ROOTPATH: 001-agent-live
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MILVUS_MINIO_ROOT_USER:?MILVUS_MINIO_ROOT_USER is required}
+      MINIO_SECRET_ACCESS_KEY: ${MILVUS_MINIO_ROOT_PASSWORD:?MILVUS_MINIO_ROOT_PASSWORD is required}
+      COMMON_SECURITY_AUTHORIZATIONENABLED: "true"
+      COMMON_SECURITY_DEFAULTROOTPASSWORD: ${MILVUS_ROOT_PASSWORD:?MILVUS_ROOT_PASSWORD is required}
+    volumes:
+      - type: bind
+        source: ${MILVUS_DATA_DIRECTORY:?MILVUS_DATA_DIRECTORY is required}/milvus
+        target: /var/lib/milvus
+      - type: bind
+        source: ./milvus/user.yaml
+        target: /milvus/configs/user.yaml
+        read_only: true
+    ports:
+      - "${MILVUS_BIND_ADDRESS:-127.0.0.1}:${MILVUS_PORT:-29530}:19530"
+      - "${MILVUS_HEALTH_BIND_ADDRESS:-127.0.0.1}:${MILVUS_HEALTH_PORT:-29091}:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    # Milvus standalone 官方镜像要求放宽默认 seccomp；服务只位于内部网络，
+    # gRPC/health 端口仍只发布到 loopback。
+    security_opt:
+      - seccomp:unconfined
+      - no-new-privileges:true
+    stop_grace_period: 60s
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - agent-milvus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  search-agent:
+    build:
+      context: ..
+      dockerfile: deploy/search-agent.Dockerfile
+    image: ${SEARCH_AGENT_IMAGE:-agent-workbench/search-agent:local}
+    container_name: agent-workbench-live-search-agent
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    environment:
+      SEARCH_AGENT_HOST: 0.0.0.0
+      SEARCH_AGENT_PORT: 8100
+      SEARCH_AGENT_CONFIG_PATH: /workspace/config/search-agent.json
+      AGENT_RUNTIME_CONFIG_PATH: /workspace/config/agent-runtime.local.json
+      SEARCH_AGENT_DATABASE_URL: ${SEARCH_AGENT_DATABASE_URL:?SEARCH_AGENT_DATABASE_URL is required}
+      SEARCH_AGENT_MILVUS_URI: ${SEARCH_AGENT_MILVUS_URI:-http://milvus:19530}
+      SEARCH_AGENT_MILVUS_TOKEN: root:${MILVUS_ROOT_PASSWORD:?MILVUS_ROOT_PASSWORD is required}
+      SEARCH_AGENT_MILVUS_DATA_DIRECTORY: ${MILVUS_DATA_DIRECTORY:?MILVUS_DATA_DIRECTORY is required}
+      WORKBENCH_INTERNAL_TOKEN: ${WORKBENCH_INTERNAL_TOKEN:?WORKBENCH_INTERNAL_TOKEN is required}
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    ports:
+      - "${SEARCH_AGENT_BIND_ADDRESS:-127.0.0.1}:${SEARCH_AGENT_HOST_PORT:-18100}:8100"
+    volumes:
+      - type: bind
+        source: ../config
+        target: /workspace/config
+        read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          data = json.load(urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5));
+          assert data.get('service') == 'search-agent' and data.get('status') in {'ok', 'degraded'}
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+    networks:
+      - agent-backend
+      - agent-milvus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+    image: ${WEB_IMAGE:-agent-workbench/web:local}
+    container_name: agent-workbench-live-web
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      search-agent:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+      HOSTNAME: 0.0.0.0
+      AGENT_RUNTIME_CONFIG_PATH: /workspace/config/agent-runtime.local.json
+      SEARCH_AGENT_CONFIG_PATH: /workspace/config/search-agent.json
+      WORKBENCH_DATABASE_URL: ${WORKBENCH_DATABASE_URL:?WORKBENCH_DATABASE_URL is required}
+      WORKBENCH_DATABASE_SSL: ${WORKBENCH_DATABASE_SSL:-false}
+      WORKBENCH_DATABASE_POOL_MAX: ${WORKBENCH_DATABASE_POOL_MAX:-10}
+      WORKBENCH_SEARCH_AGENT_ORIGIN: http://search-agent:8100
+      WORKBENCH_INTERNAL_TOKEN: ${WORKBENCH_INTERNAL_TOKEN:?WORKBENCH_INTERNAL_TOKEN is required}
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3100}:3100"
+    volumes:
+      - type: bind
+        source: ../config
+        target: /workspace/config
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3100/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+    networks:
+      - agent-backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  agent-workbench-live-postgres:
+    name: ${POSTGRES_VOLUME_NAME:-001-agent-live-postgres-v1}
+
+networks:
+  agent-backend:
+    name: ${AGENT_BACKEND_NETWORK:-001-agent-live-backend}
+  agent-milvus:
+    name: ${AGENT_MILVUS_NETWORK:-001-agent-live-milvus}
+    internal: true

@@ -1,6 +1,6 @@
 # Agent 开发手册
 
-本目录是智能工作台的工程基线。当前仓库已实现 Next.js 服务端 DeepSeek 调用、PostgreSQL/pgvector 持久化、匿名会话与项目记忆；Playwright 才使用浏览器可访问的确定性 mock。后续编排服务按 Python、LangGraph、PostgreSQL 与 pgvector 路线迁移。
+本目录是智能工作台的工程基线。当前仓库已实现 Next.js BFF、Python/LangGraph 多 Agent、真实网页搜索、PostgreSQL 事件持久化、D 盘 Milvus 证据记忆以及匿名会话恢复；3110 Playwright 才使用浏览器可访问的确定性 mock，3100 固定走真实 live 服务。
 
 ## 阅读顺序
 
@@ -12,18 +12,19 @@
 6. [开发路线](./05-development-roadmap.md)：从前端样机到生产环境的阶段与验收门槛。
 7. [前端工作台](./06-frontend-workbench.md)：页面布局、交互状态和事件映射。
 8. [配置与调优](./07-configuration-and-tuning.md)：基线配置、压测方式和故障定位。
-9. [万能搜索 Agent](./08-universal-search-agent.md)：从 API Key、意图、计划和工具路由到抓取、RAG、引用、质量循环、评测与经验沉淀。
-10. [动态模型身份与分层记忆](./model-identity-memory/RESEARCH.md)：当前真实实现、隔离和生命周期契约。
-11. [资料来源](./references.md)：本手册采用的官方文档与规范。
+9. [万能搜索 Agent 端到端开发流程](./万能搜索Agent端到端开发流程.md)：当前项目从 LLM 接入、意图、计划、记忆、工具和 LangGraph 到搜索、RAG、核验、结构化输出与逐 Issue 验收的实施主线。
+10. [万能搜索 Agent 研究底稿](./08-universal-search-agent.md)：爬虫、索引、部署、迁移、Runbook 和生产参数的扩展设计。
+11. [动态模型身份与分层记忆](./model-identity-memory/RESEARCH.md)：当前真实实现、隔离和生命周期契约。
+12. [资料来源](./references.md)：本手册采用的官方文档与规范。
 
 ## 固定决策
 
 | 项目 | 决策 |
 | --- | --- |
 | 产品形态 | 单助手对话工作台 |
-| 当前实现 | Next.js 服务端调用 DeepSeek，PostgreSQL 持久化；mock 仅用于 Playwright |
+| 当前实现 | Next.js BFF 调用 Python/LangGraph Search Agent，DeepSeek 多节点调用与真实搜索写入 PostgreSQL；mock 仅用于 3110 Playwright |
 | 前端 | Next.js 16、React 19、TypeScript、assistant-ui、TanStack Query、Zustand、Radix UI、Tailwind CSS |
-| 未来服务端 | Python 3.12、FastAPI、LangGraph、Pydantic 2、Psycopg 3 |
+| Agent 服务端 | Python 3.12、FastAPI、LangGraph、Pydantic 2、Psycopg 3 |
 | 数据 | PostgreSQL 16 与 pgvector，结构化数据和向量放在同一事务边界 |
 | 通信 | JSON HTTP 负责命令，SSE 负责运行事件，文件走独立下载地址 |
 | 编排 | 显式状态图，所有循环都有次数、耗时和预算上限 |

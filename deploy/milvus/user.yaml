@@ -1,0 +1,6 @@
+# 由 Milvus 在内置 milvus.yaml 之后加载的项目级覆盖。
+# 默认 root 密码不写入仓库；Compose 仅在全新 D: 数据目录首次初始化时从
+# COMMON_SECURITY_DEFAULTROOTPASSWORD 注入。
+common:
+  security:
+    authorizationEnabled: true

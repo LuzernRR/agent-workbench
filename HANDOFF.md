@@ -1,37 +1,149 @@
 # 项目交接
 
-## 当前结论
+## 当前结论（2026-07-28，Issue #7 已验收）
+
+- 用户已于 2026-07-28 明确回复“通过”，验收 Issue [#7](https://github.com/LuzernRR/agent-workbench/issues/7)“真实 LangGraph 多 Agent 搜索闭环与 3100 live 展示”。本节所述目录迁移、前端交互、LangGraph 搜索闭环、Milvus、部署与文档随本次验收统一收口；下一功能必须重新建立唯一 Issue 与 Execution Gate。
+- Issue #7 收口前暂存集合为空；验收后允许执行一次受控 stage、commit、push 与 Issue close。禁止 reset、checkout、force push 或夹带下一功能代码。
+- 正式地址为 [http://localhost:3100/workbench](http://localhost:3100/workbench)。Web、Search Agent、PostgreSQL、Milvus、etcd、MinIO 均 healthy；Milvus 数据目录为 `D:/001-agent/milvus`。
+- 真实链路为 `Supervisor → Planner → Researcher(search/observe) → Reflector → replan|Writer → Verifier → research_more|rewrite|finalize`，所有循环受迭代、模型调用、工具调用、超时、Token、费用、重复查询和无进展门禁约束。
+- `config/search-agent.json` 当前 `forceSearch: true`。即使用户问“什么是 CC Switch？”，也会实际调用 Tavily；不能用模型自述或 fixture 冒充搜索。
+- 对话过程严格按持久事件 `seq` 显示，并采用相邻同类连续段归并：连续思考合成一行、连续搜索合成一行、连续核验合成一行；类型一变化立即开新段。因此可呈现 `思考 → 搜索 → 思考 → 核验 → 搜索 → 思考`，绝不把搜索后的新思考回填到上方旧行。
+- 思考与核验是独立 `activityKind`。每个 `node.completed` 在真正完成时追加唯一活动原子，`verification.completed` 单独追加核验原子；点击后只逐行显示 LangGraph Agent 的结构化 LLM 公开摘要，不再添加“任务判断/检索计划/核验结论”等固定前缀。Prompt 版本为 `2026-07-28.v4`，公共出口清理 Markdown 并限长。
+- 同一连续搜索段显示真实递增摘要，例如 `找到 5 条结果，读取 1 个来源 → 找到 10 条结果，读取 3 个来源 → 找到 15 条结果，读取 4 个来源`。结果数累计真实 `tool.completed.resultCount`；已读来源按 verified 安全 URL 去重。点击后只逐行显示去重后的可点击来源，不显示状态、Provider、耗时、查询或 Agent 摘要；后续若先发生思考/核验，再搜索时必须新开搜索行。
+- 聚合只发生在 `Conversation` 视图模型。Reducer、PostgreSQL 事件、Python 工具账本与 DOM 审计属性仍保留每个真实 `toolCallId`、started/completed 配对、来源、错误和耗时。
+- 协议已补修 Unicode 码点长度、HTTP URL 码点长度，以及 Milvus 成功写入时省略 `reasonCode`；项目会话不会再因 `reasonCode: null` 被 Web 严格契约拒绝。
+- DeepSeek Planner 在上线复核中曾返回一次不可校验的结构化结果。现已加入全 run 最多一次 schema repair：只重试同一严格函数，不使用本地默认值；两次真实调用的 Token、费用和调用数完整累计，额度消耗后其余 Agent 不再重试。官方依据为 DeepSeek Function Calling 与 LangChain Structured Output（2026-07-28 重新访问）。
+- 最终全门禁：Python `90 passed`，Ruff/compileall 通过；Web `317 passed, 1 skipped`，typecheck、全量 ESLint、生产 build 通过；生产依赖审计 0；3110 Playwright `16 passed, 2 skipped`；3100 真实 Provider Playwright `2 passed`。Compose 六个服务 healthy，近期 Web/Search Agent 日志无错误或敏感字段命中。
+- 3100 live 证据：schema repair 发布后的最终全门禁运行 `run_8ead15d354b04844b5f40377038a3999`，持久序列为首段思考 `648–653` → 3 次搜索 `654–659` → 搜索后新思考 `660–668` → 独立核验 `669–671`；页面对应显示 `思考结果 2 条 → 找到 15 条结果，读取 7 个来源 → 思考结果 3 条 → 核验结果`，展开为 13 个去重来源。刷新后顺序一致，旧思考未被回填。截图位于 `docs/development/evidence/2026-07-28-issue-7-{desktop,mobile}.png`。
+- 交付记录：`docs/development/2026-07-28-006-langgraph-search-agent.md`。Issue #7 已获用户显式验收；关闭、提交和推送完成后，才允许为下一功能创建新 Issue。
+
+## 历史交接（Issue #6 及更早）
 
 - 仓库：`LuzernRR/agent-workbench`，分支 `main`。
+- 当前 HEAD：`0063250653454ce3236f5a4bb6a9bc3f91c58593`；本轮没有 commit、push、stage 或 unstage。
+- 当前暂存集合为空；本轮没有执行 stage 或 unstage。后续接手者先用 `git diff --cached --name-only` 重新核验，不要根据旧交接记录猜测暂存状态。
+- 当前工作树包含用户授权的目录迁移和功能改动：旧 `frontend/` 已迁移到 `apps/web/`，共享合同位于 `packages/contracts/`，后端目标位于 `services/search-agent/`，部署与配置分别位于 `deploy/`、`config/`；全部仍未暂存，不得回退、覆盖或拆散迁移边界。
+- 当前未跟踪但属于本次前端功能/文档的内容：`docs/万能搜索Agent开发指南.md`、`docs/万能搜索Agent端到端开发流程.md`、`docs/development/2026-07-27-005-agent-frontend.md`、`apps/web/src/lib/agent-events/v2/`、S01 preview 和相关测试；不得删除。若再次出现 `docs/_part*.md` 临时文件，先核验来源和内容，不要擅自删除或提交；完成验收后再决定提交边界。
 - 阶段 1 已由用户验收，Issue [#2](https://github.com/LuzernRR/agent-workbench/issues/2) 已关闭。
 - 阶段 2 已由用户验收，Issue [#3](https://github.com/LuzernRR/agent-workbench/issues/3) 已关闭。
 - 阶段 3 已由用户验收，Issue [#4](https://github.com/LuzernRR/agent-workbench/issues/4) 已关闭。
-- 当前唯一活动功能是 S00 跨语言契约，Issue [#5](https://github.com/LuzernRR/agent-workbench/issues/5)；`Execution Gate: allowed`，状态 `awaiting_acceptance`。
+- 共享跨语言合同已由用户验收，Issue [#5](https://github.com/LuzernRR/agent-workbench/issues/5) 已关闭；收口提交为 `0063250`。历史记录曾称它为 S00，但后续不再用该编号导航开发。
+- 当前唯一活动功能是 Issue [#6](https://github.com/LuzernRR/agent-workbench/issues/6)“前端 Agent 过程、结果、引导与消息队列”；`Execution Gate: allowed`，仍是唯一活动 Feature。对外开发路线已改为按用户可见能力命名，不再要求后续模型理解 S00-S16 编号。
 - 正式地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。
 - 真实配置：`config/agent-runtime.local.json`，禁止提交或复制密钥。
-- 实现目录：`frontend/`；根目录文档记录架构、门禁与交接。
-- 不在同一 Issue 中混入 LangGraph、ReAct、万能搜索 Agent 或其他新功能。
+- 模块目录：Web/BFF 在 `apps/web/`，共享合同在 `packages/contracts/`，Python Agent 服务在 `services/search-agent/`，部署在 `deploy/`，运行配置统一在 `config/`；根目录只保留治理与交接文档。
+- 不在同一 Issue 中混入真实 LangGraph、工具、搜索、RAG 或其他新功能；这些能力按 `docs/万能搜索Agent端到端开发流程.md` 的功能阶段逐项启动。
+
+## 路线重排与协作状态（2026-07-27）
+
+- 用户已确认：旧的 S00-S16 编号不适合作为开发导航；后续以“模型 API 与基础对话 -> Prompt/结构化输出/意图 -> 上下文与短期记忆 -> 可见 Agent 交互 -> LangGraph 真实循环 -> 工具闭环与原子工具 -> 搜索抓取 -> Tool Use 后 RAG/证据 -> 长期记忆 -> 反思核验 -> 多步规划与事务可靠性 -> 评测上线”的能力顺序执行。
+- 已完成的模型 API、基础会话、项目记忆和前端工作台不重做；Schema、fixture、checkpoint、Outbox/Inbox、Saga、幂等和 fencing 只作为对应能力的可靠性验收细节。
+- 旧协作任务 `019f99db-0853-7291-b59c-ffe91cfb573d` 已停止使用（连续 `systemError`，没有产生新的写入）。新的协作任务 `019fa0f2-1d41-73d3-af66-bef3ec6ec7f9` 已按用户要求暂停；暂停前只做了只读路线审计，没有写入仓库。
+- 主流程文档已补充每个功能的作用、用户效果、技术选型、数据流、配置和验收；当前不创建第二个功能 Issue，也不进入搜索/RAG，直到 Issue #6 收口并由用户验收。
+- 本轮又补充了“一次会话中的一个 run 多次模型调用”设计：thread/run/model_call/tool_call/iteration 分层、后台 Worker、ModelCall 账本、标准 assistant/tool 消息组、LangGraph 条件循环、`next_action`、每轮 checkpoint、预算/费用/无进展/重复动作/recursion limit 门禁、崩溃恢复和前端可见事件。它只更新文档，尚未接入生产代码。
+- 当前 Codex 持久目标已更新为“基于 LangGraph 的可搜索多 Agent 系统并交付 3100”，状态为 `active`；它不越过本仓库 Acceptance Gate，也不授权在 Issue #6 验收前进入下一功能。
+
+### 能力状态速查
+
+| 能力 | 状态 | 接手判断 |
+|---|---|---|
+| 模型 API、基础对话、SSE、停止、后台运行 | 已完成 | 不重做，只保留兼容 |
+| Prompt 基础拼接、同会话历史、项目记忆基础 | 部分完成 | 后续在真实结构化节点中升级 |
+| 前端过程、工具只读状态、引导、澄清、审批 | 待协调审查 | 六项阻断已清零，停在用户验收门 |
+| FIFO、Context Window、Token/费用面板 | 未完成 | 未获用户验收前不得继续同一 Issue 的下一切片 |
+| LangGraph 真实循环、工具、搜索、RAG、反思 | 未开始 | 前端验收和用户验收后按主流程文档顺序启动 |
+| 强事务、原子工具、Saga、Outbox/Inbox、幂等 | 设计已记录 | 随工具和多步业务实现，不提前伪造状态 |
 
 ## 当前活动功能
 
-- 目标：在 `frontend/contracts/v2/` 以 JSON Schema Draft 2020-12 冻结 TypeScript/Python 共享的万能搜索 Agent v2 边界。
-- 范围：common、ResearchIntent、ResearchBrief、SearchPlan、Tool、Evidence、Claim/Citation、SearchResponse、SteeringCommand、RunQueueEntry、独立 ThreadQueueEvent、未来 AgentState 公共引用、AgentEvent v2、Context/Budget 事件，以及共享 fixtures 和跨对象语义不变量。
-- 验收：TypeScript 与 Python 必须读取同一 schemas、manifest 和 fixtures，并对每条 fixture 返回一致的合法性与稳定错误码。
-- 非目标：不接入当前 v1 生产路径；不改 UI、API、数据库和 Provider；不实现 S01 前端、S02 Gold Dataset、v2 配置、Python 服务、LangGraph、Ctrl+Enter、运行队列、工具执行、搜索、RAG、MCP 或 Memory v2。
-- 兼容：S00 只增加版本化合同和测试，当前 Next.js/DeepSeek/PostgreSQL/SSE 行为保持不变；没有数据库迁移。
-- 交付记录：`docs/development/2026-07-26-004-search-agent-contracts.md`。
-- 完成门：验证后把本节状态改为 `awaiting_acceptance`，Issue #5 保持 OPEN；用户明确验收前不得开始 S01。
+- 目标：完成前端交互的“Composer 路由、运行中引导、澄清恢复和审批输入”，只在 3110 typed preview 验证四路交互。
+- 当前切片：实现 steer、enqueue、clarification resume、approval decision 四条独立命令流，以及 desktop/mobile Composer 路由。
+- 验收：键盘、IME、repeat、防双提交、移动模式、幂等 hash/key、accepted_pending、事件驱动 applied、失败草稿恢复、澄清与审批边界均有测试。
+- 公开边界：只保存安全文本摘要、attachment refs、hash、状态和稳定错误码；不进入完整 Prompt、附件正文、Provider body 或任意参数 JSON。
+- 兼容：既有四个生产页面不导入 fixture、不改变缓存边界；`/workbench/s01-preview` 只在 `WORKBENCH_LLM_MODE=mock` 可访问，3100 live 直接 `notFound`。
+- 正文门禁：切片 2 没有 SearchResponse/content hash 绑定，因此预览中的任意 v1 assistant 正文一律隐藏；`finalAnswerVisible` 只保留为未来强类型投影条件，不能放行旧正文。
+- 非目标：当前修正不实现 QueueBar、Context/费用面板、真实 v2 API、FastAPI/LangGraph/数据库，不改生产 v1 发送与 `always_allow`，不启动下一个功能。
+- 交付记录：`docs/development/2026-07-27-005-agent-frontend.md`。
+- 审查点：切片 4 六项阻断修正、全门禁和视觉验证已经完成；状态为 `awaiting_coordination_review`。未获用户放行前不进入切片 5，不 commit/push。
+- 当前结果：切片 1、2、3 已通过协调审查；切片 4 的六项 P0 阻断均已修正并验证。3110 无消息锚点时现在只对显式 fixture 在 Composer 上方显示过程区，`fixture=null` 的 3100 生产分支不变。Issue #6 保持开放并停在用户验收门。
 
-### S00 当前工作树进度
+## 阻断项清零记录（2026-07-28）
 
-- 已冻结 14 份 Draft 2020-12 Schema，canonical `$id` 在 TypeScript/Python 两端预注册并离线解析。
-- `fixtures/manifest.json` 已冻结 107 项：30 项合法、77 项非法；manifest 无重复 ID、重复路径或漏收 fixture。
-- manifest 顶层同时冻结 37 项稳定错误码；TypeScript `contractErrorCodes` 与 Python `CONTRACT_ERROR_CODES` 必须逐项同序。
-- TypeScript 定向契约测试 5 项通过；Python 定向契约测试 6 项通过；`uv sync --locked`、Ajv strict 离线编译和 TypeScript 类型检查通过。
-- 完整仓库门禁通过：17 个 Vitest 文件通过、1 个文件跳过，共 95 项通过、1 项跳过；类型检查、全仓 Lint、标准生产构建和 16 项 Playwright 全部通过。
-- 生产依赖审计为 0 个漏洞；PostgreSQL healthy；3100 已在最终构建后恢复，`/workbench` 返回 HTTP 200。
-- 当前状态只等待用户明确验收；Issue #5 保持 OPEN，未验收前不得创建或启动 S01。
-- 当前合同与生产 v1 完全隔离，没有数据库 migration、模型请求或运行时行为变更。
+1. **停止独立可用：已清零**。stop 使用独立在途 Promise/锁；挂起提交不会禁用停止，重复停止幂等，旧成功响应不能清空新草稿。
+2. **证据属于原命令：已清零**。四类命令逐字段校验 type、scope、ID、hash、revision 与 decision；错配不进入 reducer、不调用 evidence callback、不推进命令。
+3. **澄清/审批防双击：已清零**。同一逻辑对象共享首个在途 Promise；同内容失败重试复用 command/key/hash，内容或决定变化才新建命令。
+4. **晚到事件观察与恢复：已清零**。applied、superseded、rejected、failed 通过同一 reducer 原位迁移；无新输入时自动恢复文本和附件，有新输入时只提供显式恢复。
+5. **键盘语义组件证明：已清零**。非运行态 Ctrl/Cmd+Enter 普通发送；运行态 Enter=enqueue、Ctrl/Cmd+Enter=steer；IME、repeat、Shift+Enter 和移动模式均有组件测试。
+6. **停止前工具收口：已清零**。运行中/等待审批工具先进入规范化 failed，随后 run.cancelled；澄清等待和并发/重复停止均有测试。
+
+阻断项虽已清零，当前仍处于协调与用户验收门：不进入 FIFO QueueBar，不接真实 LangGraph，不接真实工具/搜索/RAG，不修改共享合同，不 stage/commit/push。
+
+### 当前引导与中断切片的状态边界
+
+- guidance：`submitting -> accepted_pending -> applied|superseded|rejected|failed`；HTTP accepted 不等于 applied。
+- enqueue、steer、clarification resume、approval decision 是四种独立 typed command，失败时不得互相降级。
+- active Composer 的 Enter 只 enqueue，Ctrl/Cmd+Enter 只 steer，Shift+Enter 与 IME composing/repeat 均不提交。
+- clarification 只携带 clarification/checkpoint/state revision；approval 只支持 `allow_once|deny`。v2 不提供 `always_allow`，`edit` 只读。
+
+### 当前引导与中断切片的文件边界与证据
+
+- 键盘/点击路由：`apps/web/src/lib/agent-events/v2/composer-routing.ts`；运行态 Enter=enqueue、Ctrl/Cmd+Enter=steer，非运行态保持普通 send，Shift+Enter/IME/repeat 不提交。
+- 命令控制器：`apps/web/src/lib/agent-events/v2/interaction-controller.ts`；四种 wire command 相互隔离，SHA-256 content hash、command/idempotency key、重试复用和安全 snapshot 均有定向测试。
+- 3110 adapter：`apps/web/src/lib/agent-events/v2/use-v2-preview-interaction.ts`；只在 deterministic fixture 中把 typed evidence 归并回 reducer，不接生产 v1 API。
+- 交互 UI：`AgentComposer.tsx`、`V2GuidanceList.tsx`、`V2InterruptPanel.tsx`；移动端显式选择“下一条消息/引导当前任务”，stop 独立，澄清与审批只调用各自 adapter。
+- 事件归并：guidance 按 commandSeq 稳定展示，accepted 只显示等待应用；clarification checkpoint/state revision 和 approval allow-once/deny 都保留 typed 边界，edit 只读。
+- 定向证据：11 个测试文件、169/169；全量 Vitest 264 通过、1 跳过；`npm run typecheck`、全量 ESLint、生产构建、`git diff --check` 通过；Playwright 首轮一个既有滚动用例出现时序失败，单独复跑与随后全量复跑均通过，最终原样 `npm run test:e2e` 也以 16/16 干净通过。
+- 浏览器证据：1440x1000 与 360x800 共检查 10 个场景，过程区均为 `above-composer` 且 `scrollWidth === clientWidth`；澄清、审批、enqueue、steer、停止实机可操作；未显示 `reasoning_content`、`idempotencyKey`、`contentHash`、`checkpointRef`、`toolCallId`；3110 preview=200，3100 preview=404。
+- 无锚点接缝：`apps/web/src/components/workbench/conversation/Conversation.tsx` 仅在显式 fixture 且没有 v1 用户消息时建立独立预览位；`Conversation.test.tsx` 证明 fixture 可见且 `fixture=null` 的生产空线程行为不变。
+
+### 工具状态切片的合同边界
+
+- 当前 `ToolUpdatedPayload.phase` 只有 `progress`、`retrying`、`waiting_approval`。
+- `rolling_back`、`compensating` 没有当前 typed 合同，不得从自由文本推断或展示；留给事务可靠性阶段的版本化 Saga 事件。
+- `approval.required/decided` 只作为当前 `toolCallId` 的只读状态；实际 allow/deny/edit 交互属于切片 4。
+- unknown 只能显示 `operationRef`、`possibleDuplicateCostUsd` 和固定 `nextAction=check_operation`，禁止默认重试。
+- `approval.decided=deny` 是未收口的审计状态：禁止继续 progress/retrying/completed/unknown，必须先归并规范化 `tool.failed`，run 才能进入 terminal。
+- `approval.decided=edit` 的恢复语义尚未冻结；切片 3 只保留只读状态，不推断继续执行或重新审批。
+
+### 事件内核切片的文件边界
+
+- v2 前端合同与纯 reducer：`apps/web/src/lib/agent-events/v2/`
+- 3110/test 专用数据源：`apps/web/src/server/mock/s01-event-fixtures.ts`
+- 定向测试：`apps/web/src/lib/agent-events/v2/*.test.ts`
+- 当前 v1 `types.ts`、`schema.ts`、`reducer.ts`、`use-agent-thread.ts` 与 3100 live 路径保持原样。
+- 严格校验：Ajv 2020-12 离线预注册共享 Schema 并执行完整条件合同，Zod 按 `type` 分派 envelope，最终输出手写 discriminated union；浏览器端不导入 Node `fs/path` 验证器。
+- 切片证据：`event-kernel.test.ts` 19/19、`npm run typecheck`、新增文件 ESLint 和 `git diff --check` 通过；生产源码没有导入 v2 内核或前端测试 fixture。
+
+### 过程与核验视图切片的文件边界
+
+- 过程投影与开合偏好：`apps/web/src/lib/agent-events/v2/process-view-model.ts`、`process-panel-preference.ts`。
+- 独立过程组件：`apps/web/src/components/workbench/process/V2ProcessPanel.tsx`。
+- 仅 mock 可用的预览入口：`apps/web/src/app/workbench/s01-preview/page.tsx`、`apps/web/src/server/mock/s01-page-fixture.ts`。
+- 3110 场景：`apps/web/src/server/mock/s01-event-fixtures.ts`，覆盖 direct、complex、verification failed、partial、waiting、failed、stopped。
+- 生产接缝仅为可空强类型 prop：`WorkbenchEntry -> WorkbenchShell -> Conversation`；prop 为 `null` 时沿用现有 v1 行为，生产页面不主动加载 fixture。
+- 核验 reason code 使用穷尽白名单映射并保留 `data-reason-code`；自由文本只来自已归并 `publicText`。
+- 折叠偏好读取和写入均有浏览器存储异常边界；隐私或配额策略禁用 localStorage 时，仅退化为当前 React state，不影响 Conversation。
+- 切片证据：3 个定向测试文件 48/48、typecheck、目标 ESLint、`git diff --check` 通过；1440x900 与 360x800 预览无横向溢出或内容重叠。
+
+### 工具活动切片的文件边界
+
+- 工具状态归并：`apps/web/src/lib/agent-events/v2/run-reducer.ts`；按 `toolCallId` 原位更新，稳定顺序只取 started seq。
+- 安全工具投影：`apps/web/src/lib/agent-events/v2/process-view-model.ts`；只输出 ToolDisplay、必要 ToolUsage、审批摘要和 unknown 操作引用。
+- 工具行组件：`apps/web/src/components/workbench/process/V2ToolActivityRow.tsx`；作为同一 `V2ProcessPanel` 内的非嵌套工具账本。
+- 3110 场景：`apps/web/src/server/mock/s01-event-fixtures.ts`，新增 success、parallel、progress、retrying、waiting approval、approval decided、empty、failed、unknown、long。
+- 定向测试：`event-kernel.test.ts`、`V2ProcessPanel.test.tsx`、`V2ToolActivityRow.test.tsx`、`s01-page-fixture.test.ts` 共 73/73；typecheck、目标 ESLint、`git diff --check` 通过。
+- 实机证据：1440x900 unknown 与 360x800 长文本均无横向溢出；并行顺序稳定，reduced-motion 正常；3100 preview 为 404。
+
+### 后续事务可靠性约束
+
+以下约束只记录未来真实执行循环、工具闭环和生产加固的实现边界，当前前端功能不实现后端事务：
+
+- 单库强事务必须在同一数据库事务中按序提交，任何一步失败立即整体回滚。
+- 跨系统强一致业务优先封装为一个服务端原子业务工具；模型不能拼接多个底层写工具假装原子。
+- 最终一致流程使用 Saga/补偿、Transactional Outbox/Inbox、幂等键、异步退避重试和死信/人工兜底。
+- operation ledger、idempotency key、expected revision、lease/fencing、条件终态共同防止重复效果和迟到 worker 写入。
+- timeout/outcome unknown 必须先查询 operation 状态；可能产生副作用的操作禁止盲重试。
+- 后续工具行必须诚实展示 retrying、rolling_back、compensating、unknown 和最终失败；accepted 只代表请求持久化，不等于业务 completed。
 
 ## 已实现
 
@@ -83,15 +195,15 @@ flowchart LR
     R --> UI
 ```
 
-SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后台执行先落库，再通知零个或多个订阅者；浏览器关闭只移除订阅者。`frontend/src/hooks/use-agent-thread.ts` 在页面隐藏后禁用逐字动画并立即应用完整 delta，避免恢复时慢速回放。
+SSE 订阅不是运行所有者。`apps/web/src/server/live/engine.ts` 中的后台执行先落库，再通知零个或多个订阅者；浏览器关闭只移除订阅者。`apps/web/src/hooks/use-agent-thread.ts` 在页面隐藏后禁用逐字动画并立即应用完整 delta，避免恢复时慢速回放。
 
 同一 live runtime 通过 `eventTail` 串行提交事件。停止先同步设置 `cancelled` 并中止 Provider，再由 `finalizeLiveRun()` 用条件更新抢占终态；线程状态、完成消息、项目记忆和终态事件与抢占结果保持同一事务。终态已存在时 stop API 返回实际状态，不写重复事件。
 
 ## 数据与配置
 
 - 容器：`agent-workbench-postgres`，镜像 `pgvector/pgvector:pg17`，仅绑定 `127.0.0.1:5432`。
-- 幂等 schema：`frontend/src/server/persistence/schema.ts`。
-- 数据访问：`frontend/src/server/persistence/database.ts` 与 `frontend/src/server/live/store.ts`。
+- 幂等 schema：`apps/web/src/server/persistence/schema.ts`。
+- 数据访问：`apps/web/src/server/persistence/database.ts` 与 `apps/web/src/server/live/store.ts`。
 - 清理入口：`ensureLiveRecovery()` 首次 live 请求触发，之后按 `cleanupIntervalMinutes` 限频。
 - 保留配置固定 `threadTtlDays: 3`；项目记忆默认最多 120 条、召回 24 条、上下文最多 16000 字符。
 - `projectMemoryMaxItems` 当前仅为配置兼容字段，不再触发物理删除；召回使用 `projectMemoryRecallItems` 和 `projectMemoryMaxChars` 控制单轮上下文。
@@ -100,23 +212,23 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 
 ## 核心代码
 
-- 壳层与顶栏：`frontend/src/components/workbench/app-shell/WorkbenchShell.tsx`
-- 入口与 URL：`frontend/src/components/workbench/entry/WorkbenchEntry.tsx`
-- 项目会话树：`frontend/src/components/workbench/sidebar/WorkbenchSidebar.tsx`
-- 对话与滚动：`frontend/src/components/workbench/conversation/Conversation.tsx`
-- 输入、附件、模型：`frontend/src/components/workbench/composer/AgentComposer.tsx`
-- SSE 状态：`frontend/src/hooks/use-agent-thread.ts`
-- 逐字与后台追平：`frontend/src/lib/agent-events/typewriter-queue.ts`
-- live 运行：`frontend/src/server/live/engine.ts`
-- live 数据：`frontend/src/server/live/store.ts`
-- Prompt 策略：`frontend/src/server/live/prompt-policy.ts`
-- 真实记忆集成契约：`frontend/src/server/live/store.integration.test.ts`
-- DeepSeek：`frontend/src/server/llm/deepseek-client.ts`
+- 壳层与顶栏：`apps/web/src/components/workbench/app-shell/WorkbenchShell.tsx`
+- 入口与 URL：`apps/web/src/components/workbench/entry/WorkbenchEntry.tsx`
+- 项目会话树：`apps/web/src/components/workbench/sidebar/WorkbenchSidebar.tsx`
+- 对话与滚动：`apps/web/src/components/workbench/conversation/Conversation.tsx`
+- 输入、附件、模型：`apps/web/src/components/workbench/composer/AgentComposer.tsx`
+- SSE 状态：`apps/web/src/hooks/use-agent-thread.ts`
+- 逐字与后台追平：`apps/web/src/lib/agent-events/typewriter-queue.ts`
+- live 运行：`apps/web/src/server/live/engine.ts`
+- live 数据：`apps/web/src/server/live/store.ts`
+- Prompt 策略：`apps/web/src/server/live/prompt-policy.ts`
+- 真实记忆集成契约：`apps/web/src/server/live/store.integration.test.ts`
+- DeepSeek：`apps/web/src/server/llm/deepseek-client.ts`
 - 阶段 3 研究与协议：`docs/reasoning-project-context/RESEARCH.md`
 - 阶段 3 中文开发记录：`docs/development/2026-07-26-003-reasoning-project-context.md`
-- S00 合同根目录：`frontend/contracts/v2/`
-- S00 TypeScript 消费入口：`frontend/src/lib/contracts/search-agent-v2.ts`
-- S00 Python 消费测试：`frontend/contracts/python/tests/test_contracts.py`
+- S00 合同根目录：`packages/contracts/v2/`
+- S00 TypeScript 消费入口：`apps/web/src/lib/contracts/search-agent-v2.ts`
+- S00 Python 消费测试：`packages/contracts/python/tests/test_contracts.py`
 - S00 中文开发记录：`docs/development/2026-07-26-004-search-agent-contracts.md`
 
 ## 已取得的验收证据
@@ -141,9 +253,9 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - S00 跨语言合同：14 份 Draft 2020-12 Schema、107 项共享 fixture 与 37 项共享错误码；TypeScript 5 项、Python 6 项定向测试和 Ajv strict 离线编译通过。
 - S00 全量门禁：95 项 Vitest 通过、1 项跳过；类型、Lint、标准生产构建和 16 项 Playwright 全部通过；生产依赖审计 0；3100 恢复为 HTTP 200。
 
-## 后续实现不变量与路线
+## 后续实现不变量与功能路线
 
-以下内容是 S01 及以后必须遵守的冻结约束，不代表 S00 已经实现运行时或 UI。
+以下内容是当前前端阶段及以后必须遵守的冻结约束。它们描述真实功能如何安全落地，不代表尚未开始的后端、工具或 RAG 已经实现。
 
 ### 可见过程
 
@@ -151,7 +263,7 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 模型语义节点的 `publicText` 必须与真实结构化 result 在同一次响应中产生，限制为 1 至 2 句精简安全自然段，并通过投影门；失败时隐藏，不得使用本地 fallback。
 - `node.started` 只显示真实节点状态，不额外调用模型；deterministic 节点不伪造 ModelUsage 或可见“思考”。
 - 简单任务不创建空计划或计划卡；只有复杂任务才持久化、展示和更新计划。
-- 未来 S05 的内部 NodeOutput 还需保存 internal-only `publicSupports[]`，以 JSON Pointer + relation 指向允许公开的 result 字段。投影门检查字段白名单、数字、日期、实体；完成式动作必须对应 confirmed Tool Operation，未来动作必须对应 nextNode 或 plan step。固定版本 NLI 只能用于收紧高风险结果；AgentEvent 仍只公开 publicText、reasonCodes、outputRef 和 hash，不泄露 supports。
+- 真实结构化节点还需保存 internal-only `publicSupports[]`，以 JSON Pointer + relation 指向允许公开的 result 字段。投影门检查字段白名单、数字、日期、实体；完成式动作必须对应 confirmed Tool Operation，未来动作必须对应 nextNode 或 plan step。固定版本 NLI 只能用于收紧高风险结果；AgentEvent 仍只公开 publicText、reasonCodes、outputRef 和 hash，不泄露 supports。
 
 ### Router 与调用预算
 
@@ -174,18 +286,39 @@ SSE 订阅不是运行所有者。`frontend/src/server/live/engine.ts` 中的后
 - 安全规则、当前目标、最新 guidance、权限与预算、完整 Tool Call 消息组、未决 interrupt、关键 Evidence locator 不得静默裁剪。
 - 压缩结果必须记录版本、hash 和来源，避免 summary-of-summary；Provider compaction 只是可选不透明能力，不能替代可审计的 ConversationSummary。
 
-### 串行路线
+### 功能路线
 
-- S00 用户验收后，S01 先实现前端过程、结果、工具、引导与 FIFO 消息队列。
-- S02 再建立 Gold 评测基线；S04 才接入 LangGraph；S05 接真实 LLM 结构化节点和 publicSupports 投影门；S06 实现项目 Memory Store。
-- 每一步必须单独建立唯一活动 Issue、满足 Execution Gate，并在用户验收后才能开始下一步。
+- 模型 API 与基础对话已经完成，不重复开发。
+- 当前先收口可见 Agent 交互：过程、工具状态、引导、澄清、审批、FIFO、Context Window 和恢复。
+- 前端验收后，先接无工具的真实多调用 LangGraph：直接路径 `classify -> compose -> verify`，复杂路径增加 `plan`；后一次调用必须消费前一次结构化结果，不单独交付看不见效果的空图。
+- 再实现 Tool Gateway 与一个确定性只读工具，加入 `decide -> tool -> observe -> 再次模型调用` 闭环；通过后再接搜索 Provider、静态抓取、Tool Use 后 RAG、证据/引用、长期记忆、反思修复和复杂规划。
+- 强事务、Saga、Outbox/Inbox、幂等、unknown、死信和生产故障演练随着工具和多步业务逐步加入；不把它们提前包装成用户看不懂的编号阶段。
+- 每个能力必须单独建立唯一活动 Issue、满足 `Execution Gate: allowed`，验证后停止等待用户验收。
 
-## 接手顺序
+## 下一次接手的最短步骤
 
-1. 阅读 `README.md`、本文件和 `docs/development/2026-07-26-003-reasoning-project-context.md`。
+1. **先读路线，不猜编号**：阅读 `docs/万能搜索Agent端到端开发流程.md` 的“4. 一次任务的完整逻辑链路”和“22. 功能开发路线与当前进度”。确认模型 API、基础会话、项目记忆基础和前端过程/工具/引导视图已经存在；当前切片已停在用户验收门。
+2. **先做只读状态核验**：`git status --short`、`git diff --check`、`git diff --name-only`；不要覆盖或暂存用户 README、主流程文档及未跟踪资料。确认 Issue #6 仍是唯一开放 Feature，Issue #5 已关闭。
+3. **复核而不扩项**：11 个定向文件应为 169/169；全量 Vitest 264 通过、1 跳过；typecheck、lint、build、E2E 16/16。若环境变化，仅复核当前切片，不顺手实现 FIFO 或后端。
+4. **复核浏览器隔离**：3110 的 10 个目标场景在 1440x1000 与 360x800 均应显示 fixture 过程区且无溢出；3100 相同路由必须 404。
+5. **停在验收点**：当前状态已是 `awaiting_coordination_review`；不进入 FIFO、不接后端、不 commit/push，等待用户明确验收。
+
+## 前端验收后的第一后端切片（现在不要执行）
+
+用户验收 Issue #6 后，下一项应是“真实结构化多调用 Agent 循环”，而不是再做一个空框架或直接接一堆搜索 API：
+
+1. 建立一个 run 级 `ModelCall` 账本和 `callId/parentCallId/iteration/inputContextHash/usage/cost` 唯一约束。
+2. 先实现无工具的三节点多调用路径：`classify(调用 1) -> compose(调用 2) -> verify(调用 3)`；复杂路径增加 `plan` 成为 4 次调用。测试证明后一次请求重新拼接了前序结构化结果，同一 run 不再只调用一次。
+3. 再加入一个确定性只读工具：`decision -> tool -> observe -> 再次模型调用`，把 assistant `tool_calls` 和对应 `tool` 消息完整回传给下一次模型。
+4. 用 LangGraph StateGraph 条件边/`Command` 循环，PostgreSQL checkpointer，`recursion_limit` 加业务 `maxIterations/maxModelCalls/maxCost` 双重限制；每轮事件先落库再 SSE。
+5. 做 Provider 返回、工具超时、用户 stop、引导 revision、进程崩溃和 unknown attempt 的故障注入；只有通过后才扩展搜索、RAG 和长期记忆。
+
+## 接手顺序（完整项目）
+
+1. 阅读 `README.md`、本文件和 `docs/万能搜索Agent端到端开发流程.md`；先看“功能开发路线与当前进度”，不要从旧编号推断执行顺序。
 2. 运行 `git status --short`，保留用户改动和本地密钥。
 3. 确认 `docker ps --filter name=agent-workbench-postgres` 为 healthy。
-4. 在 `frontend/` 运行 `npm test`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run test:e2e`。
-5. 确认 Issue #5 是唯一活动 Feature，且 `Execution Gate: allowed`；当前只允许完成 S00。
-6. 运行 S00 的 TypeScript/Python 定向合同测试，再运行完整前端门禁。
-7. S00 验证后保持 Issue #5 开放并等待用户验收；用户验收 S00 后才可新建 S01“前端过程、结果、工具、引导与消息队列”Issue；S02 Gold 仍不得提前启动。
+4. 确认 Issue #6 是唯一活动 Feature，`Execution Gate: allowed`，Issue #5 已关闭。
+5. 在 `apps/web/` 运行前端交互阶段的 11 文件定向 Vitest（命令见本轮开发记录）、`npm run typecheck`、全量 ESLint、构建和 E2E，并在仓库根目录运行 `git diff --check`。
+6. 在 3110 打开 `/workbench/s01-preview?s01=composer_active`、`?s01=clarification_waiting`、`?s01=approval_waiting`、`?s01=approval_edit_readonly` 与 guidance 六种场景，核对桌面和 360px 移动端；再确认 3100 专用 preview 为 404。
+7. 当前前端引导/中断修正是 `awaiting_coordination_review`；继续暂停，未获用户明确验收前不得进入 FIFO QueueBar，不 commit/push，不启动真实 LangGraph、工具或 RAG。

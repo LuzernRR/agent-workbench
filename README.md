@@ -1,6 +1,6 @@
 # Agent Workbench
 
-中文单 Agent 对话工作台。正式运行在 `3100`，使用 Next.js、React、assistant-ui、DeepSeek、PostgreSQL 17 与 pgvector；浏览器、服务端运行、SSE、事件持久化和匿名会话恢复已经形成真实闭环。Python、LangGraph、万能搜索工具链和向量语义召回仍属于后续阶段。
+中文多 Agent 搜索工作台。正式运行在 `3100`，使用 Next.js、React、assistant-ui、DeepSeek、Python 3.12、LangGraph、PostgreSQL 17、Milvus 与真实网页搜索；一次运行已形成“模型摘要 → 搜索工具 → 证据观察 → 反思/核验 → 最终回答”的可恢复闭环。
 
 ## 当前能力
 
@@ -18,6 +18,11 @@
 | 流式体验 | 页面关闭后服务端继续生成；后台标签立即追平；用户上滚后停止自动跟随 | 服务进程重启会把未完成运行标记失败，不自动重发模型请求 |
 | 停止运行 | 收到真实 `runId` 后才显示停止；AbortController 中断上游；数据库原子抢占唯一终态 | 重复停止幂等返回当前终态；取消事件后不再写正文、完成事件或项目记忆 |
 | 拖拽 | 项目直接拖动排序，会话可拖入、拖出或跨项目移动 | 使用专用手柄，排序和归属持久化 |
+| LangGraph 编排 | Supervisor、Planner、Researcher、Reflector、Writer、Verifier 通过条件边形成有界循环 | 公开的只是各 Agent 结构化 LLM 摘要，不保存或展示私有思维链 |
+| 真实搜索 | Researcher 调用 Tavily，工具 started/completed 按 `toolCallId` 配对并写幂等账本 | 当前产品配置为 `forceSearch: true`；搜索失败时诚实降级 |
+| 过程展示 | 按真实 seq 显示思考、搜索和核验；只把时间上连续的同类活动合并为一行 | 类型切换后立即开新行，后续思考不会回填到搜索前的旧行；核验与思考分开 |
+| 搜索展示 | 同一连续搜索段随真实完成事件递增，如 `5/1 → 10/3 → 15/4` | 点击后只逐行显示安全来源；状态、Provider、耗时、查询和 Agent 摘要不在搜索详情重复出现 |
+| 证据记忆 | 已核验证据可写入 D 盘 Milvus，并按访客、项目、类型和 embedding 版本过滤 | Milvus 不可用时发布 degraded，主搜索继续运行 |
 
 ## 运行链路
 
@@ -28,8 +33,13 @@ flowchart LR
     ID["本轮 Provider、模型名称和 ID"] --> PR["系统 Prompt 与上下文组装"]
     PM["同项目其他会话记忆"] --> PR
     TX --> PR
-    PR --> DS["DeepSeek SSE"]
-    DS --> PE["事件先写 PostgreSQL"]
+    PR --> BFF["Next BFF"]
+    BFF --> LG["Python LangGraph StateGraph"]
+    LG --> A["Supervisor → Planner → Researcher"]
+    A --> T["真实网页搜索与证据读取"]
+    T --> R["Reflector → Writer → Verifier"]
+    R -->|"证据不足且预算允许"| A
+    R --> PE["公开 AgentEvent 先写 PostgreSQL"]
     PE --> PS["可选 SSE 订阅者"]
     PS --> Z["Zod 校验、序号去重、Reducer"]
     Z --> UI["对话、表格、代码与状态"]
@@ -38,18 +48,18 @@ flowchart LR
     UI -->|"页面隐藏"| FAST["合并未渲染 delta，立即追平"]
     UI -->|"用户上滚"| HOLD["暂停底部跟随"]
     UI -->|"停止"| STOP["条件更新唯一终态并写 run.cancelled"]
-    STOP --> DS
+    STOP --> LG
 ```
 
-模型运行属于服务端任务，不依赖页面或 SSE 是否存在。SSE 断开只移除订阅者；事件仍持续落库。重新打开会话时先读取 PostgreSQL 快照，再从活动运行序号继续订阅。停止、完成和失败使用 `status IN ('queued', 'running', 'waiting')` 条件更新竞争唯一终态，胜出者在同一事务写线程状态和终态事件。
+模型运行属于服务端任务，不依赖页面或 SSE 是否存在。Next BFF 只接收 Python Agent 的严格 NDJSON 白名单事件，持久化后再发布 SSE；刷新时由 PostgreSQL 事件重放得到同一投影。每个真实工具调用仍保留独立 `toolCallId`、幂等账本和来源；前端只对相邻同类活动做连续段归并，因此既能压缩重复行，也不会破坏 `思考 → 搜索 → 思考 → 核验` 的真实顺序。
 
 ## 本地运行
 
 环境要求：Node.js 22 以上、npm、Docker，以及可用的 DeepSeek API Key。
 
 ```powershell
-docker compose up -d
-cd frontend
+docker compose --env-file config/deploy.local.env -f deploy/compose.yaml up -d --build
+cd apps/web
 npm install
 npm run dev
 ```
@@ -57,14 +67,14 @@ npm run dev
 开发地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。生产方式：
 
 ```powershell
-cd frontend
+cd apps/web
 npm run build
 npm run start
 ```
 
 ## 统一配置
 
-真实配置只放在 `config/agent-runtime.local.json`，文件已被 Git 忽略。完整结构由 `frontend/src/server/config/runtime-config.ts` 严格校验：
+真实密钥只放在 `config/agent-runtime.local.json`，搜索/预算/循环配置位于 `config/search-agent.json`，部署变量位于被忽略的 `config/deploy.local.env`。浏览器不能读取这些配置，也禁止任何密钥进入 `NEXT_PUBLIC_`。
 
 ```json
 {
@@ -109,20 +119,36 @@ npm run start
 ## 验证
 
 ```powershell
-cd frontend
+cd apps/web
 npm test
 npm run typecheck
 npm run lint
 npm run build
 npm run test:e2e
+$env:LIVE_SEARCH_E2E='1'
+npm run test:e2e:live
+
+cd ../../services/search-agent
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；正式 live 服务固定为 `3100`。真实会话连续性按 [阶段 1 开发记录](docs/development/2026-07-26-001-workbench-continuity.md) 验证，动态身份和分层记忆按 [阶段 2 开发记录](docs/development/2026-07-26-002-model-identity-memory.md) 验证。
+Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；正式 live 服务固定为 `3100`。真实 LangGraph、搜索递增摘要、刷新恢复与停止验收记录在 [Issue #7 开发记录](docs/development/2026-07-28-006-langgraph-search-agent.md)。
+
+## 模块目录
+
+| 目录 | 职责 |
+|---|---|
+| `apps/web/` | Next.js 前端、BFF、现有 live/mock 运行时与 Web 测试 |
+| `services/search-agent/` | 已接入的 Python/FastAPI/LangGraph Search Agent、Prompt、工具、抓取、Milvus 与测试 |
+| `packages/contracts/` | TypeScript/Python 共享 Schema、fixture 与契约消费者 |
+| `deploy/` | Docker Compose、镜像与运维部署资产 |
+| `config/` | 本地运行配置与示例；密钥只允许进入忽略的 `*.local.json` |
 
 真实 PostgreSQL 分层记忆契约默认不随普通单测执行，显式验证：
 
 ```powershell
-cd frontend
+cd apps/web
 $env:WORKBENCH_LIVE_INTEGRATION='1'
 npx vitest run src/server/live/store.integration.test.ts
 ```
@@ -133,7 +159,8 @@ npx vitest run src/server/live/store.integration.test.ts
 - [Agent 开发手册](docs/README.md)
 - [阶段 1 研究与实施](docs/workbench-continuity/RESEARCH.md)
 - [阶段 2 模型身份与记忆](docs/model-identity-memory/RESEARCH.md)
-- [万能搜索 Agent 设计](docs/08-universal-search-agent.md)
+- [万能搜索 Agent 端到端开发流程](docs/万能搜索Agent端到端开发流程.md)
+- [万能搜索 Agent 研究底稿](docs/08-universal-search-agent.md)
 - [逐功能开发记录](docs/development/README.md)
 
 ## 开发门禁

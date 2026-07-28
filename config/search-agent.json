@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "service": {
+    "origin": "http://127.0.0.1:8100",
+    "requestTimeoutMs": 300000
+  },
+  "graph": {
+    "defaultDepth": "balanced",
+    "recursionLimit": 48,
+    "maxIterations": 2,
+    "maxModelCalls": 16,
+    "maxToolCalls": 6,
+    "maxRunSeconds": 240,
+    "maxTotalTokens": 120000,
+    "maxCostUsd": 0.25,
+    "noProgressLimit": 2,
+    "maxResultsPerCall": 5,
+    "maxPagesPerCall": 3
+  },
+  "search": {
+    "forceSearch": true,
+    "defaultProvider": "tavily",
+    "allowDuckDuckGoFallback": true
+  },
+  "milvus": {
+    "enabled": true,
+    "uri": "http://127.0.0.1:19530",
+    "collection": "agent_evidence_v1",
+    "dataDirectory": "D:\\001-agent\\milvus",
+    "embeddingModelVersion": "hashing-zh-en-v1",
+    "embeddingDimension": 384,
+    "recallLimit": 4
+  },
+  "pricing": {
+    "verifiedAt": "2026-07-28",
+    "source": "https://api-docs.deepseek.com/quick_start/pricing",
+    "models": {
+      "deepseek-v4-flash": {
+        "inputCacheMissUsdPerMillion": 0.14,
+        "outputUsdPerMillion": 0.28
+      },
+      "deepseek-v4-pro": {
+        "inputCacheMissUsdPerMillion": 0.435,
+        "outputUsdPerMillion": 0.87
+      }
+    }
+  }
+}
