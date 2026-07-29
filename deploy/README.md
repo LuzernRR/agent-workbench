@@ -1,8 +1,8 @@
 # 部署与运维
 
-`deploy/compose.yaml` 管理当前可交付的六个服务：Web、Search Agent、PostgreSQL、
-Milvus、etcd 与 MinIO。Milvus 使用项目独立目录 `D:\001-agent\milvus`，不会读取、
-停止、重建或删除既有 `D:\milvus` 实例和数据。
+`deploy/compose.yaml` 管理当前可交付的七个服务：Web、Search Agent、PostgreSQL、
+Milvus、etcd、MinIO 与内部 `xiaohongshu-mcp`。Milvus 使用项目独立目录
+`D:\001-agent\milvus`，不会读取、停止、重建或删除既有 `D:\milvus` 实例和数据。
 
 ## 本地启动
 
@@ -12,7 +12,7 @@ Milvus、etcd 与 MinIO。Milvus 使用项目独立目录 `D:\001-agent\milvus`�
   `config/deploy.local.env` 已按本地规范准备；
 - `D:\001-agent\milvus` 是专用于本项目的新目录，包含 `etcd`、`minio`、`milvus`；
 - 正式 Web 使用 `127.0.0.1:3100`，Search Agent 健康/调试端口使用
-  `127.0.0.1:18100`，Milvus gRPC/健康端口使用 `127.0.0.1:29530/29091`。
+  `127.0.0.1:18100`；Milvus gRPC/健康端口只在 `agent-milvus` 私网内使用。
 
 只做静态解析且不输出插值后的密钥：
 
@@ -32,12 +32,38 @@ docker compose --env-file config/deploy.local.env -f deploy/compose.yaml ps
 ```powershell
 Invoke-RestMethod http://127.0.0.1:3100/health
 Invoke-RestMethod http://127.0.0.1:18100/health
-Invoke-WebRequest http://127.0.0.1:29091/healthz -UseBasicParsing
+docker compose --env-file config/deploy.local.env -f deploy/compose.yaml exec milvus `
+  curl --fail http://127.0.0.1:9091/healthz
 ```
 
 Search Agent 的 `/health` 在 Milvus 不可达时返回 `degraded`，进程仍可执行不带
 向量记忆的搜索。PostgreSQL 不可达时服务启动失败，这是有意的 fail-closed：
 checkpoint 与搜索幂等账本不能在生产环境静默丢失。
+
+## 小红书登录
+
+`xiaohongshu-mcp` 不发布宿主机端口，Web 也不加入它的私有网络。首次使用或
+登录态失效时，在部署主机运行：
+
+```powershell
+.\deploy\get-xiaohongshu-login-qrcode.ps1
+```
+
+脚本只通过容器内的登录端点获取二维码，把 PNG 临时写入系统临时目录并打开。
+二维码原始内容不会写入仓库、配置或终端日志；登录成功或四分钟超时后临时文件
+会被删除。Cookie 只保存在命名卷
+`001-agent-live-xiaohongshu-session-v2`。Search Agent 的适配器只允许登录状态、
+二维码、搜索、笔记详情和用户主页五类读取，发布、评论、点赞、收藏和删除
+Cookie 会在网络请求前被拒绝。
+
+仓内 `services/xiaohongshu-mcp/` 固定自上游提交 `a5bb5b8`，并保留
+Apache-2.0 许可证。项目补丁只把搜索页的全局 network-idle 等待改为等待非空
+的真实 `search.feeds` 数据，既避免持续埋点请求导致假超时，也避免响应式空数组
+被误报成“搜索成功但 0 条”。部署服务本身也只注册上述五类只读能力；所有写
+路由返回 404；HTTP 与 MCP 工具 panic 均不返回或记录原始错误，导航日志不包含
+带签名 URL。完整基线和升级规则见
+`services/xiaohongshu-mcp/UPSTREAM.md`。
+当前项目部署版本为 `v2.2.6-agent-workbench.3`。
 
 ## 配置与生产约束
 
@@ -47,9 +73,10 @@ checkpoint 与搜索幂等账本不能在生产环境静默丢失。
   `POSTGRES_PASSWORD`、与其一致且密码已 URL 编码的
   `SEARCH_AGENT_DATABASE_URL`，以及 `WORKBENCH_INTERNAL_TOKEN`。
 - `config/deploy.env.example` 只列变量名和非密钥占位值，不可作为生产密钥文件。
-- Web、PostgreSQL、Search Agent 和 Milvus 的宿主机端口默认只绑定
-  `127.0.0.1`；容器间只通过 `agent-backend` / `agent-milvus` 内部网络通信，
-  不得直接暴露数据库、对象存储或 gRPC 端口到公网。
+- Web、PostgreSQL 和 Search Agent 的宿主机端口默认只绑定 `127.0.0.1`；
+  Milvus、etcd、MinIO 与小红书 MCP 不发布宿主机端口，小红书 MCP 使用独立的
+  私有/出站网络。
+  不得直接暴露 MCP、数据库、对象存储或 gRPC 端口到公网。
 - Compose project 为 `001-agent-live`，PostgreSQL 使用显式卷
   `001-agent-live-postgres-v1`。禁止执行 `docker compose down -v`。
 - 发布前将基础镜像改为经验证的 digest，并在 CI 中生成 SBOM、执行镜像扫描。

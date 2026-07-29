@@ -275,24 +275,30 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply, afte
   );
 }
 
-function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: RunTiming }) {
-  const [open, setOpen] = useState(false);
+export function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: RunTiming }) {
+  const active = item.status === "streaming";
+  const settledKey = active ? null : `${item.id}:${item.status}`;
+  const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
+  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
   const verification = item.activityKind === "verification";
-  const label = item.status === "streaming"
-    ? verification ? "正在核验" : "正在思考"
+  const label = active
+    ? verification ? "核验中" : "思考中"
     : item.status === "stopped"
       ? verification ? "核验已停止" : "思考已停止"
       : item.status === "error"
         ? verification ? "核验未完成" : "思考未完成"
-        : verification ? "核验结果" : "思考结果";
+        : verification ? "核验结束" : "思考结束";
   return <div className="conversation-lane mb-2 text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"}>
     {timing ? <RunElapsed timing={timing} /> : null}
-    <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" title={`${open ? "收起" : "展开"}${verification ? "核验" : "思考"}结果`}>
-      {open ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
+    <button type="button" aria-expanded={expanded} onClick={() => {
+      if (settledKey === null) return;
+      setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
+    }} className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" title={`${expanded ? "收起" : "展开"}${verification ? "核验" : "思考"}结果`}>
+      {expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
       <span>{label}</span>
       {item.paragraphs.length > 1 ? <span className="tabular-nums text-[13px] font-normal text-tertiary">{item.paragraphs.length} 条</span> : null}
     </button>
-    {open && item.paragraphs.length ? <div className="ml-2 mt-1 space-y-2.5 border-l border-line pl-4">
+    {expanded && item.paragraphs.length ? <div className="ml-2 mt-1 space-y-2.5 border-l border-line pl-4">
       {item.paragraphs.map((paragraph) => <p key={paragraph.id} className="text-pretty text-secondary">{paragraph.text}</p>)}
     </div> : null}
   </div>;

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,13 +23,43 @@ from app.graph.schemas import (
     VerifyResult,
 )
 from app.graph.state import initial_state
-from app.llm.deepseek import ModelUsage, ResearcherTurn, ResearchToolCall
+from app.llm.deepseek import (
+    ModelUsage,
+    ResearcherTurn,
+    ResearchToolCall,
+    StructuredOutputError,
+)
 from app.persistence.tool_ledger import LedgerDecision
+from app.tools.channels.base import SourceProvenance
 from app.tools.search_tool import (
     PublicSearchResult,
     SearchEvidence,
     SearchExecutionResult,
 )
+
+
+def test_remaining_run_seconds_preserves_finalization_budget_signal() -> None:
+    state = initial_state("时间预算测试", max_run_seconds=120)
+    state["started_at"] = (
+        datetime.now(UTC) - timedelta(seconds=75)
+    ).isoformat().replace("+00:00", "Z")
+
+    remaining = nodes.remaining_run_seconds(state)
+
+    assert remaining is not None
+    assert 44 <= remaining <= 45
+
+
+def test_xiaohongshu_tool_requires_a_meaningful_window_before_finalization() -> None:
+    state = initial_state("时间预算测试", max_run_seconds=120)
+    state["started_at"] = (
+        datetime.now(UTC) - timedelta(seconds=30)
+    ).isoformat().replace("+00:00", "Z")
+
+    assert nodes.tool_timeout_seconds(state, "xiaohongshu") == 0
+    web_timeout = nodes.tool_timeout_seconds(state, "web")
+    assert web_timeout is not None
+    assert 29 <= web_timeout <= 30
 
 
 class MemoryLedger:
@@ -58,19 +90,27 @@ class MemoryLedger:
 @dataclass
 class Scenario:
     need_search: bool = True
+    supervisor_channels: list[str] = field(default_factory=lambda: ["web"])
     plans: list[list[str]] = field(default_factory=lambda: [["query one"]])
     reflects: list[dict[str, Any]] = field(
-        default_factory=lambda: [{"sufficient": True, "missing": "", "extra_queries": []}]
+        default_factory=lambda: [{"sufficient": True, "missing": "", "extra_searches": []}]
     )
     verifier_actions: list[str] = field(default_factory=lambda: ["pass"])
     researcher_mode: str = "valid"
     include_reasoning: bool = False
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
+    result_count_by_query: dict[str, int] = field(default_factory=dict)
+    limitations_by_query: dict[str, str] = field(default_factory=dict)
+    channels_by_query: dict[str, str] = field(default_factory=dict)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
     structured_repair_permissions: list[tuple[str, bool]] = field(default_factory=list)
+    structured_messages: dict[str, list[Any]] = field(default_factory=dict)
+    invalid_structured_roles: set[str] = field(default_factory=set)
     researcher_messages: list[list[dict[str, Any]]] = field(default_factory=list)
     tool_executions: list[str] = field(default_factory=list)
+    tool_execution_searches: list[dict[str, str]] = field(default_factory=list)
+    tool_delay_seconds: float = 0
     tool_call_index: int = 0
     checkpoint_values: dict[str, Any] = field(default_factory=dict)
 
@@ -84,17 +124,36 @@ class Scenario:
         allow_repair: bool = False,
     ) -> tuple[Any, ModelUsage]:
         self.structured_repair_permissions.append((role, allow_repair))
+        self.structured_messages.setdefault(role, []).append(copy.deepcopy(messages))
         index = self.structured_calls.get(role, 0)
         self.structured_calls[role] = index + 1
+        if role in self.invalid_structured_roles:
+            raise StructuredOutputError(ModelUsage(
+                20,
+                4,
+                24,
+                0.000002,
+                attempts=2 if allow_repair else 1,
+            ))
         if role == "supervisor":
             result = IntentResult(
                 task_type="research" if self.need_search else "direct_answer",
                 need_search=self.need_search,
+                channels=self.supervisor_channels,
                 summary="已判断是否需要联网",
             )
         elif role == "planner":
             queries = self.plans[min(index, len(self.plans) - 1)]
-            result = PlanResult(queries=queries, summary="已形成检索计划")
+            result = PlanResult(
+                searches=[
+                    {
+                        "query": query,
+                        "channel": self.channels_by_query.get(query, "web"),
+                    }
+                    for query in queries
+                ],
+                summary="已形成检索计划",
+            )
         elif role == "reflector":
             data = self.reflects[min(index, len(self.reflects) - 1)]
             result = ReflectResult(summary="已评估证据覆盖", **data)
@@ -109,7 +168,14 @@ class Scenario:
                 passed=action == "pass",
                 action=action,
                 issue="需要改写" if action == "rewrite" else "",
-                extra_queries=["query two"] if action == "research_more" else [],
+                extra_searches=(
+                    [{
+                        "query": "query two",
+                        "channel": self.channels_by_query.get("query two", "web"),
+                    }]
+                    if action == "research_more"
+                    else []
+                ),
                 summary="已完成核验",
             )
         else:  # pragma: no cover - 测试 double 防御
@@ -139,7 +205,9 @@ class Scenario:
                 finish_reason="stop",
             )
 
-        target = str(messages[-1]["content"]).split("：", 1)[-1]
+        requested = json.loads(str(messages[-1]["content"]).split("：", 1)[-1])
+        target = requested["query"]
+        channel = requested["channel"]
         self.tool_call_index += 1
         call_id = f"call_{self.tool_call_index}"
         if self.researcher_mode == "bad_args":
@@ -151,19 +219,19 @@ class Scenario:
                 ResearchToolCall(
                     call_id,
                     "web_search",
-                    json.dumps({"query": target, "max_results": 5}),
+                    json.dumps({"query": target, "channel": channel, "max_results": 5}),
                 ),
                 ResearchToolCall(
                     f"{call_id}_extra",
                     "web_search",
-                    json.dumps({"query": target, "max_results": 5}),
+                    json.dumps({"query": target, "channel": channel, "max_results": 5}),
                 ),
             )
         else:
             calls = (ResearchToolCall(
                 call_id,
                 "web_search",
-                json.dumps({"query": target, "max_results": 5}),
+                json.dumps({"query": target, "channel": channel, "max_results": 5}),
             ),)
         assistant_message = {
             "role": "assistant",
@@ -187,27 +255,56 @@ class Scenario:
         )
 
     async def execute_tool(self, arguments: Any, config: Any) -> SearchExecutionResult:
+        if self.tool_delay_seconds:
+            await asyncio.sleep(self.tool_delay_seconds)
         query = arguments.query
         self.tool_executions.append(query)
+        self.tool_execution_searches.append(
+            {"query": query, "channel": arguments.channel}
+        )
         has_evidence = self.evidence_by_query.get(query, False)
+        result_count = self.result_count_by_query.get(query, 1)
+        limitation = self.limitations_by_query.get(query)
         url = f"https://example.com/{len(self.tool_executions)}"
         return SearchExecutionResult(
             ok=True,
+            channel=arguments.channel,
             query=query,
             provider="deterministic",
             results=[PublicSearchResult(
+                channel=arguments.channel,
+                provider="deterministic",
+                query=query,
                 title=f"Result {query}",
                 url=url,
                 snippet="candidate only",
                 verified=has_evidence,
-            )],
+                limitation=limitation,
+                provenance=SourceProvenance(
+                    discovery_provider="deterministic",
+                    detail_provider="test" if has_evidence else None,
+                    source_kind="public_page" if has_evidence else "public_index",
+                    observed_at="2026-07-28T00:00:00Z",
+                    confidence="high" if has_evidence else "low",
+                ),
+            )] if result_count else [],
             evidence=[SearchEvidence(
+                channel=arguments.channel,
+                provider="deterministic",
                 title=f"Evidence {query}",
                 url=url,
                 text=f"verified evidence for {query}",
                 extractor="test",
                 query=query,
                 captured_at="2026-07-28T00:00:00Z",
+                limitation=limitation,
+                provenance=SourceProvenance(
+                    discovery_provider="deterministic",
+                    detail_provider="test",
+                    source_kind="public_page",
+                    observed_at="2026-07-28T00:00:00Z",
+                    confidence="high",
+                ),
             )] if has_evidence else [],
         )
 
@@ -273,6 +370,28 @@ async def test_force_search_runs_real_tool_even_when_supervisor_suggests_direct(
 
 
 @pytest.mark.asyncio
+async def test_invalid_reflector_structure_uses_evidence_and_continues_to_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(invalid_structured_roles={"reflector"})
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert output["response_status"] == "completed"
+    assert output["verification_passed"] is True
+    assert output["stop_reason"] == "VERIFIED"
+    assert scenario.structured_calls["reflector"] == 1
+    assert not any(event["type"] == "tool.presented" for event in events)
+    reflect_completed = [
+        event
+        for event in events
+        if event["type"] == "node.completed" and event["node"] == "reflect"
+    ]
+    assert len(reflect_completed) == 1
+    assert reflect_completed[0]["publicSummary"] is None
+
+
+@pytest.mark.asyncio
 async def test_schema_repair_is_counted_and_disables_later_node_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -321,12 +440,78 @@ async def test_single_search_runs_think_search_observe_and_pairs_ids(
 
 
 @pytest.mark.asyncio
+async def test_reflector_presents_only_current_real_candidate_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(reflects=[{
+        "sufficient": True,
+        "missing": "",
+        "extra_searches": [],
+        "source_presentations": [
+            {"url": "https://example.com/1", "text": "该来源介绍了与问题相关的可核验做法。"},
+            {"url": "https://invented.example/item", "text": "这条 URL 不在真实候选中。"},
+        ],
+    }])
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    presented = [event for event in events if event["type"] == "tool.presented"]
+    assert len(presented) == 1
+    assert presented[0]["toolCallId"] == "call_1"
+    assert presented[0]["sources"] == [{
+        "url": "https://example.com/1",
+        "text": "该来源介绍了与问题相关的可核验做法。",
+    }]
+    assert output["candidates"][0]["tool_call_id"] == "call_1"
+    assert output["candidates"][0]["iteration"] == 1
+
+
+@pytest.mark.asyncio
+async def test_supervisor_and_planner_route_x_query_into_real_x_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["x"],
+        plans=[["OpenAI 最新帖子"]],
+        channels_by_query={"OpenAI 最新帖子": "x"},
+        evidence_by_query={"OpenAI 最新帖子": True},
+    )
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert output["query_channels"] == {"OpenAI 最新帖子": "x"}
+    assert output["candidates"][0]["channel"] == "x"
+    started = next(event for event in events if event["type"] == "tool.started")
+    assert started["channel"] == "x"
+    assert scenario.tool_executions == ["OpenAI 最新帖子"]
+
+
+@pytest.mark.asyncio
+async def test_planner_cannot_escape_supervisor_channel_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        plans=[["未授权的网页查询"]],
+        channels_by_query={"未授权的网页查询": "web"},
+        evidence_by_query={},
+    )
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert output["queries"] == []
+    assert scenario.tool_executions == []
+    assert not any(event["type"] == "tool.started" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_reflector_replans_then_searches_new_query(monkeypatch: pytest.MonkeyPatch) -> None:
     scenario = Scenario(
         plans=[["query one"], ["query two"]],
         reflects=[
-            {"sufficient": False, "missing": "missing", "extra_queries": ["query two"]},
-            {"sufficient": True, "missing": "", "extra_queries": []},
+            {
+                "sufficient": False,
+                "missing": "missing",
+                "extra_searches": [{"query": "query two", "channel": "web"}],
+            },
+            {"sufficient": True, "missing": "", "extra_searches": []},
         ],
         evidence_by_query={"query one": False, "query two": True},
     )
@@ -339,16 +524,83 @@ async def test_reflector_replans_then_searches_new_query(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_empty_search_terminates_as_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_zero_result_without_suggestion_replans_from_tool_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scenario = Scenario(
-        reflects=[{"sufficient": False, "missing": "no evidence", "extra_queries": []}],
-        evidence_by_query={"query one": False},
+        plans=[["query one"], ["query two"]],
+        reflects=[
+            {"sufficient": False, "missing": "no evidence", "extra_searches": []},
+            {"sufficient": True, "missing": "", "extra_searches": []},
+        ],
+        result_count_by_query={"query one": 0},
+        evidence_by_query={"query one": False, "query two": True},
     )
     output, _events = await run_scenario(monkeypatch, scenario)
 
-    assert output["response_status"] == "partial"
-    assert output["stop_reason"] == "SEARCH_UNAVAILABLE"
-    assert "不能可靠回答" in output["answer"]
+    assert output["response_status"] == "completed"
+    assert scenario.tool_executions == ["query one", "query two"]
+    assert output["tool_traces"][0]["result_count"] == 0
+    assert output["tool_traces"][0]["limitation"] == "未找到公开候选"
+    second_planner_prompt = scenario.structured_messages["planner"][1][-1].content
+    assert all(
+        field in second_planner_prompt
+        for field in (
+            '"channel": "web"',
+            '"resultCount": 0',
+            '"evidenceCount": 0',
+            '"errorCode": null',
+            '"limitation": "未找到公开候选"',
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_reflector_can_open_a_complementary_channel_after_source_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["web"],
+        plans=[["query one"], ["query x"]],
+        channels_by_query={"query one": "web", "query x": "x"},
+        reflects=[
+            {
+                "sufficient": False,
+                "missing": "缺少一手讨论",
+                "extra_searches": [{"query": "query x", "channel": "x"}],
+            },
+            {"sufficient": True, "missing": "", "extra_searches": []},
+        ],
+        evidence_by_query={"query one": False, "query x": True},
+    )
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    assert output["response_status"] == "completed"
+    assert scenario.tool_execution_searches == [
+        {"query": "query one", "channel": "web"},
+        {"query": "query x", "channel": "x"},
+    ]
+    assert output["searches"] == scenario.tool_execution_searches
+
+
+@pytest.mark.asyncio
+async def test_verifier_research_more_keeps_query_and_channel_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["web"],
+        plans=[["query one"], ["query two"]],
+        channels_by_query={"query one": "web", "query two": "x"},
+        verifier_actions=["research_more", "pass"],
+        evidence_by_query={"query one": True, "query two": True},
+    )
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    assert output["response_status"] == "completed"
+    assert scenario.tool_execution_searches[-1] == {
+        "query": "query two",
+        "channel": "x",
+    }
 
 
 @pytest.mark.parametrize("mode,code", [("bad_args", "INVALID_ARGUMENTS"), ("unknown_tool", "UNKNOWN_TOOL")])
@@ -360,7 +612,7 @@ async def test_rejected_tool_calls_still_emit_started_then_failed(
 ) -> None:
     scenario = Scenario(
         researcher_mode=mode,
-        reflects=[{"sufficient": False, "missing": "tool failed", "extra_queries": []}],
+        reflects=[{"sufficient": False, "missing": "tool failed", "extra_searches": []}],
         evidence_by_query={},
     )
     output, events = await run_scenario(monkeypatch, scenario)
@@ -392,7 +644,7 @@ async def test_model_limit_stops_with_partial_answer_without_overshoot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
-        reflects=[{"sufficient": False, "missing": "budget", "extra_queries": []}],
+        reflects=[{"sufficient": False, "missing": "budget", "extra_searches": []}],
         evidence_by_query={},
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_model_calls=4)
@@ -403,11 +655,38 @@ async def test_model_limit_stops_with_partial_answer_without_overshoot(
 
 
 @pytest.mark.asyncio
+async def test_tool_timeout_preserves_finalization_instead_of_failing_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        tool_delay_seconds=0.05,
+        evidence_by_query={"query one": False},
+    )
+    monkeypatch.setattr(nodes, "tool_timeout_seconds", lambda _state, _channel: 0.01)
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert output["response_status"] == "partial"
+    assert output["stop_reason"] == "RUN_TIME_RESERVE"
+    assert output["tool_traces"][0]["error_code"] == "RUN_TIME_RESERVE"
+    tool_events = [event for event in events if event.get("toolCallId") == "call_1"]
+    assert [event["type"] for event in tool_events] == [
+        "tool.started",
+        "tool.failed",
+    ]
+    assert tool_events[-1]["reasonCode"] == "RUN_TIME_RESERVE"
+
+
+@pytest.mark.asyncio
 async def test_max_iterations_has_stable_partial_stop_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
-        reflects=[{"sufficient": False, "missing": "more research", "extra_queries": ["query two"]}],
+        reflects=[{
+            "sufficient": False,
+            "missing": "more research",
+            "extra_searches": [{"query": "query two", "channel": "web"}],
+        }],
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_rounds=1)
     assert output["response_status"] == "partial"
@@ -419,9 +698,10 @@ async def test_no_progress_has_stable_partial_stop_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
-        reflects=[{"sufficient": False, "missing": "unsupported", "extra_queries": []}],
+        reflects=[{"sufficient": False, "missing": "unsupported", "extra_searches": []}],
+        evidence_by_query={"query one": False},
     )
-    output, _events = await run_scenario(monkeypatch, scenario)
+    output, _events = await run_scenario(monkeypatch, scenario, max_rounds=3)
     assert output["response_status"] == "partial"
     assert output["stop_reason"] == "NO_PROGRESS"
 

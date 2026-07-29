@@ -74,6 +74,7 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
         executions += 1
         return SearchExecutionResult(
             ok=True,
+            channel=arguments.channel,
             query=arguments.query,
             provider="test",
             results=[],
@@ -83,7 +84,7 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
     monkeypatch.setattr(nodes, "execute_search_tool", execute)
     monkeypatch.setattr(nodes, "get_stream_writer", lambda: events.append)
     runtime = SimpleNamespace(context=RunContext(agent_config(), ledger, None))
-    arguments = SearchToolInput(query="query one", max_results=5)
+    arguments = SearchToolInput(query="query one", channel="web", max_results=5)
 
     _first, first_trace = await nodes._run_one_search(
         state(), runtime, "call_1", arguments
@@ -120,7 +121,7 @@ async def test_cancellation_marks_inflight_tool_operation_unknown(
     monkeypatch.setattr(nodes, "get_stream_writer", lambda: (lambda event: None))
     runtime = SimpleNamespace(context=RunContext(agent_config(), ledger, None))
     task = asyncio.create_task(nodes._run_one_search(
-        state(), runtime, "call_cancel", SearchToolInput(query="query one", max_results=5)
+        state(), runtime, "call_cancel", SearchToolInput(query="query one", channel="web", max_results=5)
     ))
     await entered.wait()
     task.cancel()
@@ -156,7 +157,7 @@ async def test_cached_status_without_result_fails_closed(
         context=RunContext(agent_config(), MissingResultLedger(), None)
     )
     result, trace = await nodes._run_one_search(
-        state(), runtime, "call_missing", SearchToolInput(query="query one", max_results=5)
+        state(), runtime, "call_missing", SearchToolInput(query="query one", channel="web", max_results=5)
     )
 
     assert executions == 0
@@ -176,6 +177,7 @@ async def test_ledger_settlement_failure_closes_tool_as_unknown(
     async def execute(arguments: SearchToolInput, config: Any) -> SearchExecutionResult:
         return SearchExecutionResult(
             ok=True,
+            channel=arguments.channel,
             query=arguments.query,
             provider="test",
             results=[],
@@ -187,7 +189,7 @@ async def test_ledger_settlement_failure_closes_tool_as_unknown(
     monkeypatch.setattr(nodes, "get_stream_writer", lambda: events.append)
     runtime = SimpleNamespace(context=RunContext(agent_config(), SettlementFails(), None))
     result, trace = await nodes._run_one_search(
-        state(), runtime, "call_settle", SearchToolInput(query="query one", max_results=5)
+        state(), runtime, "call_settle", SearchToolInput(query="query one", channel="web", max_results=5)
     )
     assert result.error_code == "LEDGER_SETTLEMENT_UNKNOWN"
     assert trace["status"] == "unknown"
@@ -211,7 +213,7 @@ async def test_cancellation_during_ledger_begin_waits_then_marks_unknown(
     monkeypatch.setattr(nodes, "get_stream_writer", lambda: (lambda event: None))
     runtime = SimpleNamespace(context=RunContext(agent_config(), ledger, None))
     task = asyncio.create_task(nodes._run_one_search(
-        state(), runtime, "call_begin_cancel", SearchToolInput(query="query one", max_results=5)
+        state(), runtime, "call_begin_cancel", SearchToolInput(query="query one", channel="web", max_results=5)
     ))
     await ledger.entered.wait()
     task.cancel()

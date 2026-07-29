@@ -144,7 +144,7 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await page.getByLabel("任务输入").fill("请运行代码实现一个任务面板页面，并整理方案文档");
   await page.getByRole("button", { name: "发送", exact: true }).click();
 
-  const thinking = page.getByRole("button", { name: /思考结果/u });
+  const thinking = page.getByRole("button", { name: /思考结束/u });
   await expect(thinking).toBeVisible();
   await expect(thinking).toHaveAttribute("aria-expanded", "false");
   await thinking.click();
@@ -201,7 +201,7 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await expect(workspace).toBeVisible();
 
   await page.reload();
-  const restoredThinking = page.getByRole("button", { name: /思考结果/u });
+  const restoredThinking = page.getByRole("button", { name: /思考结束/u });
   await expect(restoredThinking).toBeVisible();
   await expect(restoredThinking).toHaveAttribute("aria-expanded", "false");
   await restoredThinking.click();

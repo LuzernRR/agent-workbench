@@ -1,5 +1,84 @@
 # 项目交接
 
+## 当前结论（2026-07-29，Issue #8 已获用户验收）
+
+- 用户已于 2026-07-29 明确回复“验收通过”，验收 Issue
+  [#8](https://github.com/LuzernRR/agent-workbench/issues/8)“多渠道搜索 Agent、
+  X/小红书与智能活动展示”。允许按 AGENTS.md 完成一次受控
+  stage、commit、push 与 Issue close；下一功能必须重新建立唯一 Issue 和
+  `Execution Gate: allowed`，不得与 Issue #8 混入同一提交。
+- 正式本机入口为
+  [http://localhost:3100/workbench](http://localhost:3100/workbench)。
+  PostgreSQL、Milvus、etcd、MinIO、Search Agent、Web、xiaohongshu-mcp
+  均 healthy。Search Agent 仅绑定 `127.0.0.1:18100`，小红书 MCP 不发布
+  宿主机端口。
+- LangGraph 当前图为
+  `Supervisor → Planner → Researcher(tool/observe) → Reflector →
+  replan|Writer → Verifier → research_more|rewrite|finalize`。Planner、
+  Reflector、Verifier 使用结构化 `{query, channel}`，根据每次真实
+  `channel/resultCount/evidenceCount/errorCode/limitation` 自适应补搜，不使用
+  固定活动模板。Prompt 版本为
+  `2026-07-29.v7-adaptive-feedback-loop`。
+- 三个只读渠道已接入统一 Registry：
+  - Web：Tavily/DuckDuckGo 发现、SSRF/DNS/robots 检查和正文读取。
+  - X：公开索引发现真实 status URL；robots 拒绝时不虚报 Evidence。
+  - 小红书：用户授权登录态的内部 `xiaohongshu-mcp`，不可用时降级公开索引。
+- 小红书会话已登录并保存在私有 volume
+  `001-agent-live-xiaohongshu-session-v2`。适配器只允许状态、二维码、搜索、
+  详情、主页；发布、评论、回复、点赞、收藏、删除 Cookie 均在网络前拒绝。
+  Cookie、二维码、`xsec_token` 不进入公开事件、日志、模型消息或来源 URL。
+- 仓内 `services/xiaohongshu-mcp/` 固定上游提交
+  `a5bb5b872b1670e8ce557c1942c149f74dfd8246`。搜索页补丁等待非空 feeds，
+  不再把异步空数组误报为零结果；完整浏览器检索会话在 Search Agent 内串行，
+  防止多个 run 争用。工具硬超时会预留 60 秒给反思、写作、核验，以
+  `RUN_TIME_RESERVE / partial` 收口而不是拖成 `RUN_TIMEOUT`。
+- MCP 部署版自身只注册五个 `readOnlyHint` 工具和对应读取路由；全部写路由
+  返回 404。HTTP panic 统一返回无原始错误正文的稳定 500；MCP 工具 panic
+  只记录错误类型并返回固定文字，不记录原始值或堆栈。导航日志不记录
+  `xsec_token` 或带签名 URL，使 Search Agent 能安全地对瞬时 5xx 做受限重试。
+  当前容器运行版本为 `v2.2.6-agent-workbench.3`。
+- 前端按持久事件时间顺序执行相邻同类归并。当前活动自动展开并显示
+  “思考中 / 搜索中 / 核验中”；结束后折叠为“思考结束 / 核验结束”，搜索行
+  保留真实累计“找到 N 条结果，读取 M 个来源”。类型一旦交替就在下方新开行；
+  展开详情只显示 LLM 基于真实候选 URL 生成的逐行来源说明。
+- 真实小红书烟测搜索 `LangGraph` 得到 5 条候选、读取 3 条正文。3100
+  Playwright 运行 `run_8451e6fc42d04674ad7c3d24ae3bf0f7` 执行三次
+  小红书检索，累计发现 11 条候选、读取 6 次正文，最终诚实以
+  `MAX_ITERATIONS / partial` 收口。用户再次确认登录后，3100 运行
+  `run_1d33f93254cb41048d4d23f31efb749a` 完整成功：4 个真实
+  `xiaohongshu-mcp` 工具调用各发现 5 条候选、读取 3 条正文；前端按交替时序
+  显示两段独立搜索，分别累计为“找到 10 条结果，读取 5 个来源”和
+  “找到 10 条结果，读取 6 个来源”，最终提供 11 个可核验引用。前两段搜索
+  各遇到一次平台连接 500，均由适配器受限重试后成功；MCP 日志中的
+  `xsec_token=` 命中数为 0。X 运行
+  `run_768aa1e23bd147599b2ad56fbb320f0e` 发现 18 条候选并读取 1 个来源。
+- 最终门禁：Search Agent `128 passed`，Ruff/compileall 通过；Web
+  `325 passed, 1 skipped`，typecheck、ESLint、生产 build 通过；3110
+  Playwright `16 passed, 2 skipped`；3100 两项 live 场景分别通过。Go 镜像
+  构建中的 `go test ./...` 全部通过。
+- 证据截图：
+  `docs/development/evidence/2026-07-29-issue-8-{desktop,mobile}.png`。
+  中文记录：
+  `docs/development/2026-07-29-007-multichannel-search-agent.md`。
+- `luzern.cc.cd` 在 2026-07-29 实时解析到 Cloudflare 地址，但 HTTPS 返回
+  `502`；本机虽然有 `cloudflared`，没有可验证的 Tunnel 配置目录或域名控制
+  凭据。`127.0.0.1:8080` 还被仓库外容器 `kanna-workbench-backend-1` 占用，
+  不得擅自停止。当前可交付事实是安全的本机 `3100/18100(loopback)` 部署，
+  不能宣称公网域名已上线。若用户仍要求公网映射，必须提供已有 Tunnel/服务器
+  入口或明确授权新的公网接入方式，且只暴露 HTTPS Web，不公开 Search Agent、
+  数据库、Milvus 或 MCP。
+- Milvus 只加入 `internal: true` 的 `agent-milvus` 网络，不发布宿主机端口；
+  运维健康检查通过 Compose `exec` 在容器内执行。D 盘数据目录仍为
+  `D:\001-agent\milvus`，Search Agent 通过私网 URI 访问。
+
+### Issue #8 收口边界
+
+1. 先运行 `git status --short` 与 `git diff --check`，保留
+   `config/*.local.*`、小红书 session volume 和所有用户改动。
+2. Issue #8 只执行一次受控 stage、commit、push 与 Issue close；提交必须包含
+   规定的 Codex 联合署名。
+3. 新功能必须在 Issue #8 收口后另建唯一 Issue 和执行门，不得回填旧提交。
+
 ## 当前结论（2026-07-28，Issue #7 已验收）
 
 - 用户已于 2026-07-28 明确回复“通过”，验收 Issue [#7](https://github.com/LuzernRR/agent-workbench/issues/7)“真实 LangGraph 多 Agent 搜索闭环与 3100 live 展示”。本节所述目录迁移、前端交互、LangGraph 搜索闭环、Milvus、部署与文档随本次验收统一收口；下一功能必须重新建立唯一 Issue 与 Execution Gate。

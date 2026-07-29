@@ -153,6 +153,26 @@ describe("reduceAgentEvent", () => {
     expect(state.items["tool:search-safe"]).toMatchObject({ sources: [{ title: "安全来源", url: "https://example.com/source", verified: true }] });
   });
 
+  it("只按 URL 把 Agent 逐行说明更新到对应真实来源", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "tool.started", { toolCallId: "search-presented", name: "X 搜索", summary: "搜索中", channel: "x" }),
+      event(2, "tool.completed", { toolCallId: "search-presented", sources: [
+        { title: "原始标题", url: "https://x.com/example/status/1", verified: false, channel: "x", author: "example" }
+      ] }),
+      event(3, "tool.updated", { toolCallId: "search-presented", sourcePresentations: [
+        { url: "https://x.com/example/status/1", text: "这条公开帖子讨论了状态图的工具循环。" },
+        { url: "https://invented.example/item", text: "不能写入" }
+      ] })
+    ]);
+    expect(state.items["tool:search-presented"]).toMatchObject({
+      channel: "x",
+      sources: [{
+        url: "https://x.com/example/status/1",
+        displayText: "这条公开帖子讨论了状态图的工具循环。"
+      }]
+    });
+  });
+
   it("编辑用户消息时立即截断目标运行和全部下游内容", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "run.created", {}),

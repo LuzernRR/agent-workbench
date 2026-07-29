@@ -38,12 +38,48 @@ class GraphConfig(BaseModel):
     max_pages_per_call: int = Field(alias="maxPagesPerCall", ge=1, le=5)
 
 
+class WebChannelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class XChannelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    provider: Literal["fxembed"]
+    origin: HttpUrl
+    request_timeout_ms: int = Field(alias="requestTimeoutMs", ge=3_000, le=60_000)
+    max_profile_posts: int = Field(alias="maxProfilePosts", ge=1, le=20)
+
+
+class XiaohongshuChannelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    provider: Literal["mcp_preferred"]
+    reader_origin: HttpUrl = Field(alias="readerOrigin")
+    request_timeout_ms: int = Field(alias="requestTimeoutMs", ge=3_000, le=90_000)
+    max_attempts: int = Field(default=2, alias="maxAttempts", ge=1, le=3)
+    read_public_details: bool = Field(alias="readPublicDetails")
+
+
+class SearchChannelsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    web: WebChannelConfig
+    x: XChannelConfig
+    xiaohongshu: XiaohongshuChannelConfig
+
+
 class SearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     force_search: bool = Field(alias="forceSearch")
     default_provider: Literal["tavily", "duckduckgo"] = Field(alias="defaultProvider")
     allow_duckduckgo_fallback: bool = Field(alias="allowDuckDuckGoFallback")
+    channels: SearchChannelsConfig
 
 
 class MilvusConfig(BaseModel):

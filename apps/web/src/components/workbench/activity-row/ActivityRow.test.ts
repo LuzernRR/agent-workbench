@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 import { ActivityRow, isPlaceholderTool, SearchActivitySummary, summarizeSearchActivity } from "./ActivityRow";
@@ -74,6 +74,60 @@ describe("isPlaceholderTool", () => {
 });
 
 describe("SearchActivitySummary", () => {
+  it("搜索进行中自动展开，完成后折叠并保留真实累计计数与手动展开", () => {
+    const running = {
+      kind: "tool" as const,
+      id: "tool:search-live",
+      runId: "run-one",
+      toolCallId: "search-live",
+      name: "网页搜索",
+      summary: "找到 2 条结果",
+      status: "running" as const,
+      resultCount: 2,
+      evidenceCount: 1,
+      sources: [{ title: "进行中的来源", url: "https://example.com/live", verified: true }],
+      createdAt: "2026-07-28T00:00:00.000Z"
+    };
+    const view = render(createElement(SearchActivitySummary, { items: [running] }));
+
+    expect(screen.getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container).toHaveTextContent("搜索中");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("进行中的来源");
+
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [{ ...running, status: "completed" as const }]
+    }));
+    expect(screen.getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(view.container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(view.container.querySelector("[data-search-activity-details]")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开搜索详情" }));
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("进行中的来源");
+
+    const nextRunning = {
+      ...running,
+      id: "tool:search-next",
+      toolCallId: "search-next",
+      resultCount: 3,
+      sources: [{ title: "下一轮来源", url: "https://example.com/next", verified: true }]
+    };
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [{ ...running, status: "completed" as const }, nextRunning]
+    }));
+    expect(screen.getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container).toHaveTextContent("搜索中");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("下一轮来源");
+
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [
+        { ...running, status: "completed" as const },
+        { ...nextRunning, status: "completed" as const }
+      ]
+    }));
+    expect(screen.getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(view.container).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+  });
+
   it("把多次真实搜索合并成一条纯文字，并按 URL 去重来源", () => {
     const items = [
       {
@@ -87,7 +141,7 @@ describe("SearchActivitySummary", () => {
         resultCount: 5,
         evidenceCount: 1,
         sources: [
-          { title: "来源一", url: "https://example.com/one", verified: true },
+          { title: "来源一", url: "https://example.com/one", verified: true, channel: "x" as const, author: "OpenAI", displayText: "这条帖子介绍了状态图的公开实践。" },
           { title: "来源二", url: "https://example.com/two", verified: false }
         ],
         createdAt: "2026-07-28T00:00:00.000Z"
@@ -121,10 +175,12 @@ describe("SearchActivitySummary", () => {
     expect(toggle).not.toBeNull();
     fireEvent.click(toggle!);
     const detailPanel = container.querySelector("[data-search-activity-details]");
-    expect(detailPanel).toHaveTextContent("来源一");
+    expect(detailPanel).toHaveTextContent("来源二");
+    expect(detailPanel).toHaveTextContent("X · @OpenAI：这条帖子介绍了状态图的公开实践。");
     expect(detailPanel).toHaveTextContent("来源二");
     expect(detailPanel).toHaveTextContent("来源三");
-    expect(detailPanel).not.toHaveTextContent(/状态|搜索服务|执行耗时|检索查询|检索计划|核验结论/u);
+    expect(detailPanel).not.toHaveTextContent(/搜索服务|执行耗时|检索查询|检索计划|核验结论/u);
+    expect(within(detailPanel as HTMLElement).queryByText("状态")).not.toBeInTheDocument();
     expect(detailPanel?.querySelectorAll("p")).toHaveLength(3);
     expect(detailPanel?.querySelectorAll("a")).toHaveLength(3);
     expect(container.querySelector("table")).toBeNull();
@@ -170,5 +226,33 @@ describe("SearchActivitySummary", () => {
     expect(view.container).toHaveTextContent("找到 10 条结果，读取 3 个来源");
     view.rerender(createElement(SearchActivitySummary, { items: [first, second, third] }));
     expect(view.container).toHaveTextContent("找到 15 条结果，读取 4 个来源");
+  });
+});
+
+describe("ActivityRow activity disclosure", () => {
+  it("普通工具进行中自动展开，完成后折叠且允许手动查看", () => {
+    const running = {
+      kind: "tool" as const,
+      id: "tool:context",
+      runId: "run-one",
+      toolCallId: "context",
+      name: "上下文读取",
+      summary: "读取项目文档",
+      status: "running" as const,
+      createdAt: "2026-07-28T00:00:00.000Z"
+    };
+    const view = render(createElement(ActivityRow, { item: running }));
+
+    expect(screen.getByRole("button", { name: "收起工具调用：上下文读取" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container).toHaveTextContent("执行耗时");
+
+    view.rerender(createElement(ActivityRow, {
+      item: { ...running, status: "completed" as const }
+    }));
+    expect(screen.getByRole("button", { name: "展开工具调用：上下文读取" })).toHaveAttribute("aria-expanded", "false");
+    expect(view.container).not.toHaveTextContent("执行耗时");
+
+    fireEvent.click(screen.getByRole("button", { name: "展开工具调用：上下文读取" }));
+    expect(within(view.container).getAllByText("已完成")).toHaveLength(2);
   });
 });

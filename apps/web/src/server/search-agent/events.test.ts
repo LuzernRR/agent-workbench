@@ -10,6 +10,28 @@ const sourceEnvelope = {
   seq: 1,
   createdAt: "2026-07-28T00:00:00Z"
 };
+const provenance = {
+  discovery_provider: "tavily",
+  detail_provider: null,
+  source_kind: "public_index",
+  observed_at: "2026-07-28T00:00:00Z",
+  confidence: "low"
+};
+const webResult = (overrides: Record<string, unknown> = {}) => ({
+  channel: "web",
+  provider: "tavily",
+  query: "LangGraph 最新文档",
+  title: "官方",
+  url: "https://example.com/",
+  snippet: "摘要",
+  verified: false,
+  author: null,
+  published_at: null,
+  metrics: {},
+  limitation: "仅发现候选",
+  provenance,
+  ...overrides
+});
 
 function stream(chunks: string[]) {
   return new ReadableStream<Uint8Array>({
@@ -54,11 +76,12 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       toolCallId: "call_one",
       toolName: "web_search",
       query: "LangGraph 最新文档",
+      channel: "web",
       provider: "tavily",
       summary: "找到 1 条结果",
       resultCount: 1,
       evidenceCount: 1,
-      results: [{ title: "官方", url: "https://example.com/", snippet: "摘要", verified: true, reasoning_content: "secret" }],
+      results: [webResult({ verified: true, reasoning_content: "secret" })],
       cached: false
     };
     expect(() => parseSearchAgentEvent(completed)).toThrow(/禁止字段/u);
@@ -116,7 +139,58 @@ describe("Search Agent 严格 NDJSON 边界", () => {
   it("允许上限内 60 条安全引用和固定 unknown_tool 防御事件", () => {
     const citations = Array.from({ length: 60 }, (_, index) => ({ label: `来源 ${index + 1}`, url: `https://example.com/${index + 1}` }));
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.completed", answerMarkdown: "回答", promptVersion: "2026-07-28.v2", responseStatus: "completed", citations, verificationPassed: true, stopReason: "VERIFIED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 1, toolCalls: 1, evidenceCount: 60 }).type).toBe("run.completed");
-    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }).type).toBe("tool.failed");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }).type).toBe("tool.failed");
+  });
+
+  it("接受由 Reflector 生成且只绑定真实 URL 的逐行来源说明", () => {
+    const event = parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "tool.presented",
+      toolCallId: "call_one",
+      sources: [{ url: "https://example.com/source", text: "该来源说明了 LangGraph 的状态图用法。" }]
+    });
+    expect(event.type).toBe("tool.presented");
+    expect(() => parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "tool.presented",
+      toolCallId: "call_one",
+      sources: [{ url: "javascript:alert(1)", text: "危险来源" }]
+    })).toThrow();
+  });
+
+  it("接受隔离登录态读取的来源类型，但公开事件仍不允许凭据字段", () => {
+    const completed = {
+      ...sourceEnvelope,
+      type: "tool.completed",
+      toolCallId: "call_xhs",
+      toolName: "web_search",
+      query: "小红书 LangGraph",
+      channel: "xiaohongshu",
+      provider: "xiaohongshu-mcp",
+      summary: "找到 1 条结果，读取 1 个来源",
+      resultCount: 1,
+      evidenceCount: 1,
+      results: [webResult({
+        channel: "xiaohongshu",
+        provider: "xiaohongshu-mcp",
+        query: "小红书 LangGraph",
+        url: "https://www.xiaohongshu.com/explore/feed_123",
+        verified: true,
+        provenance: {
+          discovery_provider: "xiaohongshu-mcp",
+          detail_provider: "xiaohongshu-mcp",
+          source_kind: "authenticated_page",
+          observed_at: "2026-07-28T00:00:00Z",
+          confidence: "high"
+        }
+      })],
+      cached: false
+    };
+    expect(parseSearchAgentEvent(completed).type).toBe("tool.completed");
+    expect(() => parseSearchAgentEvent({
+      ...completed,
+      results: [{ ...completed.results[0], cookie: "secret" }]
+    })).toThrow(/禁止字段/u);
   });
 
   it("按 Unicode 码点校验搜索摘要长度，不把 emoji 误算为两个字符", () => {
@@ -129,11 +203,12 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       toolCallId: "call_unicode",
       toolName: "web_search",
       query: "LangGraph 条件边",
+      channel: "web",
       provider: "tavily",
       summary: "找到 1 条结果",
       resultCount: 1,
       evidenceCount: 0,
-      results: [{ title: "官方文档", url: "https://docs.langchain.com/oss/python/langgraph/graph-api", snippet, verified: false }],
+      results: [webResult({ title: "官方文档", url: "https://docs.langchain.com/oss/python/langgraph/graph-api", query: "LangGraph 条件边", snippet })],
       cached: false
     };
     expect(parseSearchAgentEvent(completed).type).toBe("tool.completed");
@@ -169,11 +244,12 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       toolCallId: "call_unicode_url",
       toolName: "web_search",
       query: "Unicode URL",
+      channel: "web",
       provider: "tavily",
       summary: "找到 1 条结果",
       resultCount: 1,
       evidenceCount: 0,
-      results: [{ title: "来源", url, snippet: "摘要", verified: false }],
+      results: [webResult({ title: "来源", url, query: "Unicode URL" })],
       cached: false
     }).type).toBe("tool.completed");
   });

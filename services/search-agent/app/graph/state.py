@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal, TypedDict
 
 from app.prompts.agents import PROMPT_VERSION
+from app.tools.channels.base import ChannelName
 
 # 节点角色，与 llm.deepseek.ModelRole 对应。
 NodeName = Literal[
@@ -45,21 +46,37 @@ class ThinkStep(TypedDict):
 class Candidate(TypedDict):
     """搜索发现的候选，未经原文核实。"""
 
+    channel: ChannelName
+    tool_call_id: str
+    iteration: int
+    provider: str
     url: str
     title: str
     snippet: str
     query: str
+    author: str | None
+    published_at: str | None
+    metrics: dict[str, int | float | str]
+    limitation: str | None
 
 
 class Evidence(TypedDict):
     """已读取原文的证据片段。"""
 
+    channel: ChannelName
+    tool_call_id: str
+    iteration: int
+    provider: str
     url: str
     title: str
     text: str  # 已截断的正文
     extractor: str
     query: str
     captured_at: str
+    author: str | None
+    published_at: str | None
+    metrics: dict[str, int | float | str]
+    limitation: str | None
 
 
 class SearchTrace(TypedDict):
@@ -68,11 +85,20 @@ class SearchTrace(TypedDict):
     tool_call_id: str
     idempotency_key: str
     query: str
+    channel: ChannelName
     provider: str
     status: Literal["completed", "failed", "unknown", "cached"]
     result_count: int
     evidence_count: int
     error_code: str | None
+    limitation: str | None
+
+
+class SearchRequest(TypedDict):
+    """Planner、Reflector 与 Verifier 共享的结构化检索请求。"""
+
+    query: str
+    channel: ChannelName
 
 
 class Citation(TypedDict):
@@ -106,8 +132,11 @@ class SearchState(TypedDict, total=False):
     # 各节点产出
     intent: dict  # 意图分类结果
     need_search: bool
-    queries: list[str]  # 计划生成的查询
-    pending_queries: list[str]  # 当前轮待执行查询；Researcher 完成后清空
+    searches: list[SearchRequest]  # 已接受的查询+渠道历史；去重以二者组合为准
+    pending_searches: list[SearchRequest]  # 当前轮待执行的结构化查询；完成后清空
+    queries: list[str]  # 兼容审计视图；同一查询可因渠道不同重复出现
+    query_channels: dict[str, ChannelName]  # 兼容旧 checkpoint；新流程使用 searches
+    pending_queries: list[str]  # 兼容旧 checkpoint；新流程使用 pending_searches
     candidates: list[Candidate]  # 搜索候选
     evidence: list[Evidence]  # 已读证据
     tool_traces: list[SearchTrace]
@@ -121,6 +150,7 @@ class SearchState(TypedDict, total=False):
     sufficient: bool  # 证据是否充分
     stop_reason: str | None
     no_progress_count: int
+    replan_required: bool
     verification_passed: bool
     verification_action: str
     verification_issue: str
@@ -194,7 +224,10 @@ def initial_state(
         stop_reason=None,
         candidates=[],
         evidence=[],
+        searches=[],
+        pending_searches=[],
         queries=[],
+        query_channels={},
         pending_queries=[],
         tool_traces=[],
         citations=[],
@@ -208,6 +241,7 @@ def initial_state(
         max_cost_usd=min(max_cost_usd, 5.0),
         no_progress_limit=min(max(no_progress_limit, 1), 3),
         no_progress_count=0,
+        replan_required=False,
         verification_passed=False,
         verification_action="",
         verification_issue="",

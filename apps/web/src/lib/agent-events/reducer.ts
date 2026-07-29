@@ -74,12 +74,41 @@ function sourcesValue(value: unknown): ToolSource[] | undefined {
     try {
       const url = new URL(candidate.url);
       if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return [];
-      return [{ title: candidate.title.trim().slice(0, 300) || "搜索来源", url: url.href, verified: candidate.verified }];
+      const channel = ["web", "x", "xiaohongshu"].includes(candidate.channel || "")
+        ? candidate.channel
+        : undefined;
+      return [{
+        title: candidate.title.trim().slice(0, 300) || "搜索来源",
+        url: url.href,
+        verified: candidate.verified,
+        channel,
+        author: typeof candidate.author === "string" && candidate.author.trim() ? candidate.author.trim().slice(0, 160) : undefined,
+        publishedAt: typeof candidate.publishedAt === "string" && candidate.publishedAt.trim() ? candidate.publishedAt.trim().slice(0, 80) : undefined,
+        limitation: typeof candidate.limitation === "string" && candidate.limitation.trim() ? candidate.limitation.trim().slice(0, 500) : undefined
+      }];
     } catch {
       return [];
     }
   });
   return sources.length ? sources : undefined;
+}
+
+function sourcePresentationsValue(value: unknown): Array<{ url: string; text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as { url?: unknown; text?: unknown };
+    if (typeof candidate.url !== "string" || typeof candidate.text !== "string") return [];
+    const text = candidate.text.trim().slice(0, 180);
+    if (!text) return [];
+    try {
+      const url = new URL(candidate.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return [];
+      return [{ url: url.href, text }];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function planValue(value: unknown): PlanStep[] | null {
@@ -266,6 +295,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         name: stringValue(payload.name, "工具"),
         summary: stringValue(payload.summary, "正在准备"),
         status: "running",
+        channel: ["web", "x", "xiaohongshu"].includes(stringValue(payload.channel)) ? stringValue(payload.channel) as ToolItem["channel"] : undefined,
         query: stringValue(payload.query) || undefined,
         cached: payload.cached === true,
         input: payload.input,
@@ -299,6 +329,15 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         && Number.isFinite(finishedAt)
         ? Math.max(0, finishedAt - startedAt)
         : undefined;
+      const sourcePresentations = new Map(
+        sourcePresentationsValue(payload.sourcePresentations).map((item) => [item.url, item.text])
+      );
+      const nextSources = sourcePresentations.size && current.sources
+        ? current.sources.map((source) => ({
+            ...source,
+            displayText: sourcePresentations.get(source.url) || source.displayText
+          }))
+        : sourcesValue(payload.sources) || current.sources;
       return {
         ...next,
         items: {
@@ -307,11 +346,12 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
             ...current,
             status: status as ToolItem["status"],
             summary: stringValue(payload.summary, current.summary),
+            channel: ["web", "x", "xiaohongshu"].includes(stringValue(payload.channel)) ? stringValue(payload.channel) as ToolItem["channel"] : current.channel,
             query: stringValue(payload.query, current.query) || undefined,
             provider: stringValue(payload.provider, current.provider) || undefined,
             resultCount: typeof payload.resultCount === "number" ? numberValue(payload.resultCount) : current.resultCount,
             evidenceCount: typeof payload.evidenceCount === "number" ? numberValue(payload.evidenceCount) : current.evidenceCount,
-            sources: sourcesValue(payload.sources) || current.sources,
+            sources: nextSources,
             cached: typeof payload.cached === "boolean" ? payload.cached : current.cached,
             retryable: typeof payload.retryable === "boolean" ? payload.retryable : current.retryable,
             progress,

@@ -29,15 +29,26 @@ export function summarizeSearchActivity(items: readonly ToolItem[]) {
   const evidenceCount = verifiedUrls || items.reduce((total, item) => total + (item.evidenceCount || 0), 0);
   const active = items.some((item) => ["preparing", "running", "waiting"].includes(item.status));
 
+  if (active) return "搜索中";
   if (resultCount || evidenceCount) return `找到 ${resultCount} 条结果，读取 ${evidenceCount} 个来源`;
-  if (active) return "正在搜索";
   if (items.some((item) => item.status === "failed" || item.status === "unknown")) return "搜索未完成";
   return "未找到相关结果，读取 0 个来源";
 }
 
+function sourceLine(source: NonNullable<ToolItem["sources"]>[number], fallback: string) {
+  const platform = source.channel === "x" ? "X" : source.channel === "xiaohongshu" ? "小红书" : source.channel === "web" ? "网页" : "";
+  const author = source.author ? source.author.replace(/^@/u, "").trim() : "";
+  const identity = author ? `${platform ? `${platform} · ` : ""}@${author}` : platform;
+  const title = source.displayText || safeLinkLabel(source.title, fallback);
+  return identity && !title.includes(`@${author}`) ? `${identity}：${title}` : platform ? `${platform} · ${title}` : title;
+}
+
 export function SearchActivitySummary({ items }: { items: readonly ToolItem[] }) {
-  const [open, setOpen] = useState(false);
+  const active = items.some((item) => ["preparing", "running", "waiting"].includes(item.status));
+  const settledKey = active ? null : items.map((item) => `${item.toolCallId}:${item.status}`).join("|");
+  const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
   if (!items.length) return null;
+  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
   const sources = new Map<string, NonNullable<ToolItem["sources"]>[number]>();
   for (const item of items) {
     for (const source of item.sources || []) {
@@ -57,21 +68,27 @@ export function SearchActivitySummary({ items }: { items: readonly ToolItem[] })
     <button
       type="button"
       className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left text-tertiary hover:text-secondary"
-      aria-expanded={open}
-      aria-label={`${open ? "收起" : "展开"}搜索详情`}
-      onClick={() => setOpen((current) => !current)}
+      aria-expanded={expanded}
+      aria-label={`${expanded ? "收起" : "展开"}搜索详情`}
+      onClick={() => {
+        if (settledKey === null) return;
+        setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
+      }}
     >
-      <ChevronRight className={cn("size-4 shrink-0 transition-transform duration-150", open && "rotate-90")} />
+      <ChevronRight className={cn("size-4 shrink-0 transition-transform duration-150", expanded && "rotate-90")} />
       <span>{summarizeSearchActivity(items)}</span>
     </button>
-    {open ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
-      {[...sources.entries()].map(([href, source], index) => <p key={href} className="break-words"><a href={href} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{safeLinkLabel(source.title, `来源 ${index + 1}`)}</a></p>)}
+    {expanded && sources.size ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
+      {[...sources.entries()].map(([href, source], index) => <p key={href} className="break-words"><a href={href} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a></p>)}
     </div> : null}
   </div>;
 }
 
 export function ActivityRow({ item }: { item: ToolItem }) {
-  const [open, setOpen] = useState(false);
+  const active = ["preparing", "running", "waiting"].includes(item.status);
+  const settledKey = active ? null : `${item.toolCallId}:${item.status}`;
+  const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
+  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
   const duration = typeof item.durationMs === "number"
     ? `${(item.durationMs / 1000).toFixed(item.durationMs >= 10000 ? 0 : 1)} 秒`
     : "";
@@ -83,13 +100,16 @@ export function ActivityRow({ item }: { item: ToolItem }) {
     : genericSummary ? item.name : item.summary || item.name;
   return (
     <div className="conversation-lane my-2" data-tool-call-id={item.toolCallId}>
-      <button type="button" className="group flex min-h-9 w-full min-w-0 items-start gap-2 rounded-lg px-0.5 py-1 text-left text-tertiary transition-colors duration-150 hover:text-secondary" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={`${open ? "收起" : "展开"}工具调用：${item.name}`} title={summary}>
+      <button type="button" className="group flex min-h-9 w-full min-w-0 items-start gap-2 rounded-lg px-0.5 py-1 text-left text-tertiary transition-colors duration-150 hover:text-secondary" onClick={() => {
+        if (settledKey === null) return;
+        setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
+      }} aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}工具调用：${item.name}`} title={summary}>
         <SquareTerminal className="mt-1 size-[18px] shrink-0 stroke-[1.5]" />
         <span className="min-w-0 flex-1 whitespace-normal break-words text-[15px] leading-6">{summary}</span>
         <span className="mt-0.5 shrink-0 text-[15px] tabular-nums text-tertiary">{duration || status}</span>
-        <ChevronRight className={cn("mt-1 size-4 shrink-0 transition-transform duration-150", open && "rotate-90")} />
+        <ChevronRight className={cn("mt-1 size-4 shrink-0 transition-transform duration-150", expanded && "rotate-90")} />
       </button>
-      {open ? (
+      {expanded ? (
         <div className="ml-2 mt-1 grid gap-x-8 gap-y-2 border-l border-line py-1.5 pl-5 text-[15px] leading-6 text-secondary md:grid-cols-2">
           <Detail label="状态">{status}</Detail>
           {item.query ? <Detail label="搜索查询">{item.query}</Detail> : null}

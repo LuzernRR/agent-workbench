@@ -26,6 +26,10 @@ function activityId(kind: "thinking" | "verification", runId: string, nodeRunId:
   return `${kind}:${runId}:${nodeRunId}`;
 }
 
+function channelName(channel: "web" | "x" | "xiaohongshu") {
+  return channel === "x" ? "X 搜索" : channel === "xiaohongshu" ? "小红书搜索" : "网页搜索";
+}
+
 function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): SearchAgentProjection {
   if (event.type === "node.started") {
     // 节点开始时还没有可公开的模型摘要。若此时先创建思考项，工具事件会
@@ -65,17 +69,34 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
   }
   if (event.type === "tool.started") {
     const unknown = event.toolName === "unknown_tool";
-    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, name: unknown ? "未知工具请求" : "网页搜索", summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, query: oneLine(event.query, 300), cached: event.cached } }] };
+    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
   }
   if (event.type === "tool.completed") {
-    const sources = event.results.map((result) => ({ title: oneLine(result.title, 300), url: safeUrl(result.url), verified: result.verified })).filter((result) => result.url);
-    return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached } }] };
+    const sources = event.results.map((result) => ({
+      title: oneLine(result.title, 300),
+      url: safeUrl(result.url),
+      verified: result.verified,
+      channel: result.channel,
+      author: result.author ? oneLine(result.author, 160) : undefined,
+      publishedAt: result.published_at || undefined,
+      limitation: result.limitation ? oneLine(result.limitation, 500) : undefined
+    })).filter((result) => result.url);
+    return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached } }] };
+  }
+  if (event.type === "tool.presented") {
+    const sourcePresentations = event.sources.map((source) => ({
+      url: safeUrl(source.url),
+      text: oneLine(source.text, 180)
+    })).filter((source) => source.url && source.text);
+    return sourcePresentations.length
+      ? { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, sourcePresentations } }] }
+      : { events: [] };
   }
   if (event.type === "tool.failed") {
-    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable } }] };
+    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable } }] };
   }
   if (event.type === "tool.unknown") {
-    return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", query: oneLine(event.query, 300), error: event.reasonCode } }] };
+    return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", channel: event.channel, query: oneLine(event.query, 300), error: event.reasonCode } }] };
   }
   if (event.type === "memory.status") {
     const summary = event.status === "available"

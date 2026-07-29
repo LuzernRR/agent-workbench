@@ -33,12 +33,38 @@ const base = {
 const node = z.enum(["load_context", "classify_intent", "plan_research", "research", "reflect", "compose", "verify", "finalize"]);
 const agent = z.enum(["supervisor", "planner", "researcher", "reflector", "writer", "verifier"]);
 const publicToolName = z.enum(["web_search", "unknown_tool"]);
+const searchChannel = z.enum(["web", "x", "xiaohongshu"]);
+
+const provenanceSchema = z.object({
+  discovery_provider: compactText(80),
+  detail_provider: compactText(80).nullable(),
+  source_kind: z.enum(["public_index", "public_api", "public_page", "authenticated_page"]),
+  observed_at: createdAt,
+  confidence: z.enum(["high", "medium", "low"])
+}).strict();
+
+const metricsSchema = z.record(
+  compactText(80),
+  z.union([z.number().finite(), compactText(200)])
+).refine((value) => Object.keys(value).length <= 20, "metrics 字段过多");
 
 const resultSchema = z.object({
+  channel: searchChannel,
+  provider: compactText(80),
+  query: compactText(300),
   title: compactText(300),
   url: httpUrl,
   snippet: unicodeText(500),
-  verified: z.boolean()
+  verified: z.boolean(),
+  author: compactText(160).nullable(),
+  published_at: compactText(80).nullable(),
+  metrics: metricsSchema,
+  limitation: compactText(500).nullable(),
+  provenance: provenanceSchema
+}).strict();
+const sourcePresentationSchema = z.object({
+  url: httpUrl,
+  text: compactText(180)
 }).strict();
 
 const usageSchema = z.object({
@@ -53,10 +79,11 @@ export const searchAgentEventSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("node.completed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), durationMs: z.number().nonnegative(), publicSummary: optionalSummary }).strict(),
   z.object({ ...base, type: z.literal("node.failed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), reasonCode }).strict(),
   z.object({ ...base, type: z.literal("plan.updated"), iteration: z.number().int().nonnegative(), queries: z.array(compactText(300)).min(1).max(4) }).strict(),
-  z.object({ ...base, type: z.literal("tool.started"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), cached: z.boolean() }).strict(),
-  z.object({ ...base, type: z.literal("tool.completed"), toolCallId: identifier, toolName: z.literal("web_search"), query: compactText(300), provider: compactText(80), summary: compactText(500), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), results: z.array(resultSchema).max(10), cached: z.boolean() }).strict(),
-  z.object({ ...base, type: z.literal("tool.failed"), toolCallId: identifier, toolName: publicToolName, query: unicodeText(300), provider: compactText(80), reasonCode, message: compactText(500), retryable: z.boolean() }).strict(),
-  z.object({ ...base, type: z.literal("tool.unknown"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), reasonCode }).strict(),
+  z.object({ ...base, type: z.literal("tool.started"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), channel: searchChannel, cached: z.boolean() }).strict(),
+  z.object({ ...base, type: z.literal("tool.completed"), toolCallId: identifier, toolName: z.literal("web_search"), query: compactText(300), channel: searchChannel, provider: compactText(80), summary: compactText(500), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), results: z.array(resultSchema).max(10), cached: z.boolean() }).strict(),
+  z.object({ ...base, type: z.literal("tool.presented"), toolCallId: identifier, sources: z.array(sourcePresentationSchema).min(1).max(10) }).strict(),
+  z.object({ ...base, type: z.literal("tool.failed"), toolCallId: identifier, toolName: publicToolName, query: unicodeText(300), channel: searchChannel, provider: compactText(80), reasonCode, message: compactText(500), retryable: z.boolean() }).strict(),
+  z.object({ ...base, type: z.literal("tool.unknown"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), channel: searchChannel, reasonCode }).strict(),
   z.object({ ...base, type: z.literal("memory.status"), status: z.enum(["available", "stored", "degraded"]), recalledCount: z.number().int().nonnegative().max(100).optional(), storedCount: z.number().int().nonnegative().max(100).optional(), embeddingVersion: compactText(120).optional(), reasonCode: reasonCode.optional() }).strict(),
   z.object({ ...base, type: z.literal("verification.completed"), nodeRunId: identifier, passed: z.boolean(), action: z.enum(["pass", "rewrite", "research_more"]), publicSummary: optionalSummary }).strict(),
   z.object({ ...base, type: z.literal("run.completed"), answerMarkdown: unicodeText(100_000, 1), promptVersion: compactText(120), responseStatus: z.enum(["completed", "partial"]), citations: z.array(z.object({ label: compactText(300), url: httpUrl }).strict()).max(60), verificationPassed: z.boolean(), stopReason: reasonCode, usage: usageSchema, modelCalls: z.number().int().nonnegative().max(100), toolCalls: z.number().int().nonnegative().max(100), evidenceCount: z.number().int().nonnegative().max(1_000) }).strict(),

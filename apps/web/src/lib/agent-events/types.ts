@@ -49,6 +49,11 @@ export type ToolSource = {
   title: string;
   url: string;
   verified: boolean;
+  channel?: "web" | "x" | "xiaohongshu";
+  author?: string;
+  publishedAt?: string;
+  limitation?: string;
+  displayText?: string;
 };
 
 export type MessageAttachment = {
@@ -101,6 +106,7 @@ export type ToolItem = {
   name: string;
   summary: string;
   status: ToolStatus;
+  channel?: "web" | "x" | "xiaohongshu";
   query?: string;
   provider?: string;
   resultCount?: number;

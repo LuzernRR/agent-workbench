@@ -88,7 +88,7 @@ describe("live Search Agent engine", () => {
     searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
       yield { ...sourceEnvelope, type: "node.started", node: "research", nodeRunId: "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "researcher", iteration: 0 };
       yield { ...sourceEnvelope, type: "tool.started", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", cached: false };
-      yield { ...sourceEnvelope, type: "tool.completed", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", provider: "tavily", summary: "找到 1 条结果", resultCount: 1, evidenceCount: 1, results: [{ title: "官方来源", url: "https://example.com/source", snippet: "不得持久化", verified: true }], cached: false };
+      yield { ...sourceEnvelope, type: "tool.completed", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", channel: "web", provider: "tavily", summary: "找到 1 条结果", resultCount: 1, evidenceCount: 1, results: [{ channel: "web", provider: "tavily", query: "最新 LangGraph", title: "官方来源", url: "https://example.com/source", snippet: "不得持久化", verified: true, author: null, published_at: null, metrics: {}, limitation: null, provenance: { discovery_provider: "tavily", detail_provider: "trafilatura", source_kind: "public_page", observed_at: "2026-07-28T00:00:00Z", confidence: "high" } }], cached: false };
       yield { ...sourceEnvelope, type: "node.completed", node: "research", nodeRunId: "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "researcher", iteration: 0, durationMs: 20, publicSummary: "已观察搜索结果并整理证据覆盖" };
       yield completedEvent;
     });

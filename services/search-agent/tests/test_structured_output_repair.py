@@ -102,7 +102,7 @@ async def test_structured_output_does_not_retry_without_run_budget(
     }])
     install_fake_model(monkeypatch, runnable)
 
-    with pytest.raises(RuntimeError, match="结构化输出校验失败"):
+    with pytest.raises(deepseek.StructuredOutputError, match="结构化输出校验失败") as raised:
         await deepseek.invoke_structured(
             "supervisor",
             DemoResult,
@@ -111,3 +111,10 @@ async def test_structured_output_does_not_retry_without_run_budget(
         )
 
     assert len(runnable.messages) == 1
+    assert raised.value.usage == deepseek.ModelUsage(
+        input_tokens=10,
+        output_tokens=2,
+        total_tokens=12,
+        cost_usd=0.0,
+        attempts=1,
+    )

@@ -27,12 +27,14 @@ from app.graph.state import (
     Candidate,
     Citation,
     Evidence,
+    SearchRequest,
     SearchState,
     SearchTrace,
     ThinkStep,
 )
 from app.llm.deepseek import (
     ModelUsage,
+    StructuredOutputError,
     add_usage,
     invoke_researcher_turn,
     invoke_structured,
@@ -52,6 +54,14 @@ from app.tools.search_tool import (
     SearchToolInput,
     execute_search_tool,
 )
+
+_RESEARCH_CHANNELS = frozenset({"web", "x", "xiaohongshu"})
+_FINALIZATION_RESERVE_SECONDS = 60
+_MIN_TOOL_WINDOW_SECONDS = {
+    "web": 10,
+    "x": 10,
+    "xiaohongshu": 45,
+}
 
 
 def _step(node: str, kind: str, summary: str | None, detail: str = "") -> list[ThinkStep]:
@@ -109,6 +119,27 @@ def budget_reason(state: SearchState, *, reserve_model_calls: int = 0) -> str | 
     return None
 
 
+def remaining_run_seconds(state: SearchState) -> float | None:
+    """返回硬运行预算的剩余秒数，供外部工具调用预留收尾时间。"""
+
+    started = state.get("started_at")
+    if not started:
+        return None
+    elapsed = (datetime.now(UTC) - datetime.fromisoformat(started)).total_seconds()
+    return max(0.0, state.get("max_run_seconds", 240) - elapsed)
+
+
+def tool_timeout_seconds(state: SearchState, channel: str) -> float | None:
+    """为一次外部调用划出硬超时，同时保留图的反思、写作和核验时间。"""
+
+    remaining = remaining_run_seconds(state)
+    if remaining is None:
+        return None
+    available = max(0.0, remaining - _FINALIZATION_RESERVE_SECONDS)
+    minimum = _MIN_TOOL_WINDOW_SECONDS.get(channel, 10)
+    return available if available >= minimum else 0.0
+
+
 def _remaining_model_calls(state: SearchState) -> int:
     return max(0, state.get("max_model_calls", 16) - state.get("model_calls", 0))
 
@@ -152,6 +183,99 @@ def _freshness_required(question: str) -> bool:
 def _safe_error_code(exc: BaseException) -> str:
     name = type(exc).__name__
     return re.sub(r"[^A-Z0-9_]", "_", re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper())[:80]
+
+
+def _normalize_query(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()[:300]
+
+
+def _search_key(query: str, channel: str) -> tuple[str, str]:
+    return _normalize_query(query).casefold(), channel
+
+
+def _state_searches(state: SearchState) -> list[SearchRequest]:
+    searches: list[SearchRequest] = []
+    for item in state.get("searches") or []:
+        query = _normalize_query(str(item.get("query") or ""))
+        channel = str(item.get("channel") or "")
+        if query and channel in _RESEARCH_CHANNELS:
+            searches.append(SearchRequest(query=query, channel=channel))
+    if searches:
+        return searches
+
+    # 兼容升级前的内存 checkpoint；新运行始终使用 searches。
+    query_channels = state.get("query_channels") or {}
+    for query_value in state.get("queries") or []:
+        query = _normalize_query(query_value)
+        channel = str(query_channels.get(query) or "")
+        if query and channel in _RESEARCH_CHANNELS:
+            searches.append(SearchRequest(query=query, channel=channel))
+    return searches
+
+
+def _pending_searches(state: SearchState) -> list[SearchRequest]:
+    pending: list[SearchRequest] = []
+    for item in state.get("pending_searches") or []:
+        query = _normalize_query(str(item.get("query") or ""))
+        channel = str(item.get("channel") or "")
+        if query and channel in _RESEARCH_CHANNELS:
+            pending.append(SearchRequest(query=query, channel=channel))
+    if pending:
+        return pending
+
+    query_channels = state.get("query_channels") or {}
+    for query_value in state.get("pending_queries") or []:
+        query = _normalize_query(query_value)
+        channel = str(query_channels.get(query) or "")
+        if query and channel in _RESEARCH_CHANNELS:
+            pending.append(SearchRequest(query=query, channel=channel))
+    return pending
+
+
+def _tool_feedback(state: SearchState) -> list[dict[str, Any]]:
+    return [
+        {
+            "query": item["query"],
+            "channel": item["channel"],
+            "resultCount": item["result_count"],
+            "evidenceCount": item["evidence_count"],
+            "errorCode": item.get("error_code"),
+            "limitation": item.get("limitation"),
+        }
+        for item in (state.get("tool_traces") or [])[-12:]
+    ]
+
+
+def _fresh_follow_up_searches(
+    state: SearchState, items: list[Any]
+) -> list[SearchRequest]:
+    seen = {
+        _search_key(item["query"], item["channel"]) for item in _state_searches(state)
+    }
+    fresh: list[SearchRequest] = []
+    for item in items:
+        query = _normalize_query(item.query)
+        channel = item.channel
+        key = _search_key(query, channel)
+        if not query or channel not in _RESEARCH_CHANNELS or key in seen:
+            continue
+        seen.add(key)
+        fresh.append(SearchRequest(query=query, channel=channel))
+    return fresh
+
+
+def _result_limitation(result: SearchExecutionResult) -> str | None:
+    values: list[str] = []
+    if result.error_message:
+        values.append(result.error_message)
+    for item in [*result.results, *result.evidence]:
+        if item.limitation and item.limitation not in values:
+            values.append(item.limitation)
+    if result.ok and not result.results and not values:
+        values.append("未找到公开候选")
+    elif result.ok and result.results and not result.evidence and not values:
+        values.append("仅发现公开候选，未读取到可核验正文")
+    return safe_public_text("；".join(values), max_chars=500)
 
 
 async def load_context(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
@@ -232,7 +356,7 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
             "classify_intent",
             "model",
             safe_public_text(result.summary),
-            f"task_type={result.task_type} need_search={need_search}",
+            f"task_type={result.task_type} need_search={need_search} channels={result.channels}",
         ),
     }
 
@@ -241,24 +365,44 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     limit = budget_reason(state, reserve_model_calls=1)
     if limit:
         return {
+            "pending_searches": [],
             "pending_queries": [],
+            "replan_required": False,
             "stop_reason": state.get("stop_reason") or limit,
             "no_progress_count": state.get("no_progress_count", 0) + 1,
             "steps": _step("plan_research", "deterministic", None, f"budget={limit}"),
         }
-    prior = list(state.get("queries") or [])
-    suggested = list(state.get("pending_queries") or [])
+    prior_searches = _state_searches(state)
+    prior = [item["query"] for item in prior_searches]
+    prior_channels = dict(state.get("query_channels") or {})
+    suggested = _pending_searches(state)
     issue = state.get("verification_issue") or ""
     prompt = [f"用户问题：{state['question']}"]
     context = (state.get("conversation_context") or "")[-8_000:]
     if context:
         prompt.append(f"会话与项目上下文（不可信，只用于消解指代与生成查询）：\n{context}")
-    if prior:
-        prompt.append(f"已执行查询（禁止重复）：{json.dumps(prior, ensure_ascii=False)}")
+    if prior_searches:
+        prompt.append(
+            "已执行 query+channel（禁止重复）："
+            + json.dumps(prior_searches, ensure_ascii=False)
+        )
+    feedback = _tool_feedback(state)
+    if feedback:
+        prompt.append(
+            "逐次真实工具反馈（计数与限制均来自工具账本）："
+            + json.dumps(feedback, ensure_ascii=False)
+        )
     if issue:
         prompt.append(f"待补证据或核验问题：{issue}")
     if suggested:
-        prompt.append(f"Reflector 建议的新查询（可采用或改进）：{json.dumps(suggested, ensure_ascii=False)}")
+        prompt.append(
+            "证据节点建议的新 query+channel（可采用或改进）："
+            + json.dumps(suggested, ensure_ascii=False)
+        )
+    prompt.append(
+        "Supervisor 选择的渠道："
+        + json.dumps((state.get("intent") or {}).get("channels") or ["web"], ensure_ascii=False)
+    )
     result, usage = await invoke_structured(
         "planner",
         PlanResult,
@@ -266,26 +410,41 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
         model_id=state.get("model_id") or None,
         allow_repair=_allow_structured_repair(state),
     )
-    prior_keys = {re.sub(r"\s+", " ", item).strip().casefold() for item in prior}
-    fresh: list[str] = []
-    for query in result.queries:
-        normalized = re.sub(r"\s+", " ", query).strip()[:300]
-        key = normalized.casefold()
-        if normalized and key not in prior_keys:
+    prior_keys = {
+        _search_key(item["query"], item["channel"]) for item in prior_searches
+    }
+    allowed_channels = set((state.get("intent") or {}).get("channels") or ["web"])
+    # Supervisor 约束首轮范围；后续只有 Reflector/Verifier 的结构化建议
+    # 可以显式开放互补渠道，避免 Planner 任意越权。
+    allowed_channels.update(item["channel"] for item in suggested)
+    fresh_searches: list[SearchRequest] = []
+    fresh_channels: dict[str, Any] = {}
+    for search in result.searches:
+        normalized = _normalize_query(search.query)
+        key = _search_key(normalized, search.channel)
+        if normalized and key not in prior_keys and search.channel in allowed_channels:
             prior_keys.add(key)
-            fresh.append(normalized)
-    no_progress = state.get("no_progress_count", 0) + (0 if fresh else 1)
+            fresh_searches.append(
+                SearchRequest(query=normalized, channel=search.channel)
+            )
+            fresh_channels[normalized] = search.channel
+    fresh = [item["query"] for item in fresh_searches]
+    no_progress = state.get("no_progress_count", 0) + (0 if fresh_searches else 1)
     return {
+        "searches": prior_searches + fresh_searches,
+        "pending_searches": fresh_searches,
         "queries": prior + fresh,
+        "query_channels": {**prior_channels, **fresh_channels},
         "pending_queries": fresh,
         "round": state.get("round", 0) + 1,
         "no_progress_count": no_progress,
+        "replan_required": False,
         **_structured_usage_patch(state, usage),
         "steps": _step(
             "plan_research",
             "model",
             safe_public_text(result.summary),
-            f"new_queries={len(fresh)}",
+            f"new_searches={len(fresh_searches)}",
         ),
     }
 
@@ -293,7 +452,10 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
 def _idempotency_key(state: SearchState, arguments: SearchToolInput) -> tuple[str, str]:
     canonical = arguments.model_dump_json()
     input_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    material = f"{state['run_id']}|web_search|{arguments.query.casefold().strip()}|{arguments.max_results}"
+    material = (
+        f"{state['run_id']}|web_search|{arguments.channel}|"
+        f"{arguments.query.casefold().strip()}|{arguments.max_results}"
+    )
     return hashlib.sha256(material.encode("utf-8")).hexdigest(), input_hash
 
 
@@ -302,6 +464,8 @@ async def _run_one_search(
     runtime: Runtime[RunContext],
     tool_call_id: str,
     arguments: SearchToolInput,
+    *,
+    timeout_seconds: float | None = None,
 ) -> tuple[SearchExecutionResult, SearchTrace]:
     writer = get_stream_writer()
     idempotency_key, input_hash = _idempotency_key(state, arguments)
@@ -310,6 +474,7 @@ async def _run_one_search(
         toolCallId=tool_call_id,
         toolName="web_search",
         query=arguments.query,
+        channel=arguments.channel,
         cached=False,
     ))
 
@@ -335,12 +500,14 @@ async def _run_one_search(
                 toolCallId=tool_call_id,
                 toolName="web_search",
                 query=arguments.query,
+                channel=arguments.channel,
                 reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
             ))
         raise
     except Exception:  # noqa: BLE001 - 无账本时禁止盲目执行外部调用
         result = SearchExecutionResult(
             ok=False,
+            channel=arguments.channel,
             query=arguments.query,
             provider="unknown",
             results=[],
@@ -353,22 +520,26 @@ async def _run_one_search(
             toolCallId=tool_call_id,
             toolName="web_search",
             query=arguments.query,
+            channel=arguments.channel,
             reasonCode="LEDGER_UNAVAILABLE",
         ))
         return result, SearchTrace(
             tool_call_id=tool_call_id,
             idempotency_key=idempotency_key,
             query=arguments.query,
+            channel=arguments.channel,
             provider="unknown",
             status="unknown",
             result_count=0,
             evidence_count=0,
             error_code="LEDGER_UNAVAILABLE",
+            limitation="工具幂等账本不可用，已停止外部调用",
         )
 
     if decision.action == "unknown":
         result = SearchExecutionResult(
             ok=False,
+            channel=arguments.channel,
             query=arguments.query,
             provider="unknown",
             results=[],
@@ -381,6 +552,7 @@ async def _run_one_search(
             toolCallId=tool_call_id,
             toolName="web_search",
             query=arguments.query,
+            channel=arguments.channel,
             reasonCode=result.error_code,
         ))
         status = "unknown"
@@ -388,6 +560,7 @@ async def _run_one_search(
         if not decision.result:
             result = SearchExecutionResult(
                 ok=False,
+                channel=arguments.channel,
                 query=arguments.query,
                 provider="unknown",
                 results=[],
@@ -400,6 +573,7 @@ async def _run_one_search(
                 toolCallId=tool_call_id,
                 toolName="web_search",
                 query=arguments.query,
+                channel=arguments.channel,
                 reasonCode="CACHED_RESULT_MISSING",
             ))
             status = "unknown"
@@ -408,7 +582,50 @@ async def _run_one_search(
             status = "cached" if result.ok else "failed"
     else:
         try:
-            result = await execute_search_tool(arguments, runtime.context.config)
+            if timeout_seconds is None:
+                result = await execute_search_tool(arguments, runtime.context.config)
+            else:
+                async with asyncio.timeout(max(0.001, timeout_seconds)):
+                    result = await execute_search_tool(arguments, runtime.context.config)
+        except TimeoutError:
+            code = "RUN_TIME_RESERVE"
+            result = SearchExecutionResult(
+                ok=False,
+                channel=arguments.channel,
+                query=arguments.query,
+                provider="unknown",
+                results=[],
+                evidence=[],
+                error_code=code,
+                error_message="搜索调用已停止，以保留反思、写作和核验时间",
+            )
+            try:
+                await runtime.context.ledger.fail(
+                    idempotency_key,
+                    result.public_dict(),
+                    code,
+                )
+                status = "failed"
+            except Exception:  # noqa: BLE001 - 无法确认结算持久化结果
+                result = SearchExecutionResult(
+                    ok=False,
+                    channel=arguments.channel,
+                    query=arguments.query,
+                    provider="unknown",
+                    results=[],
+                    evidence=[],
+                    error_code="LEDGER_SETTLEMENT_UNKNOWN",
+                    error_message="限时停止搜索后，幂等账本结算结果未知",
+                )
+                writer(runtime_event(
+                    "tool.unknown",
+                    toolCallId=tool_call_id,
+                    toolName="web_search",
+                    query=arguments.query,
+                    channel=arguments.channel,
+                    reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
+                ))
+                status = "unknown"
         except asyncio.CancelledError:
             try:
                 await runtime.context.ledger.unknown(idempotency_key, "CANCELLED_OUTCOME_UNKNOWN")
@@ -418,6 +635,7 @@ async def _run_one_search(
                     toolCallId=tool_call_id,
                     toolName="web_search",
                     query=arguments.query,
+                    channel=arguments.channel,
                     reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
                 ))
             raise
@@ -425,6 +643,7 @@ async def _run_one_search(
             code = _safe_error_code(exc)
             result = SearchExecutionResult(
                 ok=False,
+                channel=arguments.channel,
                 query=arguments.query,
                 provider="unknown",
                 results=[],
@@ -438,6 +657,7 @@ async def _run_one_search(
             except Exception:  # noqa: BLE001 - 无法确认结算持久化结果
                 result = SearchExecutionResult(
                     ok=False,
+                    channel=arguments.channel,
                     query=arguments.query,
                     provider="unknown",
                     results=[],
@@ -450,6 +670,7 @@ async def _run_one_search(
                     toolCallId=tool_call_id,
                     toolName="web_search",
                     query=arguments.query,
+                    channel=arguments.channel,
                     reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
                 ))
                 status = "unknown"
@@ -468,6 +689,7 @@ async def _run_one_search(
             except Exception:  # noqa: BLE001 - 外部调用已发生但账本结算未知
                 result = SearchExecutionResult(
                     ok=False,
+                    channel=arguments.channel,
                     query=arguments.query,
                     provider="unknown",
                     results=[],
@@ -480,6 +702,7 @@ async def _run_one_search(
                     toolCallId=tool_call_id,
                     toolName="web_search",
                     query=arguments.query,
+                    channel=arguments.channel,
                     reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
                 ))
                 status = "unknown"
@@ -491,6 +714,7 @@ async def _run_one_search(
             toolCallId=tool_call_id,
             toolName="web_search",
             query=arguments.query,
+            channel=arguments.channel,
             provider=result.provider,
             summary=f"找到 {len(result.results)} 条结果，读取 {len(result.evidence)} 个来源",
             resultCount=len(result.results),
@@ -504,6 +728,7 @@ async def _run_one_search(
             toolCallId=tool_call_id,
             toolName="web_search",
             query=arguments.query,
+            channel=arguments.channel,
             provider=result.provider,
             reasonCode=result.error_code or "SEARCH_FAILED",
             message=result.error_message or "搜索失败",
@@ -514,21 +739,25 @@ async def _run_one_search(
         tool_call_id=tool_call_id,
         idempotency_key=idempotency_key,
         query=arguments.query,
+        channel=arguments.channel,
         provider=result.provider,
         status=status,
         result_count=len(result.results),
         evidence_count=len(result.evidence),
         error_code=result.error_code,
+        limitation=_result_limitation(result),
     )
     return result, trace
 
 
 async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-    pending = list(state.get("pending_queries") or [])
-    if not pending:
+    pending_searches = _pending_searches(state)
+    if not pending_searches:
         return {
-            "no_progress_count": state.get("no_progress_count", 0) + 1,
-            "steps": _step("research", "model", None, "no_pending_queries"),
+            # Planner 已把“无新 query+channel”计为一次无进展；这里不重复累计。
+            "no_progress_count": state.get("no_progress_count", 0),
+            "replan_required": False,
+            "steps": _step("research", "deterministic", None, "no_pending_searches"),
         }
 
     remaining = max(0, state.get("max_tool_calls", 6) - state.get("tool_calls", 0))
@@ -545,8 +774,12 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             "content": json.dumps(
                 {
                     "question": state["question"],
-                    "pending_queries": pending,
-                    "already_used_queries": state.get("queries", [])[:-len(pending)] if pending else state.get("queries", []),
+                    "pending_searches": pending_searches,
+                    "already_used_searches": (
+                        _state_searches(state)[:-len(pending_searches)]
+                        if pending_searches
+                        else _state_searches(state)
+                    ),
                     "remaining_tool_calls": remaining,
                 },
                 ensure_ascii=False,
@@ -566,21 +799,38 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
     # 以及 Reflector、Writer、Verifier 各一次调用，确保不会因搜索挤占收尾预算。
     available_model_calls = _remaining_model_calls(state)
     target_budget = max(0, available_model_calls - 4)
-    targets = pending[: min(remaining, target_budget)]
+    targets = pending_searches[: min(remaining, target_budget)]
     if not targets:
         return {
+            "pending_searches": [],
             "pending_queries": [],
             "stop_reason": state.get("stop_reason") or "MODEL_CALL_LIMIT",
             "no_progress_count": state.get("no_progress_count", 0) + 1,
+            "replan_required": False,
             "steps": _step("research", "deterministic", None, "model_budget_exhausted"),
         }
 
     projected_limit: str | None = None
 
-    for target in targets:
+    for target_search in targets:
+        target = target_search["query"]
+        target_channel = target_search["channel"]
+        if target_channel not in _RESEARCH_CHANNELS:
+            projected_limit = "INVALID_CHANNEL_PLAN"
+            break
+        initial_tool_timeout = tool_timeout_seconds(state, target_channel)
+        if initial_tool_timeout is not None and initial_tool_timeout <= 0:
+            projected_limit = "RUN_TIME_RESERVE"
+            break
         messages.append({
             "role": "user",
-            "content": f"现在必须调用 web_search，query 使用：{target}",
+            "content": (
+                "现在必须调用 web_search，参数必须严格使用："
+                + json.dumps(
+                    {"query": target, "channel": target_channel, "max_results": 5},
+                    ensure_ascii=False,
+                )
+            ),
         })
         turn = await invoke_researcher_turn(
             messages,
@@ -605,6 +855,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             if tool_messages >= remaining:
                 error_result = SearchExecutionResult(
                     ok=False,
+                    channel=target_channel,
                     query=target,
                     provider="none",
                     results=[],
@@ -618,6 +869,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     toolCallId=call.id,
                     toolName=public_tool_name,
                     query=target,
+                    channel=target_channel,
                     cached=False,
                 ))
                 event_writer(runtime_event(
@@ -625,6 +877,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     toolCallId=call.id,
                     toolName=public_tool_name,
                     query=target,
+                    channel=target_channel,
                     provider="none",
                     reasonCode="TOOL_CALL_LIMIT",
                     message="搜索工具预算已耗尽",
@@ -637,11 +890,13 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     tool_call_id=call.id,
                     idempotency_key=limited_key,
                     query=target,
+                    channel=target_channel,
                     provider="none",
                     status="failed",
                     result_count=0,
                     evidence_count=0,
                     error_code="TOOL_CALL_LIMIT",
+                    limitation="本次运行的搜索工具预算已耗尽",
                 ))
                 continue
 
@@ -658,6 +913,8 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                         r"\s+", " ", target
                     ).strip().casefold():
                         raise ValueError("QUERY_NOT_PENDING")
+                    if arguments.channel != target_channel:
+                        raise ValueError("CHANNEL_NOT_PLANNED")
                 except (ValidationError, ValueError, json.JSONDecodeError):
                     error_code = "INVALID_ARGUMENTS"
 
@@ -667,18 +924,20 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     toolCallId=call.id,
                     toolName=public_tool_name,
                     query=target,
+                    channel=target_channel,
                     cached=False,
                 ))
                 try:
                     result = SearchExecutionResult(
-                    ok=False,
-                    query=target,
-                    provider="none",
-                    results=[],
-                    evidence=[],
-                    error_code=error_code,
-                    error_message=error_message,
-                )
+                        ok=False,
+                        channel=target_channel,
+                        query=target,
+                        provider="none",
+                        results=[],
+                        evidence=[],
+                        error_code=error_code,
+                        error_message=error_message,
+                    )
                 except ValidationError as exc:  # pragma: no cover - 常量 schema 防御
                     raise RuntimeError("内部工具错误结果构造失败") from exc
                 event_writer(runtime_event(
@@ -686,6 +945,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     toolCallId=call.id,
                     toolName=public_tool_name,
                     query=target,
+                    channel=target_channel,
                     provider="none",
                     reasonCode=error_code,
                     message=error_message,
@@ -698,36 +958,63 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     tool_call_id=call.id,
                     idempotency_key=invalid_key,
                     query=target,
+                    channel=target_channel,
                     provider="none",
                     status="failed",
                     result_count=0,
                     evidence_count=0,
                     error_code=error_code,
+                    limitation=error_message,
                 ))
             else:
                 assert arguments is not None
-                result, trace = await _run_one_search(state, runtime, call.id, arguments)
+                current_tool_timeout = tool_timeout_seconds(state, target_channel)
+                result, trace = await _run_one_search(
+                    state,
+                    runtime,
+                    call.id,
+                    arguments,
+                    timeout_seconds=current_tool_timeout,
+                )
                 traces.append(trace)
+                if result.error_code == "RUN_TIME_RESERVE":
+                    projected_limit = "RUN_TIME_RESERVE"
                 for item in result.results:
                     new_candidates.append(Candidate(
+                        channel=item.channel,
+                        tool_call_id=call.id,
+                        iteration=state.get("round", 0),
+                        provider=item.provider,
                         url=item.url,
                         title=item.title,
                         snippet=item.snippet,
                         query=result.query,
+                        author=item.author,
+                        published_at=item.published_at,
+                        metrics=item.metrics,
+                        limitation=item.limitation,
                     ))
                 for item in result.evidence:
                     new_evidence.append(Evidence(
+                        channel=item.channel,
+                        tool_call_id=call.id,
+                        iteration=state.get("round", 0),
+                        provider=item.provider,
                         url=item.url,
                         title=item.title,
                         text=item.text,
                         extractor=item.extractor,
                         query=item.query,
                         captured_at=item.captured_at,
+                        author=item.author,
+                        published_at=item.published_at,
+                        metrics=item.metrics,
+                        limitation=item.limitation,
                     ))
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result.tool_message()})
             tool_messages += 1
 
-        projected_limit = _projected_budget_reason(state, usages)
+        projected_limit = projected_limit or _projected_budget_reason(state, usages)
         if projected_limit:
             break
 
@@ -770,9 +1057,11 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         "tool_calls": state.get("tool_calls", 0) + tool_messages,
         "model_calls": state.get("model_calls", 0) + len(usages),
         "usage": _usage_after(state, usage),
+        "pending_searches": [],
         "pending_queries": [],
         "stop_reason": state.get("stop_reason") or projected_limit,
         "no_progress_count": 0 if gained else state.get("no_progress_count", 0) + 1,
+        "replan_required": False,
         "steps": _step(
             "research",
             "model",
@@ -784,11 +1073,18 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
 
 async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
     evidence = state.get("evidence") or []
+    current_candidates = [
+        item
+        for item in state.get("candidates") or []
+        if item.get("iteration") == state.get("round", 0)
+    ]
     limit = budget_reason(state, reserve_model_calls=1)
     if limit:
         return {
             "sufficient": False,
+            "pending_searches": [],
             "pending_queries": [],
+            "replan_required": False,
             "verification_issue": "模型预算不足，无法继续评估证据",
             "stop_reason": state.get("stop_reason") or limit,
             "steps": _step("reflect", "deterministic", None, f"budget={limit}"),
@@ -797,39 +1093,97 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         f"[证据{i + 1}] {item['title']}\nURL: {item['url']}\n{item['text'][:1000]}"
         for i, item in enumerate(evidence)
     ) or "（本轮没有读取到可用证据）"
-    failures = [
-        {"query": item["query"], "error": item.get("error_code")}
-        for item in state.get("tool_traces") or []
-        if item["status"] in {"failed", "unknown"}
-    ]
-    result, usage = await invoke_structured(
-        "reflector",
-        ReflectResult,
-        [
-            SystemMessage(content=REFLECTOR_PROMPT),
-            HumanMessage(content=f"用户问题：{state['question']}\n工具失败：{failures}\n\n证据：\n{digest}"),
-        ],
-        model_id=state.get("model_id") or None,
-        allow_repair=_allow_structured_repair(state),
-    )
-    prior_keys = {item.casefold() for item in state.get("queries") or []}
-    extra = [
-        re.sub(r"\s+", " ", item).strip()[:300]
-        for item in result.extra_queries
-        if item.strip() and item.strip().casefold() not in prior_keys
-    ]
+    candidate_digest = "\n".join(
+        json.dumps(
+            {
+                "url": item["url"],
+                "channel": item["channel"],
+                "title": item["title"],
+                "snippet": item["snippet"],
+                "verified": any(
+                    evidence_item["url"] == item["url"] for evidence_item in evidence
+                ),
+                "limitation": item.get("limitation"),
+            },
+            ensure_ascii=False,
+        )
+        for item in current_candidates
+    ) or "（当前轮没有候选）"
+    feedback = _tool_feedback(state)
+    try:
+        result, usage = await invoke_structured(
+            "reflector",
+            ReflectResult,
+            [
+                SystemMessage(content=REFLECTOR_PROMPT),
+                HumanMessage(content=(
+                    f"用户问题：{state['question']}"
+                    f"\n逐次真实工具反馈：{json.dumps(feedback, ensure_ascii=False)}"
+                    f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
+                    f"\n\n当前轮候选（只允许为这些 URL 生成逐行说明）：\n{candidate_digest}"
+                    f"\n\n已读取证据：\n{digest}"
+                )),
+            ],
+            model_id=state.get("model_id") or None,
+            allow_repair=_allow_structured_repair(state),
+        )
+    except StructuredOutputError as exc:
+        sufficient = bool(evidence)
+        stop_reason = state.get("stop_reason")
+        if not sufficient and state.get("round", 0) >= state.get("max_rounds", 2):
+            stop_reason = stop_reason or "MAX_ITERATIONS"
+        return {
+            "sufficient": sufficient,
+            "pending_searches": [],
+            "pending_queries": [],
+            "replan_required": bool(not sufficient and not stop_reason),
+            "verification_issue": "证据评估未返回有效结构，交由后续核验收口",
+            "stop_reason": stop_reason,
+            **_structured_usage_patch(state, exc.usage),
+            "steps": _step(
+                "reflect",
+                "deterministic",
+                None,
+                "structured_output_invalid",
+            ),
+        }
+    extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
+    extra = [item["query"] for item in extra_searches]
     sufficient = bool(result.sufficient and evidence)
+    candidate_by_url = {item["url"]: item for item in current_candidates}
+    presentations_by_call: dict[str, list[dict[str, str]]] = {}
+    seen_presentations: set[str] = set()
+    for presentation in result.source_presentations:
+        candidate = candidate_by_url.get(presentation.url)
+        public_text = safe_public_text(presentation.text, max_chars=180)
+        if not candidate or not public_text or presentation.url in seen_presentations:
+            continue
+        seen_presentations.add(presentation.url)
+        presentations_by_call.setdefault(candidate["tool_call_id"], []).append({
+            "url": presentation.url,
+            "text": public_text,
+        })
+    writer = get_stream_writer()
+    for tool_call_id, presentations in presentations_by_call.items():
+        writer(runtime_event(
+            "tool.presented",
+            toolCallId=tool_call_id,
+            sources=presentations,
+        ))
     stop_reason = state.get("stop_reason")
     if not sufficient:
         if state.get("round", 0) >= state.get("max_rounds", 2):
             stop_reason = stop_reason or "MAX_ITERATIONS"
         elif state.get("no_progress_count", 0) >= state.get("no_progress_limit", 2):
             stop_reason = stop_reason or "NO_PROGRESS"
-        elif not extra:
-            stop_reason = stop_reason or ("SEARCH_UNAVAILABLE" if not evidence else "NO_PROGRESS")
+    replan_required = bool(not sufficient and not stop_reason)
+    extra_channels = {item["query"]: item["channel"] for item in extra_searches}
     return {
         "sufficient": sufficient,
+        "pending_searches": extra_searches,
         "pending_queries": extra,
+        "query_channels": {**(state.get("query_channels") or {}), **extra_channels},
+        "replan_required": replan_required,
         "verification_issue": result.missing,
         "stop_reason": stop_reason,
         **_structured_usage_patch(state, usage),
@@ -837,7 +1191,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             "reflect",
             "model",
             safe_public_text(result.summary),
-            f"sufficient={sufficient} extra_queries={len(extra)}",
+            f"sufficient={sufficient} extra_searches={len(extra_searches)}",
         ),
     }
 
@@ -910,6 +1264,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
             "verification_passed": False,
             "verification_action": "pass",
             "verification_issue": "直接回答未执行外部事实核验",
+            "replan_required": False,
             "steps": _step("verify", "deterministic", None, "direct_answer_not_externally_verified"),
         }
     if not evidence or not answer:
@@ -917,6 +1272,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
             "verification_passed": False,
             "verification_action": "research_more",
             "verification_issue": "缺少可核验的公开来源",
+            "replan_required": not bool(state.get("stop_reason")),
             "steps": _step("verify", "deterministic", None, "missing_evidence"),
         }
 
@@ -926,6 +1282,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
             "verification_passed": False,
             "verification_action": "",
             "verification_issue": "模型预算不足，未完成最终核验",
+            "replan_required": False,
             "stop_reason": state.get("stop_reason") or limit,
             "steps": _step("verify", "deterministic", None, f"budget={limit}"),
         }
@@ -939,28 +1296,43 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         VerifyResult,
         [
             SystemMessage(content=VERIFIER_PROMPT),
-            HumanMessage(content=f"用户问题：{state['question']}\n\n回答：\n{answer}\n\n来源：\n{digest}"),
+            HumanMessage(content=(
+                f"用户问题：{state['question']}"
+                f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
+                f"\n逐次真实工具反馈：{json.dumps(_tool_feedback(state), ensure_ascii=False)}"
+                f"\n\n回答：\n{answer}\n\n来源：\n{digest}"
+            )),
         ],
         model_id=state.get("model_id") or None,
         allow_repair=_allow_structured_repair(state),
     )
     action = "pass" if result.passed else result.action
     passed = result.passed and action == "pass"
-    prior_keys = {item.casefold() for item in state.get("queries") or []}
-    extra = [item.strip()[:300] for item in result.extra_queries if item.strip().casefold() not in prior_keys]
+    extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
+    extra = [item["query"] for item in extra_searches]
     stop_reason = state.get("stop_reason")
     if not passed:
         if action == "rewrite" and state.get("repair_count", 0) >= 1:
             stop_reason = stop_reason or "REWRITE_LIMIT"
         elif action == "research_more" and state.get("round", 0) >= state.get("max_rounds", 2):
             stop_reason = stop_reason or "MAX_ITERATIONS"
-        elif action == "research_more" and not extra:
+        elif (
+            action == "research_more"
+            and state.get("no_progress_count", 0) >= state.get("no_progress_limit", 2)
+        ):
             stop_reason = stop_reason or "NO_PROGRESS"
+    replan_required = bool(
+        not passed and action == "research_more" and not stop_reason
+    )
+    extra_channels = {item["query"]: item["channel"] for item in extra_searches}
     return {
         "verification_passed": passed,
         "verification_action": action,
         "verification_issue": result.issue,
+        "pending_searches": extra_searches,
         "pending_queries": extra,
+        "query_channels": {**(state.get("query_channels") or {}), **extra_channels},
+        "replan_required": replan_required,
         "stop_reason": stop_reason,
         **_structured_usage_patch(state, usage),
         "steps": _step(
@@ -1055,7 +1427,7 @@ def route_after_reflect(state: SearchState) -> str:
         return "compose"
     if state.get("no_progress_count", 0) >= state.get("no_progress_limit", 2):
         return "compose"
-    if not state.get("pending_queries"):
+    if not state.get("replan_required") and not _pending_searches(state):
         return "compose"
     return "plan_research"
 
@@ -1070,7 +1442,7 @@ def route_after_verify(state: SearchState) -> str:
     action = state.get("verification_action")
     if (
         action == "research_more"
-        and state.get("pending_queries")
+        and (state.get("replan_required") or _pending_searches(state))
         and state.get("round", 0) < state.get("max_rounds", 2)
     ):
         return "plan_research"

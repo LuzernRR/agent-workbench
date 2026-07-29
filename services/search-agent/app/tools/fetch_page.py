@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 import trafilatura
 
+from app.tools.robots_policy import check_robots
 from app.tools.url_policy import UrlPolicyError, resolve_fetchable
 
 # 静态正文视为「足够」的最小可见字符数。
@@ -87,6 +88,14 @@ def _truncate(text: str) -> str:
 async def _fetch_static(url: str, timeout: float) -> FetchResult:
     """静态抓取：httpx 拉取 HTML，trafilatura 抽取正文。"""
     try:
+        robots = await check_robots(url, timeout=min(timeout, 10.0))
+        if not robots.allowed:
+            return FetchResult(
+                url=url,
+                ok=False,
+                error=f"robots.txt 拒绝或无法安全确认：{robots.reason}",
+                error_category="robots_denied",
+            )
         response, url = await _pinned_get(url, timeout)
 
         # 逐跳重新解析、校验并固定目标 IP，最多 3 跳。
@@ -96,6 +105,14 @@ async def _fetch_static(url: str, timeout: float) -> FetchResult:
             if not location:
                 break
             target = str(httpx.URL(url).join(location))
+            robots = await check_robots(target, timeout=min(timeout, 10.0))
+            if not robots.allowed:
+                return FetchResult(
+                    url=target,
+                    ok=False,
+                    error=f"重定向目标的 robots.txt 拒绝或无法安全确认：{robots.reason}",
+                    error_category="robots_denied",
+                )
             response, url = await _pinned_get(target, timeout)
             hops += 1
 

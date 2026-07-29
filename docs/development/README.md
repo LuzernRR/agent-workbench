@@ -29,4 +29,5 @@
 - [共享搜索 Agent 合同](2026-07-26-004-search-agent-contracts.md)
 - [前端 Agent 工作台：过程、引导与消息队列](2026-07-27-005-agent-frontend.md)
 - [真实 LangGraph 多 Agent 搜索闭环与递增展示](2026-07-28-006-langgraph-search-agent.md)
+- [LangGraph 自适应多渠道搜索 Agent](2026-07-29-007-multichannel-search-agent.md)
 - [开发记录模板](TEMPLATE.md)

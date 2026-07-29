@@ -47,7 +47,7 @@ function expectedActivitySegments(events: ReturnType<typeof decodeSse>) {
   }, []);
 }
 
-test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复", async ({ page }) => {
+test("真实自适应思考与搜索链路在 3100 正确展示并可恢复", async ({ page }) => {
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
@@ -64,7 +64,7 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
   await page.goto(`/workbench/t/${thread.id}`);
   await expect(page.getByRole("heading", { name: threadTitle, exact: true })).toBeVisible();
 
-  const question = "什么是 CC Switch？";
+  const question = "请搜索小红书上关于 LangGraph 的笔记，概括大家如何区分 LangChain、LangGraph 和 LangSmith，并引用已读取来源。";
   const runResponsePromise = page.waitForResponse((response) => response.request().method() === "POST"
     && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
   await page.getByLabel("任务输入").fill(question);
@@ -87,7 +87,10 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
     runtime.__searchCountObserver = new MutationObserver(record);
     runtime.__searchCountObserver.observe(element, { childList: true, subtree: true, characterData: true });
   });
-  await expect(page.getByRole("button", { name: "复制完整回复" })).toBeVisible({ timeout: 300_000 });
+  const completedReply = page.getByRole("button", { name: "复制完整回复" });
+  const failedReply = page.getByText("Search Agent 运行失败", { exact: true });
+  await expect(completedReply.or(failedReply)).toBeVisible({ timeout: 300_000 });
+  await expect(completedReply).toBeVisible();
   const conversation = page.getByTestId("conversation-viewport");
 
   const eventResponse = await page.request.get(`/api/v1/runs/${runId}/events?after=0`);
@@ -103,12 +106,23 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
   expect(types).toContain("message.completed");
   expect(types).toContain("run.completed");
   const completedTools = events.filter((event) => event.type === "tool.completed");
-  const completedTool = completedTools[0];
-  expect(Array.isArray(completedTool?.payload.sources)).toBe(true);
-  expect((completedTool?.payload.sources as unknown[]).length).toBeGreaterThan(0);
+  expect(completedTools.every((event) => Array.isArray(event.payload.sources))).toBe(true);
+  const completedTool = completedTools.find((event) =>
+    (event.payload.sources as unknown[]).length > 0);
+  expect(completedTool).toBeDefined();
+  const xiaohongshuTools = completedTools.filter((event) => event.payload.channel === "xiaohongshu");
+  expect(xiaohongshuTools.length).toBeGreaterThan(0);
+  expect(xiaohongshuTools.some((event) => Number(event.payload.resultCount || 0) > 0)).toBe(true);
+  expect(xiaohongshuTools.some((event) => Number(event.payload.evidenceCount || 0) > 0)).toBe(true);
   const activitySegments = expectedActivitySegments(events);
   const expectedKinds = activitySegments.map((segment) => segment[0].kind);
-  expect(expectedKinds.slice(0, 4)).toEqual(["thinking", "search", "thinking", "verification"]);
+  expect(expectedKinds.slice(0, 3)).toEqual(["thinking", "search", "thinking"]);
+  const verificationIndex = expectedKinds.indexOf("verification");
+  expect(verificationIndex).toBeGreaterThan(2);
+  expect(expectedKinds.slice(2, verificationIndex)).toContain("thinking");
+  for (let index = 1; index < expectedKinds.length; index += 1) {
+    expect(expectedKinds[index]).not.toBe(expectedKinds[index - 1]);
+  }
   const processRows = conversation.locator("[data-thinking-id], [data-search-activity-summary]");
   await expect(processRows).toHaveCount(activitySegments.length);
   const actualKinds = await processRows.evaluateAll((elements) => elements.map((element) =>
@@ -141,8 +155,11 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
     await expect(summary).toHaveAttribute("data-tool-call-ids", toolCallIds.join(","));
     await summary.getByRole("button", { name: "展开搜索详情" }).click();
     await expect(summary.locator("[data-search-activity-details] a")).toHaveCount(detailSources.size);
+    if (segmentCompletions.some((event) => event.payload.channel === "xiaohongshu")) {
+      await expect(summary.locator("[data-search-activity-details]")).toContainText("小红书");
+    }
     expect(await summary.locator("table").count()).toBe(0);
-    await expect(summary.locator("[data-search-activity-details]")).not.toContainText(/状态|搜索服务|执行耗时|检索查询|检索计划|检索进展|证据评估|核验结论/u);
+    await expect(summary.locator("[data-search-activity-details]")).not.toContainText(/(?:状态|搜索服务|执行耗时|检索查询|检索计划|检索进展|证据评估|核验结论)\s*[：:]/u);
   }
 
   const thinkingUpdates = events.filter((event) => event.type === "thinking.paragraph");
@@ -192,7 +209,7 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
   const evidenceDirectory = path.resolve(process.cwd(), "..", "..", "docs", "development", "evidence");
   await mkdir(evidenceDirectory, { recursive: true });
   await thinkingBlocks.first().scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-28-issue-7-desktop.png"), fullPage: true });
+  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-29-issue-8-desktop.png"), fullPage: true });
 
   await page.reload();
   const restoredSearchSummaries = page.locator("[data-search-activity-summary]");
@@ -216,7 +233,7 @@ test("真实思考→搜索→再思考链路在 3100 正确展示并可恢复",
   const overflow = await page.locator("body").evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   await thinkingBlocks.first().scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-28-issue-7-mobile.png"), fullPage: true });
+  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-29-issue-8-mobile.png"), fullPage: true });
   expect(browserErrors).toEqual([]);
 });
 

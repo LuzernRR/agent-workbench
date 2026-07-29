@@ -1,0 +1,205 @@
+"""小红书公开索引与免登录详情读取渠道。"""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlsplit
+
+import httpx
+
+from app.config.agent import AgentConfig
+from app.tools.channels.base import (
+    ChannelEvidence,
+    ChannelOutcome,
+    ChannelResult,
+    SourceProvenance,
+)
+from app.tools.channels.normalization import normalize_public_url, source_dedup_key
+from app.tools.robots_policy import check_robots
+from app.tools.web_search import SearchHit, web_search
+
+_URL_RE = re.compile(r"https?://(?:www\.)?xiaohongshu\.com/[^\s<>\]\)\"']+", re.IGNORECASE)
+_ALLOWED_PATH = re.compile(
+    r"^/(?:explore/[A-Za-z0-9]+|user/profile/[A-Za-z0-9]+|goods-detail/[A-Za-z0-9]+)$"
+)
+_BLOCK_MARKERS = (
+    "requiring CAPTCHA", "安全验证", "访问的页面不见了", "页面不见了", "我要申诉",
+    "300012", "操作太快", "稍后再试", "广告屏蔽插件", "登录后查看",
+)
+_GENERIC_TITLES = {"小红书", "小红书 - 你的生活兴趣社区", "rednote", "found."}
+_MAX_READER_BYTES = 1_048_576
+
+
+def _allowed_xhs_url(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and (parts.hostname or "").lower() in {"xiaohongshu.com", "www.xiaohongshu.com"}
+        and bool(_ALLOWED_PATH.fullmatch(parts.path.rstrip("/")))
+        and not parts.username
+        and not parts.password
+    )
+
+
+def _readable_detail_url(url: str) -> bool:
+    parts = urlsplit(url)
+    if parts.path.startswith("/explore/"):
+        return bool(parse_qs(parts.query).get("xsec_token"))
+    return True
+
+
+def _expected_title(title: str) -> str:
+    cleaned = re.sub(r"\s*-\s*小红书\s*$", "", title, flags=re.IGNORECASE).strip()
+    return "" if cleaned.casefold() in {item.casefold() for item in _GENERIC_TITLES} else cleaned
+
+
+def _content_matches(expected: str, content: str) -> bool:
+    expected = _expected_title(expected)
+    if not expected or expected.startswith(("http://", "https://")):
+        return False
+    compact_expected = re.sub(r"[^\w\u4e00-\u9fff]+", "", expected).casefold()
+    compact_content = re.sub(r"[^\w\u4e00-\u9fff]+", "", content).casefold()
+    if len(compact_expected) < 4:
+        return compact_expected in compact_content
+    probe = compact_expected[: min(12, len(compact_expected))]
+    return probe in compact_content
+
+
+class XiaohongshuPublicChannel:
+    name = "xiaohongshu"
+
+    def __init__(self, config: AgentConfig) -> None:
+        self.config = config
+        self.settings = config.search.channels.xiaohongshu
+        self.reader_origin = str(self.settings.reader_origin).rstrip("/")
+
+    async def _read_public(self, url: str) -> tuple[str, str | None]:
+        if not self.settings.read_public_details:
+            return "", "公开详情读取已在配置中停用"
+        if not _allowed_xhs_url(url):
+            return "", "URL 未通过小红书 host/path 策略"
+        if not _readable_detail_url(url):
+            return "", "笔记 URL 缺少公开索引提供的 xsec_token"
+        reader_url = f"{self.reader_origin}/{url}"
+        target_robots = await check_robots(url)
+        if not target_robots.allowed:
+            return "", f"目标页面 robots.txt 不允许读取：{target_robots.reason}"
+        reader_robots = await check_robots(reader_url, user_agent="ChatGPT-User")
+        if not reader_robots.allowed:
+            return "", f"公开 Reader 的 robots.txt 不允许读取：{reader_robots.reason}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self.settings.request_timeout_ms / 1000, connect=5.0),
+                follow_redirects=False,
+                trust_env=False,
+                headers={
+                    "User-Agent": "ChatGPT-User",
+                    "Accept": "text/plain,text/markdown;q=0.9",
+                    "Accept-Encoding": "identity",
+                },
+            ) as client:
+                response = await client.get(reader_url)
+        except httpx.TimeoutException:
+            return "", "公开 Reader 读取超时"
+        except httpx.HTTPError:
+            return "", "公开 Reader 当前不可用"
+        if response.status_code == 429:
+            return "", "公开 Reader 请求过于频繁"
+        if response.status_code >= 400:
+            return "", f"公开 Reader 返回 HTTP {response.status_code}"
+        if len(response.content) > _MAX_READER_BYTES:
+            return "", "公开 Reader 响应超过大小上限"
+        text = response.text.strip()
+        if any(marker.casefold() in text.casefold() for marker in _BLOCK_MARKERS):
+            return "", "页面触发安全验证、登录提示或访问限制"
+        marker = "Markdown Content:"
+        if marker in text:
+            text = text.split(marker, 1)[1].strip()
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:20_000], None
+
+    async def _discover(self, query: str, max_results: int):
+        exact = _URL_RE.search(query)
+        if exact and _allowed_xhs_url(exact.group(0)):
+            url = normalize_public_url(exact.group(0))
+            return "direct", [SearchHit(url=url, title=url, snippet="", rank=1)]
+        outcome = await web_search(
+            f"{query} site:xiaohongshu.com",
+            max_results=max_results,
+            default_provider=self.config.search.default_provider,
+            allow_duckduckgo_fallback=self.config.search.allow_duckduckgo_fallback,
+        )
+        if not outcome.ok:
+            return outcome, []
+        return outcome.provider, [hit for hit in outcome.hits if _allowed_xhs_url(hit.url)]
+
+    async def search(self, query: str, max_results: int) -> ChannelOutcome:
+        discovery, hits = await self._discover(query, max_results)
+        if not isinstance(discovery, str):
+            return ChannelOutcome(
+                ok=False,
+                channel="xiaohongshu",
+                provider=discovery.provider,
+                query=query,
+                error_code=(discovery.error_category or "provider_unavailable").upper(),
+                error_message=discovery.error or "小红书公开索引搜索失败",
+            )
+        observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        results: list[ChannelResult] = []
+        evidence: list[ChannelEvidence] = []
+        seen: set[str] = set()
+        for hit in hits[:max_results]:
+            reader_target = normalize_public_url(hit.url)
+            public_url = normalize_public_url(hit.url, preserve_xhs_token=False)
+            key = source_dedup_key(reader_target)
+            if key in seen:
+                continue
+            seen.add(key)
+            body, limitation = await self._read_public(reader_target)
+            matched = bool(body and _content_matches(hit.title, body))
+            if body and not matched:
+                limitation = "Reader 返回内容与索引标题不匹配，未计入已读来源"
+            verified = bool(body and matched)
+            title = (_expected_title(hit.title) or hit.title or public_url)[:300]
+            provenance = SourceProvenance(
+                discovery_provider=discovery,
+                detail_provider="jina-public-reader" if body else None,
+                source_kind="public_page" if verified else "public_index",
+                observed_at=observed_at,
+                confidence="medium" if verified else "low",
+            )
+            results.append(ChannelResult(
+                channel="xiaohongshu",
+                provider=f"{discovery}+jina" if verified else discovery,
+                query=query,
+                url=public_url,
+                title=title,
+                snippet=hit.snippet[:500],
+                verified=verified,
+                limitation=None if verified else limitation or "仅发现公开索引，详情未验证",
+                provenance=provenance,
+            ))
+            if verified:
+                evidence.append(ChannelEvidence(
+                    channel="xiaohongshu",
+                    provider=f"{discovery}+jina",
+                    query=query,
+                    url=public_url,
+                    title=title,
+                    text=body[:2400],
+                    extractor="jina-public-reader",
+                    captured_at=observed_at,
+                    provenance=provenance,
+                ))
+        return ChannelOutcome(
+            ok=True,
+            channel="xiaohongshu",
+            provider=discovery,
+            query=query,
+            results=results,
+            evidence=evidence,
+        )

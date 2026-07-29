@@ -20,7 +20,27 @@
   "search": {
     "forceSearch": true,
     "defaultProvider": "tavily",
-    "allowDuckDuckGoFallback": true
+    "allowDuckDuckGoFallback": true,
+    "channels": {
+      "web": {
+        "enabled": true
+      },
+      "x": {
+        "enabled": true,
+        "provider": "fxembed",
+        "origin": "https://api.fxtwitter.com",
+        "requestTimeoutMs": 20000,
+        "maxProfilePosts": 5
+      },
+      "xiaohongshu": {
+        "enabled": true,
+        "provider": "mcp_preferred",
+        "readerOrigin": "https://r.jina.ai",
+        "requestTimeoutMs": 75000,
+        "maxAttempts": 2,
+        "readPublicDetails": true
+      }
+    }
   },
   "milvus": {
     "enabled": true,

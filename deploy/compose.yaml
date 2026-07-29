@@ -109,9 +109,6 @@ services:
         source: ./milvus/user.yaml
         target: /milvus/configs/user.yaml
         read_only: true
-    ports:
-      - "${MILVUS_BIND_ADDRESS:-127.0.0.1}:${MILVUS_PORT:-29530}:19530"
-      - "${MILVUS_HEALTH_BIND_ADDRESS:-127.0.0.1}:${MILVUS_HEALTH_PORT:-29091}:9091"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
       interval: 10s
@@ -119,7 +116,7 @@ services:
       retries: 20
       start_period: 90s
     # Milvus standalone 官方镜像要求放宽默认 seccomp；服务只位于内部网络，
-    # gRPC/health 端口仍只发布到 loopback。
+    # gRPC/health 端口不发布到宿主机。
     security_opt:
       - seccomp:unconfined
       - no-new-privileges:true
@@ -131,6 +128,48 @@ services:
         condition: service_healthy
     networks:
       - agent-milvus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  xiaohongshu-mcp:
+    build:
+      context: ../services/xiaohongshu-mcp
+      dockerfile: Dockerfile
+    image: ${XIAOHONGSHU_MCP_IMAGE:-agent-workbench/xiaohongshu-mcp:local}
+    container_name: agent-workbench-live-xiaohongshu-mcp
+    restart: unless-stopped
+    init: true
+    environment:
+      COOKIES_PATH: /app/data/cookies.json
+      HOME: /app/data/home
+      XDG_CONFIG_HOME: /app/data/config
+    volumes:
+      - agent-workbench-live-xiaohongshu-session:/app/data
+    # 故意不发布 18060：仅 search-agent 可经 Docker 网络访问。
+    expose:
+      - "18060"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:18060/health"]
+      interval: 15s
+      timeout: 8s
+      retries: 12
+      start_period: 45s
+    read_only: true
+    tmpfs:
+      # 上游 Rod 浏览器会把 leakless helper 写入 /tmp 后执行。
+      - /tmp:size=128m,mode=1777,exec
+      - /app/images:size=16m,mode=0700
+    shm_size: "256m"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - agent-xiaohongshu
+      - agent-xiaohongshu-egress
     logging:
       driver: json-file
       options:
@@ -150,6 +189,8 @@ services:
         condition: service_healthy
       milvus:
         condition: service_healthy
+      xiaohongshu-mcp:
+        condition: service_healthy
     environment:
       SEARCH_AGENT_HOST: 0.0.0.0
       SEARCH_AGENT_PORT: 8100
@@ -159,6 +200,7 @@ services:
       SEARCH_AGENT_MILVUS_URI: ${SEARCH_AGENT_MILVUS_URI:-http://milvus:19530}
       SEARCH_AGENT_MILVUS_TOKEN: root:${MILVUS_ROOT_PASSWORD:?MILVUS_ROOT_PASSWORD is required}
       SEARCH_AGENT_MILVUS_DATA_DIRECTORY: ${MILVUS_DATA_DIRECTORY:?MILVUS_DATA_DIRECTORY is required}
+      XIAOHONGSHU_MCP_ORIGIN: http://xiaohongshu-mcp:18060
       WORKBENCH_INTERNAL_TOKEN: ${WORKBENCH_INTERNAL_TOKEN:?WORKBENCH_INTERNAL_TOKEN is required}
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -193,6 +235,7 @@ services:
     networks:
       - agent-backend
       - agent-milvus
+      - agent-xiaohongshu
     logging:
       driver: json-file
       options:
@@ -255,6 +298,8 @@ services:
 volumes:
   agent-workbench-live-postgres:
     name: ${POSTGRES_VOLUME_NAME:-001-agent-live-postgres-v1}
+  agent-workbench-live-xiaohongshu-session:
+    name: ${XIAOHONGSHU_MCP_VOLUME_NAME:-001-agent-live-xiaohongshu-session-v2}
 
 networks:
   agent-backend:
@@ -262,3 +307,9 @@ networks:
   agent-milvus:
     name: ${AGENT_MILVUS_NETWORK:-001-agent-live-milvus}
     internal: true
+  agent-xiaohongshu:
+    name: ${XIAOHONGSHU_MCP_NETWORK:-001-agent-live-xiaohongshu}
+    internal: true
+  # 登录态容器单独使用出站网络访问 xiaohongshu.com；Web 不加入此网络。
+  agent-xiaohongshu-egress:
+    name: ${XIAOHONGSHU_MCP_EGRESS_NETWORK:-001-agent-live-xiaohongshu-egress}

@@ -1,6 +1,6 @@
 # 万能搜索 Agent 端到端开发流程
 
-> 文档状态：Issue #7 真实 LangGraph 搜索闭环已于 2026-07-28 通过用户验收
+> 文档状态：Issue #7 已验收；Issue #8 多渠道搜索与智能活动展示已完成技术验证，等待用户显式验收
 > 项目基线日期：2026-07-26
 > 本次路线重排：2026-07-27
 > 适用仓库：`agent-workbench`
@@ -39,9 +39,9 @@
 | 搜索、抓取、RAG、引用 | Tavily、网页读取、Evidence、引用和核验循环已接入 | 后续通过评测提升混合召回与重排质量 |
 | 反思、修复和多步事务 | 设计已记录 | 核验不通过时有限修复，强事务回滚，跨系统最终一致 |
 
-如果只想知道“下一步做什么”，当前答案是：Issue #7 已通过用户验收，先完成关闭、提交与推送，再为后续渠道扩展建立新的唯一 Issue。现有 3100 已跑通真实结构化 Agent 循环、搜索、Evidence、核验、Milvus 降级与前端递增投影。
+如果只想知道“下一步做什么”，当前答案是：Issue #8 的实现、真实小红书/X 检索、前端时序聚合和本机 3100 部署均已完成技术验证，等待用户显式回复“通过”。验收前不 stage、commit、push、关闭 Issue 或启动下一功能。
 
-### 2026-07-28 生产实现落点
+### 2026-07-28 至 2026-07-29 生产实现落点
 
 - LangGraph 图位于 `services/search-agent/app/graph/build.py`，包含显式条件边和有界循环。
 - 六类 Agent Prompt 位于 `services/search-agent/app/prompts/agents.py`，公开摘要来自结构化 LLM 输出；前端只提供思考/核验类型标题，详情不添加固定阶段模板。
@@ -49,6 +49,10 @@
 - 对话区按持久事件 `seq` 做相邻同类连续段归并：连续思考、连续搜索、连续核验各自合并，类型切换后立即新开行。搜索摘要只累计当前连续段的真实 `tool.completed`，展开区只列来源链接，不显示状态、Provider、耗时或查询；每个底层节点原子和 `toolCallId` 仍独立可审计，后续思考不能回填旧行。
 - Milvus 位于 D 盘，证据按租户、访客、项目、记忆类型与 embedding 版本过滤；失败发布 degraded，不阻断主搜索。
 - 真实验证与故障修复证据见 `docs/development/2026-07-28-006-langgraph-search-agent.md`。
+- 多渠道扩展、`xiaohongshu-mcp` 登录态读取、真实累计活动和最新 3100 运行证据见
+  `docs/development/2026-07-29-007-multichannel-search-agent.md`。最新完整运行
+  `run_1d33f93254cb41048d4d23f31efb749a` 产生 4 个真实小红书工具调用，并按交替
+  时序形成两段独立搜索聚合行。
 
 技术选型统一按“作用 -> 为什么选 -> 怎样配置 -> 如何验证”阅读。框架和模型都是实现手段，不是目标；如果后续评测证明别的组件更合适，只要保持合同、数据边界和验收标准不变，就可以在独立 Feature 中替换。
 
@@ -2465,7 +2469,7 @@ Key 只允许出现在 `config/*.local.json` 或生产 Secret Manager 渲染的�
 
 #### 19.1 本地开发拓扑与启动顺序
 
-作用：让第一次接手的人知道先启动什么、每个端口做什么，并避免把内部服务直接暴露给浏览器。下表是 Issue #7 完成后的当前 Compose 拓扑；浏览器只访问 3100，其他宿主机端口均绑定 loopback。
+作用：让第一次接手的人知道先启动什么、每个端口做什么，并避免把内部服务直接暴露给浏览器。下表是 Issue #8 当前技术验收后的 Compose 拓扑；浏览器只访问 3100，其他已发布的宿主机端口均绑定 loopback，小红书 MCP 不发布端口。
 
 | 服务 | 建议本地地址 | 用途 | 谁可以访问 |
 | --- | --- | --- | --- |
@@ -2473,10 +2477,11 @@ Key 只允许出现在 `config/*.local.json` 或生产 Secret Manager 渲染的�
 | Next.js mock | `http://localhost:3110` | Playwright 确定性 fixture | 仅本地测试 |
 | Search Agent API | 容器内 `8100`；宿主机 `http://127.0.0.1:18100` | FastAPI/LangGraph 内部服务与只读健康检查 | Next BFF 和本地验收 |
 | PostgreSQL/pgvector | 容器内 `5432`；宿主机 `127.0.0.1:15432` | 业务事实、事件、checkpoint 和工具幂等账本 | Next、Agent、迁移工具 |
-| Milvus | 容器内 `19530`；宿主机 `127.0.0.1:29530` | 按作用域过滤的 Evidence 召回 | Search Agent 与运维工具 |
+| Milvus | 仅 `agent-milvus` 私网内 `19530` | 按作用域过滤的 Evidence 召回 | Search Agent 与容器内运维工具 |
 | MinIO / etcd | 仅 `agent-milvus` 内部网络 | Milvus 对象与元数据存储 | Milvus |
+| xiaohongshu-mcp | 容器内 `18060`；无宿主机端口 | 用户授权登录态的搜索、笔记详情和主页读取 | 仅 Search Agent 私网 |
 
-当前启动顺序由 `deploy/compose.yaml` 的健康依赖执行：准备 `config/*.local.json` 与 `config/deploy.local.env` -> PostgreSQL、etcd、MinIO -> Milvus -> Search Agent -> 3100 Web。Search Agent 用 `http://127.0.0.1:18100/health` 汇总 checkpointer、Provider 与 Milvus 状态；3110 单独启动并强制 mock，不连接真实 Provider。PostgreSQL 不可达时 Agent fail-closed；Milvus 不可达时明确 degraded，主搜索继续运行。
+当前启动顺序由 `deploy/compose.yaml` 的健康依赖执行：准备 `config/*.local.json` 与 `config/deploy.local.env` -> PostgreSQL、etcd、MinIO 与 xiaohongshu-mcp -> Milvus -> Search Agent -> 3100 Web。Search Agent 用 `http://127.0.0.1:18100/health` 汇总 checkpointer、Provider 与 Milvus 状态；3110 单独启动并强制 mock，不连接真实 Provider。PostgreSQL 不可达时 Agent fail-closed；Milvus 不可达时明确 degraded，主搜索继续运行；小红书登录态不可用时该渠道降级公开索引且保留真实限制。
 
 真实 LangGraph 服务接入后建议增加统一的只读健康汇总：配置版本、数据库 migration、对象存储、checkpointer、Provider capability 和 worker lease 是否就绪；只显示状态和版本，不返回连接串、Key、内部 Prompt 或外部服务凭据。
 
@@ -2597,14 +2602,14 @@ Trace 不是业务事实源：trace 丢失不能改变 operation、Saga、Outbox
 | 能力 | 当前状态 | 已有事实 | 仍需补齐 |
 | --- | --- | --- | --- |
 | 模型 API 与基础对话 | 已完成 | DeepSeek 真实调用、SSE、模型选择、停止、后台继续和 PostgreSQL 持久化均有验收证据 | 统一模型端口、逐节点 usage/价格版本和结构化调用 |
-| 基础 Prompt 与身份 | 部分完成 | 已拼接 system/history/project memory/current input，模型身份来自真实 Provider 配置 | 节点化 Prompt、Few-shot 版本、注入隔离、严格结构化输出 |
+| 基础 Prompt 与身份 | 已形成生产基础 | 六类 LangGraph Agent 使用版本化 Prompt 和严格结构化输出；模型身份来自真实 Provider 配置 | 持续扩充注入评测、Few-shot 与 Gold case |
 | 会话上下文与短期记忆 | 部分完成 | 同会话历史、同项目跨会话召回、项目隔离和字符预算已实现 | Token 级预算、结构化摘要、压缩/引用/丢弃策略、Context Window UI |
 | 项目长期记忆 | 基础可用 | 成功交换可跨同项目会话召回，跨项目隔离 | 只写已核验事实、候选晋升、向量混合召回、TTL/删除传播和移动审计 |
-| 可见 Agent 交互 | 实施中 | 过程、计划、核验、工具、审批、引导的测试预览已建立 | 修正命令幂等与停止，再完成 FIFO、上下文/费用和恢复视图 |
-| 真实 Agent 循环 | 未开始 | 当前生产仍以一次主要模型调用为核心 | 意图路由、真实节点、LangGraph、checkpoint、interrupt、有限循环 |
-| 真实工具与搜索 | 未开始 | 只有测试 fixture，不代表生产发生过工具调用 | Tool Gateway、原子工具、搜索、抓取、审批、Operation Ledger |
-| RAG、证据和引用 | 未开始 | pgvector 表结构已准备，但未做语义检索 | 切分、embedding、混合召回、重排、证据账本、声明级引用 |
-| 反思、核验和修复 | 未开始 | 现有“思考摘要”不是独立核验节点 | 结构化 verifier、客观检查器、一次受限修复和部分结果 |
+| 可见 Agent 交互 | 已形成生产基础 | 3100 按真实事件显示思考、搜索、核验；当前活动展开、结束折叠；相邻同类归并并支持刷新恢复 | FIFO、Context Window、完整费用和审批执行仍待后续 |
+| 真实 Agent 循环 | 已完成基础闭环 | Supervisor、Planner、Researcher、Reflector、Writer、Verifier 已组成有界 StateGraph，并可按工具反馈自适应循环 | 持久 checkpoint 跨进程续跑、interrupt 与分布式 worker 加固 |
+| 真实工具与搜索 | Issue #8 待用户验收 | Web、X、小红书只读渠道、真实工具账本、候选/Evidence 分离和多轮补搜均已在 3100 验证 | 更多 Provider、写工具审批、平台配额与外部生产入口 |
+| RAG、证据和引用 | 基础可用 | 已读正文进入 Evidence、Writer/Verifier 引用；Milvus 在 D 盘按项目和版本隔离 | FTS+向量混合召回、rerank、声明级 locator 与离线评测 |
+| 反思、核验和修复 | 基础闭环已实现 | Reflector 可补搜，Verifier 可 research_more/rewrite/pass，触顶返回 partial；结构化修复全 run 最多一次 | 增加确定性声明检查器、冲突检测和核验 Gold case |
 | 多步事务可靠性 | 设计已记录 | 单库事务、原子工具、Saga、Outbox/Inbox、幂等和 unknown 已有设计 | 在真实工具链逐步实现并做故障注入 |
 
 #### 22.3 正确的能力依赖顺序
@@ -2730,12 +2735,35 @@ flowchart LR
 
 #### 22.5 当前正在执行的最小可见功能
 
-Issue #7“真实 LangGraph 多 Agent 搜索闭环与 3100 live 展示”已完成实现、技术验证并于 2026-07-28 获用户明确验收：
+当前唯一活动功能是 Issue #8“多渠道搜索 Agent、X/小红书与智能活动展示”，
+`Execution Gate: allowed`。实现和技术验证已完成，正在等待用户显式验收：
 
-1. **真实后端图与搜索闭环：已实现，待用户验收**。3100 已连接 Python LangGraph、Tavily、网页读取、Evidence、Verifier、PostgreSQL checkpoint/工具账本和可选 Milvus。
-2. **过程时序投影：已实现，待用户验收**。相邻同类活动连续段归并，核验与思考分型；真实验证呈现 `思考 → 搜索 → 思考 → 核验`，后续节点不回填旧行。
-3. **FIFO、Context Window 与完整费用面板：尚未开始**。它们不属于 Issue #7，不能在未验收前顺带开发。
-4. **下一功能：必须重新建门禁**。Issue #7 关闭、提交并推送后，才可按新的唯一 Issue 进入后续能力。
+1. **多渠道路由：已实现，待用户验收**。Supervisor/Planner 根据语义在 Web、
+   X、小红书间选择渠道；Reflector/Verifier 可用结构化 `{query, channel}`
+   发起互补检索。每次决策都会消费真实
+   `resultCount/evidenceCount/errorCode/limitation`，不是固定链路。
+2. **X 与小红书：已实现，待用户验收**。X 使用公开 status URL 发现并遵守
+   robots；小红书使用用户授权、Docker 私网隔离的只读
+   `xiaohongshu-mcp`，不可用时降级公开索引。Cookie、二维码和
+   `xsec_token` 不进入浏览器、事件、日志或模型工具消息。
+3. **智能活动交互：已实现，待用户验收**。当前活动自动展开并显示
+   “思考中 / 搜索中 / 核验中”；结束后折叠。只合并相邻同类活动，交替活动
+   在下方新开行；搜索数字由真实完成事件累加，来源展开为 LLM 基于真实候选
+   URL 润色的逐行文字。
+4. **稳定收口：已实现，待用户验收**。小红书完整浏览器检索串行化；工具调用
+   必须预留反思、写作、核验时间，触及时限时以
+   `RUN_TIME_RESERVE / partial` 收口，不把整个 run 拖成超时失败。
+5. **技术证据：已完成**。Search Agent 128 项、Web 325 项、3110
+   Playwright 16 项通过；3100 的真实小红书自适应搜索和真实停止场景分别
+   通过。用户再次确认登录后的
+   `run_1d33f93254cb41048d4d23f31efb749a` 保存 4 个真实
+   `xiaohongshu-mcp` 工具调用，前端按交替时序显示两段独立的
+   “10 条结果/5 个来源”和“10 条结果/6 个来源”；两次瞬时 500 均受限重试
+   成功。详细记录见
+   `docs/development/2026-07-29-007-multichannel-search-agent.md`。
+6. **验收门：仍生效**。用户明确回复“通过”前，不 stage、commit、push、
+   关闭 Issue 或开始下一功能。FIFO、Context Window、完整费用面板和公网域名
+   接入不在本次已验证事实中。
 
 #### 22.6 每个功能的 Definition of Done
 

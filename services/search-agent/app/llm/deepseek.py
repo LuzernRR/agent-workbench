@@ -57,6 +57,14 @@ class ModelUsage:
         }
 
 
+class StructuredOutputError(RuntimeError):
+    """严格函数输出在有界修复后仍无法通过 Schema。"""
+
+    def __init__(self, usage: ModelUsage) -> None:
+        super().__init__("模型结构化输出校验失败")
+        self.usage = usage
+
+
 @dataclass(frozen=True)
 class ResearchToolCall:
     id: str
@@ -166,7 +174,13 @@ async def invoke_structured[SchemaT: BaseModel](
                     "请只调用已提供的结构化输出函数，并严格满足所有字段、类型与枚举约束。"
                 )),
             ]
-    raise RuntimeError("模型结构化输出校验失败")
+    raise StructuredOutputError(ModelUsage(
+        input_tokens=sum(item.input_tokens for item in usages),
+        output_tokens=sum(item.output_tokens for item in usages),
+        total_tokens=sum(item.total_tokens for item in usages),
+        cost_usd=round(sum(item.cost_usd for item in usages), 8),
+        attempts=len(usages),
+    ))
 
 
 @cache
