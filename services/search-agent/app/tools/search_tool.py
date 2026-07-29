@@ -7,7 +7,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config.agent import AgentConfig
-from app.tools.channels.base import ChannelName, SourceProvenance
+from app.tools.channels.base import (
+    ChannelName,
+    ChannelProgressReporter,
+    SourceProvenance,
+)
 from app.tools.channels.registry import ChannelRegistry
 
 
@@ -112,12 +116,18 @@ SEARCH_TOOL_SPEC: dict[str, Any] = {
 
 
 async def execute_search_tool(
-    arguments: SearchToolInput, config: AgentConfig
+    arguments: SearchToolInput,
+    config: AgentConfig,
+    progress: ChannelProgressReporter | None = None,
+    *,
+    xiaohongshu_public_only: bool = False,
 ) -> SearchExecutionResult:
     outcome = await ChannelRegistry(config).execute(
         arguments.channel,
         arguments.query,
         min(arguments.max_results, config.graph.max_results_per_call),
+        progress=progress,
+        xiaohongshu_public_only=xiaohongshu_public_only,
     )
     if not outcome.ok:
         return SearchExecutionResult(

@@ -27,8 +27,8 @@ def hit(title: str = "LangGraph 入门") -> SearchHit:
     "url,allowed",
     [
         ("https://www.xiaohongshu.com/explore/abc123?xsec_token=signed", True),
-        ("https://www.xiaohongshu.com/user/profile/abc123", True),
-        ("https://www.xiaohongshu.com/goods-detail/abc123", True),
+        ("https://www.xiaohongshu.com/user/profile/abc123", False),
+        ("https://www.xiaohongshu.com/goods-detail/abc123", False),
         ("http://www.xiaohongshu.com/explore/abc123", False),
         ("https://evil.example/explore/abc123", False),
         ("https://www.xiaohongshu.com/search_result?keyword=test", False),

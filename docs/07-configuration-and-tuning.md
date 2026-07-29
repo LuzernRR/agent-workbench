@@ -18,7 +18,7 @@
 ```dotenv
 APP_ENV=development
 APP_LOG_LEVEL=INFO
-APP_PUBLIC_ORIGIN=http://localhost:3100
+APP_PUBLIC_ORIGIN=https://luzern.cc.cd
 
 DATABASE_URL=postgresql://workbench:local-password@localhost:5432/workbench
 DATABASE_POOL_MIN_SIZE=2
@@ -427,4 +427,3 @@ context:
 7. 指标恶化时切回上一版本。
 
 配置与提示词和代码一样需要评审、测试和回滚。
-

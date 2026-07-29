@@ -100,7 +100,10 @@ function sourcePresentationsValue(value: unknown): Array<{ url: string; text: st
     const candidate = item as { url?: unknown; text?: unknown };
     if (typeof candidate.url !== "string" || typeof candidate.text !== "string") return [];
     const text = candidate.text.trim().slice(0, 180);
-    if (!text) return [];
+    if (
+      !text
+      || /(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明))/u.test(text)
+    ) return [];
     try {
       const url = new URL(candidate.url);
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return [];
@@ -109,6 +112,34 @@ function sourcePresentationsValue(value: unknown): Array<{ url: string; text: st
       return [];
     }
   });
+}
+
+function safeSourceUrl(value: unknown) {
+  if (typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function mergeSources(
+  current: ToolSource[] | undefined,
+  incoming: ToolSource[]
+): ToolSource[] {
+  const sources = new Map((current || []).map((source) => [source.url, source]));
+  for (const source of incoming) {
+    const previous = sources.get(source.url);
+    if (previous?.verified && !source.verified) continue;
+    sources.set(source.url, {
+      ...previous,
+      ...source,
+      displayText: previous?.displayText || source.displayText
+    });
+  }
+  return [...sources.values()];
 }
 
 function planValue(value: unknown): PlanStep[] | null {
@@ -153,8 +184,14 @@ function settleRunningTools(state: AgentThreadState, runId: string) {
   return {
     items: Object.fromEntries(Object.entries(state.items).map(([id, item]) => [
       id,
-      item.kind === "tool" && item.runId === runId && ["preparing", "running", "waiting"].includes(item.status)
-        ? { ...item, status: "unknown" as const, summary: "工具结果状态未知", error: item.error || "OUTCOME_UNKNOWN" }
+      item.kind === "tool" && item.runId === runId
+        ? {
+            ...item,
+            sourcePresentationActive: false,
+            ...(["preparing", "running", "waiting"].includes(item.status)
+              ? { status: "unknown" as const, summary: "工具结果状态未知", error: item.error || "OUTCOME_UNKNOWN" }
+              : {})
+          }
         : item
     ]))
   };
@@ -223,6 +260,31 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         iteration: typeof payload.iteration === "number" ? numberValue(payload.iteration) : undefined
       };
       const existing = current.paragraphs.findIndex((candidate) => candidate.id === paragraphId);
+      const paragraphs = existing < 0
+        ? [...current.paragraphs, paragraph]
+        : current.paragraphs.map((candidate, index) => index === existing ? paragraph : candidate);
+      return { ...next, items: { ...next.items, [id]: { ...current, paragraphs, status: "streaming" } } };
+    }
+    case "thinking.delta": {
+      const id = stringValue(payload.thinkingId, `thinking:${event.runId}`);
+      const current = next.items[id];
+      if (!current || current.kind !== "thinking") return next;
+      const paragraphId = stringValue(payload.paragraphId, `${id}:detail`);
+      const delta = stringValue(payload.delta);
+      if (!delta) return next;
+      const existing = current.paragraphs.findIndex((candidate) => candidate.id === paragraphId);
+      const paragraph = existing < 0
+        ? {
+            id: paragraphId,
+            text: delta,
+            agent: stringValue(payload.agent) || undefined,
+            node: stringValue(payload.node) || undefined,
+            iteration: typeof payload.iteration === "number" ? numberValue(payload.iteration) : undefined
+          }
+        : {
+            ...current.paragraphs[existing],
+            text: current.paragraphs[existing].text + delta
+          };
       const paragraphs = existing < 0
         ? [...current.paragraphs, paragraph]
         : current.paragraphs.map((candidate, index) => index === existing ? paragraph : candidate);
@@ -332,12 +394,33 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
       const sourcePresentations = new Map(
         sourcePresentationsValue(payload.sourcePresentations).map((item) => [item.url, item.text])
       );
-      const nextSources = sourcePresentations.size && current.sources
-        ? current.sources.map((source) => ({
+      const sourcePresentationUrls = new Set(
+        Array.isArray(payload.sourcePresentationUrls)
+          ? payload.sourcePresentationUrls.map(safeSourceUrl).filter(Boolean)
+          : []
+      );
+      const currentSources = payload.sourcePresentationActive === true && sourcePresentationUrls.size && current.sources
+        ? current.sources.map((source) => source.verified && sourcePresentationUrls.has(source.url)
+          ? { ...source, displayText: undefined }
+          : source)
+        : current.sources;
+      const nextSources = sourcePresentations.size && currentSources
+        ? currentSources.map((source) => ({
             ...source,
-            displayText: sourcePresentations.get(source.url) || source.displayText
+            displayText: source.verified
+              ? sourcePresentations.get(source.url) || source.displayText
+              : source.displayText
           }))
-        : sourcesValue(payload.sources) || current.sources;
+        : (() => {
+            const incoming = sourcesValue(payload.sources);
+            return incoming ? mergeSources(currentSources, incoming) : currentSources;
+          })();
+      const nextResultCount = typeof payload.resultCount === "number"
+        ? Math.max(current.resultCount || 0, numberValue(payload.resultCount))
+        : current.resultCount;
+      const nextEvidenceCount = typeof payload.evidenceCount === "number"
+        ? Math.max(current.evidenceCount || 0, numberValue(payload.evidenceCount))
+        : current.evidenceCount;
       return {
         ...next,
         items: {
@@ -349,9 +432,12 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
             channel: ["web", "x", "xiaohongshu"].includes(stringValue(payload.channel)) ? stringValue(payload.channel) as ToolItem["channel"] : current.channel,
             query: stringValue(payload.query, current.query) || undefined,
             provider: stringValue(payload.provider, current.provider) || undefined,
-            resultCount: typeof payload.resultCount === "number" ? numberValue(payload.resultCount) : current.resultCount,
-            evidenceCount: typeof payload.evidenceCount === "number" ? numberValue(payload.evidenceCount) : current.evidenceCount,
+            resultCount: nextResultCount,
+            evidenceCount: nextEvidenceCount,
             sources: nextSources,
+            sourcePresentationActive: typeof payload.sourcePresentationActive === "boolean"
+              ? payload.sourcePresentationActive
+              : current.sourcePresentationActive,
             cached: typeof payload.cached === "boolean" ? payload.cached : current.cached,
             retryable: typeof payload.retryable === "boolean" ? payload.retryable : current.retryable,
             progress,
@@ -360,6 +446,29 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
             durationMs: payloadDuration ?? current.durationMs ?? inferredDuration,
             error: stringValue(payload.error, current.error)
           }
+        }
+      };
+    }
+    case "tool.source.delta": {
+      const toolCallId = stringValue(payload.toolCallId);
+      const id = `tool:${toolCallId}`;
+      const current = next.items[id];
+      if (!current || current.kind !== "tool") return next;
+      const url = safeSourceUrl(payload.url);
+      const delta = stringValue(payload.delta);
+      if (!url || !delta || !current.sources) return next;
+      const sources = current.sources.map((source) => {
+        if (!source.verified || source.url !== url) return source;
+        return {
+          ...source,
+          displayText: `${source.displayText || ""}${delta}`.slice(0, 180)
+        };
+      });
+      return {
+        ...next,
+        items: {
+          ...next.items,
+          [id]: { ...current, sources }
         }
       };
     }

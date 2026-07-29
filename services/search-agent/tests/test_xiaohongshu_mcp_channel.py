@@ -24,6 +24,16 @@ from app.tools.channels.xiaohongshu_mcp import (
 ORIGIN = "http://xiaohongshu-mcp:18060"
 
 
+def logged_in_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {"is_logged_in": True},
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_authenticated_search_reads_details_without_exposing_tokens() -> None:
     requests: list[tuple[str, str, dict[str, Any]]] = []
@@ -31,6 +41,8 @@ async def test_authenticated_search_reads_details_without_exposing_tokens() -> N
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
         requests.append((request.method, request.url.path, body))
+        if request.url.path == "/api/v1/login/status":
+            return logged_in_response()
         if request.url.path == "/api/v1/feeds/search":
             assert body == {"keyword": "LangGraph"}
             return httpx.Response(
@@ -99,7 +111,12 @@ async def test_authenticated_search_reads_details_without_exposing_tokens() -> N
         origin=ORIGIN,
         transport=httpx.MockTransport(handler),
     )
-    outcome = await channel.search("LangGraph", 5)
+    progress_events: list[Any] = []
+    outcome = await channel.search(
+        "LangGraph",
+        5,
+        progress=progress_events.append,
+    )
 
     assert outcome.ok is True
     assert outcome.provider == "xiaohongshu-mcp"
@@ -112,10 +129,89 @@ async def test_authenticated_search_reads_details_without_exposing_tokens() -> N
     public_payload = outcome.model_dump_json()
     assert "signed-token-secret-123" not in public_payload
     assert "xsec" not in public_payload.casefold()
+    assert [
+        (item.result_count, item.evidence_count)
+        for item in progress_events
+    ] == [(1, 0), (1, 1)]
+    assert progress_events[0].source is None
+    assert progress_events[1].source is not None
+    assert "signed-token-secret-123" not in json.dumps(
+        [item.model_dump(mode="json") for item in progress_events]
+    )
     assert [item[:2] for item in requests] == [
+        ("GET", "/api/v1/login/status"),
         ("POST", "/api/v1/feeds/search"),
         ("POST", "/api/v1/feeds/detail"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_title_and_topic_tags_do_not_count_as_substantive_evidence() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/login/status":
+            return logged_in_response()
+        if request.url.path == "/api/v1/feeds/search":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "feeds": [{
+                            "id": "feed_tags_only",
+                            "xsecToken": "signed-token-tags-only",
+                            "modelType": "note",
+                            "noteCard": {
+                                "displayTitle": "LangGraph 教程",
+                                "user": {"nickname": "测试作者"},
+                            },
+                        }],
+                        "count": 1,
+                    },
+                },
+            )
+        if request.url.path == "/api/v1/feeds/detail":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "feed_id": "feed_tags_only",
+                        "data": {
+                            "note": {
+                                "noteId": "feed_tags_only",
+                                "title": "LangGraph 教程",
+                                "desc": (
+                                    "#LangGraph[话题]# #AI Agent[话题]# "
+                                    "#大模型[话题]# @科技薯"
+                                ),
+                                "user": {"nickname": "测试作者"},
+                            },
+                        },
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    channel = XiaohongshuMcpChannel(
+        agent_config(),
+        origin=ORIGIN,
+        transport=httpx.MockTransport(handler),
+    )
+    progress_events: list[Any] = []
+    outcome = await channel.search(
+        "LangGraph",
+        5,
+        progress=progress_events.append,
+    )
+
+    assert len(outcome.results) == 1
+    assert outcome.results[0].verified is False
+    assert outcome.evidence == []
+    assert outcome.results[0].limitation == "登录态详情缺少可用于回答的实质正文"
+    assert [
+        (item.result_count, item.evidence_count)
+        for item in progress_events
+    ] == [(1, 0)]
 
 
 @pytest.mark.asyncio
@@ -202,7 +298,45 @@ async def test_login_required_degrades_to_public_fallback() -> None:
     assert "AUTH_REQUIRED" in (outcome.results[0].limitation or "")
     assert outcome.results[0].verified is False
     assert outcome.evidence == []
-    assert paths == ["/api/v1/feeds/search"]
+    assert paths == ["/api/v1/login/status"]
+
+
+@pytest.mark.asyncio
+async def test_logged_out_status_skips_slow_feed_search() -> None:
+    paths: list[str] = []
+
+    class PublicFallback:
+        async def search(self, query: str, max_results: int) -> ChannelOutcome:
+            return ChannelOutcome(
+                ok=True,
+                channel="xiaohongshu",
+                provider="test-public-index",
+                query=query,
+            )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {"is_logged_in": False},
+            },
+        )
+
+    channel = XiaohongshuMcpChannel(
+        agent_config(),
+        origin=ORIGIN,
+        transport=httpx.MockTransport(handler),
+        public_fallback=PublicFallback(),  # type: ignore[arg-type]
+    )
+
+    outcome = await channel.search("旅行攻略", 5)
+
+    assert outcome.provider == (
+        "xiaohongshu-mcp-fallback[AUTH_REQUIRED]+test-public-index"
+    )
+    assert paths == ["/api/v1/login/status"]
 
 
 @pytest.mark.asyncio
@@ -230,12 +364,102 @@ async def test_transient_search_failure_is_retried_without_status_preflight() ->
 
 
 @pytest.mark.asyncio
+async def test_page_deadline_failure_is_classified_and_not_retried() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            500,
+            json={
+                "error": "搜索Feeds失败",
+                "code": "SEARCH_FEEDS_FAILED",
+                "details": "context.deadlineExceededError",
+            },
+        )
+
+    client = XiaohongshuMcpClient(
+        ORIGIN,
+        timeout_ms=10_000,
+        max_attempts=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(XiaohongshuMcpError) as raised:
+        await client.search_feeds("超时测试", 5)
+
+    assert raised.value.code == "MCP_TIMEOUT"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_captcha_failure_is_classified_and_not_retried() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            500,
+            json={
+                "error": "搜索Feeds失败",
+                "code": "SEARCH_FEEDS_FAILED",
+                "details": "小红书要求安全验证",
+            },
+        )
+
+    client = XiaohongshuMcpClient(
+        ORIGIN,
+        timeout_ms=10_000,
+        max_attempts=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(XiaohongshuMcpError) as raised:
+        await client.search_feeds("安全验证测试", 5)
+
+    assert raised.value.code == "CAPTCHA_REQUIRED"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_public_strategy_after_failure_does_not_touch_mcp_again() -> None:
+    class PublicFallback:
+        async def search(self, query: str, max_results: int) -> ChannelOutcome:
+            return ChannelOutcome(
+                ok=True,
+                channel="xiaohongshu",
+                provider="test-public-index",
+                query=query,
+            )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"MCP circuit should be open: {request.url.path}")
+
+    channel = XiaohongshuMcpChannel(
+        agent_config(),
+        origin=ORIGIN,
+        transport=httpx.MockTransport(handler),
+        public_fallback=PublicFallback(),  # type: ignore[arg-type]
+    )
+
+    outcome = await channel.search_public_after_mcp_failure("旅行攻略", 5)
+
+    assert outcome.provider == (
+        "xiaohongshu-mcp-fallback[MCP_CIRCUIT_OPEN]+test-public-index"
+    )
+
+
+@pytest.mark.asyncio
 async def test_complete_browser_search_sessions_are_serialized() -> None:
     active = 0
     peak = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal active, peak
+        if request.url.path == "/api/v1/login/status":
+            return logged_in_response()
         assert request.url.path == "/api/v1/feeds/search"
         active += 1
         peak = max(peak, active)
@@ -388,6 +612,8 @@ async def test_detail_reads_respect_configured_page_budget() -> None:
     detail_paths: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/login/status":
+            return logged_in_response()
         if request.url.path == "/api/v1/feeds/search":
             feeds = [
                 {
@@ -421,7 +647,7 @@ async def test_detail_reads_respect_configured_page_budget() -> None:
                             "note": {
                                 "noteId": body["feed_id"],
                                 "title": f"详情 {body['feed_id']}",
-                                "desc": "已读取正文",
+                                "desc": "这是一段已经读取且可用于验证的正文内容。",
                                 "user": {"nickname": "作者"},
                             }
                         },

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
 import type { AgentEvent } from "@/lib/agent-events/types";
-import { selectConversationTimelineItems, selectSearchSegmentTools } from "./conversation-view-model";
+import { selectConversationTimelineItems, selectCurrentActivityIds, selectSearchSegmentTools } from "./conversation-view-model";
 
 const base = {
   projectId: null,
@@ -44,6 +44,27 @@ describe("conversation search projection", () => {
     ]);
 
     expect(selectConversationTimelineItems(state).filter((item) => item.kind === "tool")).toHaveLength(2);
+  });
+
+  it("连续思考完成后仍视为当前步骤，直到搜索真正出现", () => {
+    const thinkingState = reduceAgentEvents(createEmptyThreadState(null, base.threadId), [
+      event(1, "thinking.started", { thinkingId: "thinking-1", activityKind: "thinking" }),
+      event(2, "thinking.paragraph", { thinkingId: "thinking-1", paragraphId: "p-1", text: "第一段" }),
+      event(3, "thinking.completed", { thinkingId: "thinking-1" }),
+      event(4, "thinking.started", { thinkingId: "thinking-2", activityKind: "thinking" }),
+      event(5, "thinking.paragraph", { thinkingId: "thinking-2", paragraphId: "p-2", text: "第二段" }),
+      event(6, "thinking.completed", { thinkingId: "thinking-2" })
+    ]);
+    const thinkingTimeline = selectConversationTimelineItems(thinkingState);
+
+    expect(thinkingTimeline).toHaveLength(1);
+    expect([...selectCurrentActivityIds(thinkingTimeline)]).toEqual([thinkingTimeline[0].id]);
+
+    const searchState = reduceAgentEvents(thinkingState, [
+      event(7, "tool.started", { toolCallId: "search-1", name: "网页搜索", query: "新查询" })
+    ]);
+    const searchTimeline = selectConversationTimelineItems(searchState);
+    expect([...selectCurrentActivityIds(searchTimeline)]).toEqual([searchTimeline[1].id]);
   });
 
   it("只合并相邻的同类活动，保留思考-搜索-思考-核验-搜索-思考时序", () => {

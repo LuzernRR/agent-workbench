@@ -9,7 +9,7 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report-live" }]],
   use: {
-    baseURL: process.env.PLAYWRIGHT_LIVE_BASE_URL || "http://127.0.0.1:3100",
+    baseURL: process.env.PLAYWRIGHT_LIVE_BASE_URL || "http://127.0.0.1:3000",
     locale: "zh-CN",
     timezoneId: "Asia/Shanghai",
     trace: "retain-on-failure",
@@ -17,7 +17,7 @@ export default defineConfig({
     video: "retain-on-failure"
   },
   projects: [{
-    name: "3100-live",
+    name: "production-live",
     use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 960 } }
   }]
 });

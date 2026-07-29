@@ -34,9 +34,9 @@ describe("Search Agent v1 白名单投影", () => {
     const reflected = mapSearchAgentEvent(source({ type: "node.completed", node: "reflect", nodeRunId: "reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", agent: "reflector", iteration: 1, durationMs: 20, publicSummary: "官方来源已覆盖核心用法" }), "run_one");
     expect(planned.events).toHaveLength(3);
     expect(planned.events[0].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", activityKind: "thinking" });
-    expect(planned.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", text: "将搜索官方规范与当前示例", agent: "planner" });
-    expect(replanned.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_cccccccccccccccccccccccccccccccc", text: "补充检索安装与兼容信息", agent: "planner" });
-    expect(reflected.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", text: "官方来源已覆盖核心用法", agent: "reflector" });
+    expect(planned.events[1]).toMatchObject({ type: "thinking.delta", payload: { thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", delta: "将搜索官方规范与当前示例", agent: "planner" } });
+    expect(replanned.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_cccccccccccccccccccccccccccccccc", delta: "补充检索安装与兼容信息", agent: "planner" });
+    expect(reflected.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", delta: "官方来源已覆盖核心用法", agent: "reflector" });
     expect(planned.events[1].payload.thinkingId).not.toBe(replanned.events[1].payload.thinkingId);
     expect(JSON.stringify([planned, replanned, reflected])).not.toContain("【");
   });
@@ -64,7 +64,7 @@ describe("Search Agent v1 白名单投影", () => {
       query: "LangGraph 官方文档",
       resultCount: 1,
       evidenceCount: 1,
-      sources: [{ title: "LangGraph", url: "https://docs.langchain.com/oss/python/langgraph", verified: true, channel: "web", author: "LangChain", publishedAt: undefined, limitation: undefined }],
+      sources: [{ title: "LangGraph", url: "https://docs.langchain.com/oss/python/langgraph", verified: true, channel: "web", author: "LangChain", publishedAt: undefined }],
       sourceEventId: "stream_test_000001",
       sourceStreamId: "stream_test",
       sourceStreamSeq: 1,
@@ -74,19 +74,93 @@ describe("Search Agent v1 白名单投影", () => {
     expect(JSON.stringify(projection)).not.toMatch(/raw|reasoning_content|providerBody/u);
   });
 
+  it("把真实工具进度投影为单调计数，并只流入已读来源", () => {
+    const candidate = mapSearchAgentEvent(source({
+      type: "tool.progress",
+      toolCallId: "call_one",
+      toolName: "web_search",
+      query: "LangGraph 官方文档",
+      channel: "web",
+      provider: "tavily",
+      resultCount: 1,
+      evidenceCount: 0,
+      source: null
+    }));
+    const evidence = mapSearchAgentEvent(source({
+      type: "tool.progress",
+      toolCallId: "call_one",
+      toolName: "web_search",
+      query: "LangGraph 官方文档",
+      channel: "web",
+      provider: "tavily",
+      resultCount: 1,
+      evidenceCount: 1,
+      source: { channel: "web", provider: "tavily", query: "LangGraph 官方文档", title: "LangGraph", url: "https://docs.langchain.com/oss/python/langgraph", snippet: "不进入持久事件", verified: true, author: null, published_at: null, metrics: {}, limitation: null, provenance }
+    }));
+    expect(candidate.events[0]).toEqual(expect.objectContaining({
+      type: "tool.progress",
+      payload: expect.objectContaining({ resultCount: 1, evidenceCount: 0, sources: [] })
+    }));
+    expect(evidence.events[0]).toEqual(expect.objectContaining({
+      type: "tool.progress",
+      payload: expect.objectContaining({
+        resultCount: 1,
+        evidenceCount: 1,
+        sources: [expect.objectContaining({ url: "https://docs.langchain.com/oss/python/langgraph", verified: true })]
+      })
+    }));
+    expect(JSON.stringify(evidence)).not.toContain("不进入持久事件");
+  });
+
   it("把 Reflector 的结构化来源说明映射到原工具行", () => {
     const projection = mapSearchAgentEvent(source({
       type: "tool.presented",
       toolCallId: "call_one",
       sources: [{ url: "https://example.com/source", text: "该来源聚焦状态图中的工具循环。" }]
     }));
-    expect(projection.events).toEqual([{ type: "tool.updated", payload: expect.objectContaining({
-      toolCallId: "call_one",
-      sourcePresentations: [{
-        url: "https://example.com/source",
-        text: "该来源聚焦状态图中的工具循环。"
-      }]
-    }) }]);
+    expect(projection.events).toEqual([
+      {
+        type: "tool.updated",
+        payload: expect.objectContaining({
+          toolCallId: "call_one",
+          sourcePresentationActive: true,
+          sourcePresentationUrls: ["https://example.com/source"]
+        })
+      },
+      {
+        type: "tool.source.delta",
+        payload: expect.objectContaining({
+          toolCallId: "call_one",
+          url: "https://example.com/source",
+          delta: "该来源聚焦状态图中的工具循环。"
+        })
+      },
+      {
+        type: "tool.updated",
+        payload: expect.objectContaining({
+          toolCallId: "call_one",
+          sourcePresentationActive: false
+        })
+      }
+    ]);
+  });
+
+  it("丢弃未读取、未核验等无效来源说明", () => {
+    for (const text of [
+      "但帖子详情/正文内容未读取。",
+      "仅发现公开候选，尚未核验。",
+      "受详情读取上限限制，未加载正文。",
+      "正文仅包含标签，无有效对比内容。",
+      "该笔记介绍了 LangGraph，但未展开具体对比说明。",
+      "该教程未涉及 LangChain 与 LangSmith 的区别。"
+    ]) {
+      const projection = mapSearchAgentEvent(source({
+        type: "tool.presented",
+        toolCallId: "call_one",
+        sources: [{ url: "https://example.com/source", text }]
+      }));
+      expect(projection.events).toEqual([]);
+    }
   });
 
   it("诚实映射 partial、failed、unknown 与 stopped", () => {
@@ -120,8 +194,8 @@ describe("Search Agent v1 白名单投影", () => {
       })
     }));
     expect(projection.events[1]).toEqual(expect.objectContaining({
-      type: "thinking.paragraph",
-      payload: expect.objectContaining({ text: "引用格式需要修正", agent: "verifier", node: "verify" })
+      type: "thinking.delta",
+      payload: expect.objectContaining({ delta: "引用格式需要修正", agent: "verifier", node: "verify" })
     }));
   });
 
@@ -145,7 +219,30 @@ describe("Search Agent v1 白名单投影", () => {
     const started = mapSearchAgentEvent(source({ type: "tool.started", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", cached: false }));
     const failed = mapSearchAgentEvent(source({ type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }));
     expect(started.events[0].payload).toMatchObject({ name: "未知工具请求", summary: "正在拦截未注册工具请求" });
-    expect(failed.events[0].payload).toMatchObject({ summary: "未知工具请求已被阻止", error: "UNKNOWN_TOOL" });
+    expect(failed.events[0].payload).toMatchObject({ summary: "未知工具请求已被阻止", error: "UNKNOWN_TOOL", resultCount: 0, evidenceCount: 0 });
+  });
+
+  it("失败工具仍结算已经真实观察到的累计数量", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "tool.failed",
+      toolCallId: "call_partial",
+      toolName: "web_search",
+      query: "LangGraph",
+      channel: "xiaohongshu",
+      provider: "xiaohongshu-mcp",
+      reasonCode: "RUN_TIME_RESERVE",
+      message: "为最终核验保留时间",
+      retryable: false,
+      resultCount: 5,
+      evidenceCount: 1
+    }));
+
+    expect(projection.events[0].payload).toMatchObject({
+      toolCallId: "call_partial",
+      resultCount: 5,
+      evidenceCount: 1,
+      error: "RUN_TIME_RESERVE"
+    });
   });
 
   it("node.failed 不生成固定思考文案，交给 run.failed 统一结算 error", () => {

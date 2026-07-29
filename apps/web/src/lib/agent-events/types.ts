@@ -4,6 +4,7 @@ export const AGENT_EVENT_TYPES = [
   "run.status",
   "thinking.started",
   "thinking.paragraph",
+  "thinking.delta",
   "thinking.completed",
   "message.started",
   "message.reset",
@@ -13,6 +14,7 @@ export const AGENT_EVENT_TYPES = [
   "tool.started",
   "tool.updated",
   "tool.progress",
+  "tool.source.delta",
   "tool.completed",
   "tool.failed",
   "approval.required",
@@ -112,6 +114,7 @@ export type ToolItem = {
   resultCount?: number;
   evidenceCount?: number;
   sources?: ToolSource[];
+  sourcePresentationActive?: boolean;
   cached?: boolean;
   retryable?: boolean;
   input?: unknown;

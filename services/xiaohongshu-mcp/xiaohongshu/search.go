@@ -88,9 +88,7 @@ type SearchAction struct {
 }
 
 func NewSearchAction(page *rod.Page) *SearchAction {
-	pp := page.Timeout(60 * time.Second)
-
-	return &SearchAction{page: pp}
+	return &SearchAction{page: page}
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
@@ -100,23 +98,34 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		return nil, err
 	}
 
-	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
-	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
-	page := s.page.Context(ctx).Timeout(60 * time.Second)
+	page := s.page.Context(ctx)
 
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
+	if err := page.Timeout(10 * time.Second).Navigate(searchURL); err != nil {
+		return nil, fmt.Errorf("打开搜索页失败: %w", err)
+	}
 	// 搜索页有持续的埋点和推荐请求，等待整个页面进入 network-idle 会把
 	// 已经到达的搜索数据误判为超时。这里只等待本次读取真正依赖的 feeds
-	// 状态；仍受上面的 60 秒页面 deadline 约束。
-	page.MustWait(`() => {
-		const feeds = window.__INITIAL_STATE__?.search?.feeds;
-		if (!feeds) return false;
-		const value = feeds.value !== undefined ? feeds.value : feeds._value;
-		// 搜索页会先创建一个空的响应式数组，再异步写入结果。只判断字段
-		// 存在会在空数组阶段立即返回，令调用方误报“搜索成功但 0 条”。
-		return Array.isArray(value) && value.length > 0;
-	}`)
+	// 状态；若平台跳转到安全验证则立即返回，让 LangGraph 切换公开/Web
+	// 策略，而不是在验证码页面空等 30 秒。
+	if err := rod.Try(func() {
+		page.Timeout(30 * time.Second).MustWait(`() => {
+			if (window.location.pathname.startsWith("/website-login/captcha")) {
+				return true;
+			}
+			const feeds = window.__INITIAL_STATE__?.search?.feeds;
+			if (!feeds) return false;
+			const value = feeds.value !== undefined ? feeds.value : feeds._value;
+			// 搜索页会先创建一个空的响应式数组，再异步写入结果。只判断字段
+			// 存在会在空数组阶段立即返回，令调用方误报“搜索成功但 0 条”。
+			return Array.isArray(value) && value.length > 0;
+		}`)
+	}); err != nil {
+		return nil, fmt.Errorf("等待搜索结果超时: %w", err)
+	}
+	if page.MustEval(`() => window.location.pathname.startsWith("/website-login/captcha")`).Bool() {
+		return nil, fmt.Errorf("小红书要求安全验证")
+	}
 
 	if len(pending) > 0 {
 		// 悬停在筛选按钮上展开面板

@@ -11,7 +11,7 @@ import { ApprovalPart } from "./ApprovalPart";
 import { AgentComposer } from "@/components/workbench/composer/AgentComposer";
 import { ImagePreview } from "@/components/workbench/attachments/ImagePreview";
 import { ActivityRow, SearchActivitySummary } from "@/components/workbench/activity-row/ActivityRow";
-import { isSearchToolItem, selectConversationTimelineItems, selectSearchSegmentTools } from "./conversation-view-model";
+import { isSearchToolItem, selectConversationTimelineItems, selectCurrentActivityIds, selectSearchSegmentTools } from "./conversation-view-model";
 import { V2ProcessPanel } from "@/components/workbench/process/V2ProcessPanel";
 import { resolveWorkbenchResourceUrl, safeLinkLabel, safeWorkbenchHref } from "@/lib/api/client";
 import {
@@ -100,6 +100,10 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
     () => Object.fromEntries(timelineItems.map((item) => [item.id, item])) as Record<string, TimelineItem>,
     [timelineItems]
   );
+  const currentActivityIds = useMemo(
+    () => selectCurrentActivityIds(timelineItems),
+    [timelineItems]
+  );
   const processPlacement = useMemo<V2ProcessPlacement | null>(() => {
     if (!s01ProcessFixture) return null;
     const anchor = [...timelineItems].reverse().find((item) =>
@@ -156,7 +160,7 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
       </div>
     : null;
 
-  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} /></div></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} /></div></AssistantRuntimeProvider>;
 }
 
 /**
@@ -185,11 +189,11 @@ export function ConversationSkeleton() {
   </div>;
 }
 
-function ConversationViewport({ state, displayItems, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
-  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="grid min-h-[48vh] place-items-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages></div><ThreadPrimitive.ScrollToBottom className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
+function ConversationViewport({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
+  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="grid min-h-[48vh] place-items-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages></div><ThreadPrimitive.ScrollToBottom className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
 }
 
-function RuntimeMessage({ state, displayItems, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
+function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
   const messageId = useAuiState((snapshot) => snapshot.message.id);
   const item = displayItems[messageId] ?? state.items[messageId];
   if (!item) return null;
@@ -208,12 +212,12 @@ function RuntimeMessage({ state, displayItems, onStartRun, onResolveApproval, is
       || (previous.kind === "message" && previous.role === "assistant")
     );
   });
-  if (item.kind === "thinking") return <MessagePrimitive.Root><ThinkingResult key={`${item.id}:${item.status}`} item={item} timing={isFirstProcessActivity ? state.runTimings[item.runId] : undefined} /></MessagePrimitive.Root>;
+  if (item.kind === "thinking") return <MessagePrimitive.Root><ThinkingResult key={`${item.id}:${item.status}`} item={item} isCurrentStep={currentActivityIds.has(item.id)} timing={isFirstProcessActivity ? state.runTimings[item.runId] : undefined} /></MessagePrimitive.Root>;
   if (item.kind === "tool") {
     const searchItems = isSearchToolItem(item) ? selectSearchSegmentTools(state, item.id) : [];
     return <MessagePrimitive.Root>{searchItems.length
-      ? <SearchActivitySummary items={searchItems} />
-      : <ActivityRow item={item} />}</MessagePrimitive.Root>;
+      ? <SearchActivitySummary items={searchItems} isCurrentStep={currentActivityIds.has(item.id)} />
+      : <ActivityRow item={item} isCurrentStep={currentActivityIds.has(item.id)} />}</MessagePrimitive.Root>;
   }
   if (item.kind === "approval") return <MessagePrimitive.Root className="mb-1"><ApprovalPart item={item} disabled={isResolvingApproval} onResolve={(decision) => void onResolveApproval(item.approvalId, decision)} /></MessagePrimitive.Root>;
   if (item.kind === "status") return <MessagePrimitive.Root className={`conversation-lane mb-2 py-1 text-[14px] leading-5 ${item.tone === "danger" ? "text-danger" : item.tone === "warning" ? "text-[#8a5a00]" : "text-tertiary"}`}>{item.tone === "danger" ? getRunFailureMessage(item.label) : item.label}</MessagePrimitive.Root>;
@@ -275,11 +279,11 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply, afte
   );
 }
 
-export function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: RunTiming }) {
+export function ThinkingResult({ item, timing, isCurrentStep = false }: { item: ThinkingItem; timing?: RunTiming; isCurrentStep?: boolean }) {
   const active = item.status === "streaming";
   const settledKey = active ? null : `${item.id}:${item.status}`;
   const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
-  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
+  const expanded = active || isCurrentStep || (settledKey !== null && manuallyOpenedKey === settledKey);
   const verification = item.activityKind === "verification";
   const label = active
     ? verification ? "核验中" : "思考中"
@@ -288,10 +292,10 @@ export function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: 
       : item.status === "error"
         ? verification ? "核验未完成" : "思考未完成"
         : verification ? "核验结束" : "思考结束";
-  return <div className="conversation-lane mb-2 text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"}>
+  return <div className="conversation-lane mb-2 text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"} data-activity-status={item.status}>
     {timing ? <RunElapsed timing={timing} /> : null}
     <button type="button" aria-expanded={expanded} onClick={() => {
-      if (settledKey === null) return;
+      if (settledKey === null || isCurrentStep) return;
       setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
     }} className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" title={`${expanded ? "收起" : "展开"}${verification ? "核验" : "思考"}结果`}>
       {expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
@@ -299,7 +303,7 @@ export function ThinkingResult({ item, timing }: { item: ThinkingItem; timing?: 
       {item.paragraphs.length > 1 ? <span className="tabular-nums text-[13px] font-normal text-tertiary">{item.paragraphs.length} 条</span> : null}
     </button>
     {expanded && item.paragraphs.length ? <div className="ml-2 mt-1 space-y-2.5 border-l border-line pl-4">
-      {item.paragraphs.map((paragraph) => <p key={paragraph.id} className="text-pretty text-secondary">{paragraph.text}</p>)}
+      {item.paragraphs.map((paragraph, index) => <p key={paragraph.id} className={`text-pretty text-secondary${active && index === item.paragraphs.length - 1 ? " streaming-cursor" : ""}`}>{paragraph.text}</p>)}
     </div> : null}
   </div>;
 }

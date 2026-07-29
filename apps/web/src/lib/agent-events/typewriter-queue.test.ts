@@ -52,6 +52,64 @@ describe("createRenderQueue", () => {
     expect(drawn).toBeGreaterThanOrEqual(2);
   });
 
+  it("streams a persisted Agent public-process delta before completing that activity", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "thinking.delta" ? String(e.payload.delta) : `[${e.type}]`),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "thinking.started", { thinkingId: "thinking-one" }));
+    queue.enqueue(event(2, "thinking.delta", { thinkingId: "thinking-one", paragraphId: "paragraph-one", delta: "核对来源" }));
+    queue.enqueue(event(3, "thinking.completed", { thinkingId: "thinking-one" }));
+    frames.flush();
+    expect(order).toEqual(["[thinking.started]", "核", "对", "来", "源", "[thinking.completed]"]);
+  });
+
+  it("paints the last streamed grapheme before a following fold event", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "thinking.delta" ? String(e.payload.delta) : `[${e.type}]`),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "thinking.delta", {
+      thinkingId: "thinking-one",
+      paragraphId: "paragraph-one",
+      delta: "尾"
+    }));
+    queue.enqueue(event(2, "thinking.completed", { thinkingId: "thinking-one" }));
+
+    frames.flush(1);
+    expect(order).toEqual(["尾"]);
+    frames.flush(1);
+    expect(order).toEqual(["尾", "[thinking.completed]"]);
+  });
+
+  it("reveals source link text character by character before folding its search row", () => {
+    const frames = manualFrames();
+    const order: string[] = [];
+    const queue = createRenderQueue({
+      apply: (e) => order.push(e.type === "tool.source.delta" ? String(e.payload.delta) : `[${e.type}:${String(e.payload.sourcePresentationActive)}]`),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "tool.updated", { toolCallId: "search-one", sourcePresentationActive: true }));
+    queue.enqueue(event(2, "tool.source.delta", { toolCallId: "search-one", url: "https://example.com/source", delta: "有效来源" }));
+    queue.enqueue(event(3, "tool.updated", { toolCallId: "search-one", sourcePresentationActive: false }));
+    frames.flush();
+    expect(order).toEqual([
+      "[tool.updated:true]",
+      "有",
+      "效",
+      "来",
+      "源",
+      "[tool.updated:false]"
+    ]);
+  });
+
   it("keeps combined emoji graphemes intact", () => {
     const frames = manualFrames();
     const applied: string[] = [];

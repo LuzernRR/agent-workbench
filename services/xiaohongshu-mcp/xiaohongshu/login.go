@@ -18,22 +18,50 @@ func NewLogin(page *rod.Page) *LoginAction {
 }
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
-	// 加超时保护：只是查登录态的快速检查，不应无限挂（登录扫码的等待在 Login/WaitForLogin 里）
-	pp := a.page.Context(ctx).Timeout(30 * time.Second)
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	// Page.Navigate 在收到主文档响应头后已经返回。搜索页包含持续请求，
+	// WaitLoad 在容器里可能永远等不到；登录态只依赖用户 State 或明确的
+	// 登录/个人主页元素，因此等待这些信号即可。
+	pp := a.page.Context(ctx)
+	if err := pp.Timeout(10 * time.Second).Navigate(
+		"https://www.xiaohongshu.com/explore",
+	); err != nil {
+		return false, errors.Wrap(err, "navigate for login status failed")
+	}
 
-	time.Sleep(1 * time.Second)
+	const statusReady = `() => {
+		const user = window.__INITIAL_STATE__?.user;
+		const raw = user?.userInfo;
+		const info = raw?.value !== undefined ? raw.value : (raw?._value !== undefined ? raw._value : raw);
+		if (info && typeof info.guest === "boolean") return true;
+		if (document.querySelector('a[href*="/user/profile/"], .main-container .user .link-wrapper .channel')) return true;
+		return Boolean(document.querySelector('.login-container, [class*="login-container"], [class*="login-modal"]'));
+	}`
+	if err := rod.Try(func() {
+		pp.Timeout(12 * time.Second).MustWait(statusReady)
+	}); err != nil {
+		return false, errors.Wrap(err, "login status signal unavailable")
+	}
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	result, err := pp.Timeout(3 * time.Second).Eval(`() => {
+		const user = window.__INITIAL_STATE__?.user;
+		const raw = user?.userInfo;
+		const info = raw?.value !== undefined ? raw.value : (raw?._value !== undefined ? raw._value : raw);
+		if (info && typeof info.guest === "boolean") return info.guest ? "logged_out" : "logged_in";
+		if (document.querySelector('a[href*="/user/profile/"], .main-container .user .link-wrapper .channel')) return "logged_in";
+		if (document.querySelector('.login-container, [class*="login-container"], [class*="login-modal"]')) return "logged_out";
+		return "unknown";
+	}`)
 	if err != nil {
-		return false, errors.Wrap(err, "check login status failed")
+		return false, errors.Wrap(err, "read login status failed")
 	}
-
-	if !exists {
-		return false, errors.Wrap(err, "login status element not found")
+	switch result.Value.String() {
+	case "logged_in":
+		return true, nil
+	case "logged_out":
+		return false, nil
+	default:
+		return false, errors.New("login status remained unknown")
 	}
-
-	return true, nil
 }
 
 // CurrentUser 当前登录用户的基础信息。

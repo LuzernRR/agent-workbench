@@ -12,8 +12,10 @@ from app.config.agent import AgentConfig
 from app.tools.channels.base import (
     ChannelEvidence,
     ChannelOutcome,
+    ChannelProgressReporter,
     ChannelResult,
     SourceProvenance,
+    report_progress,
 )
 from app.tools.channels.normalization import normalize_public_url, source_dedup_key
 from app.tools.robots_policy import check_robots
@@ -21,7 +23,7 @@ from app.tools.web_search import SearchHit, web_search
 
 _URL_RE = re.compile(r"https?://(?:www\.)?xiaohongshu\.com/[^\s<>\]\)\"']+", re.IGNORECASE)
 _ALLOWED_PATH = re.compile(
-    r"^/(?:explore/[A-Za-z0-9]+|user/profile/[A-Za-z0-9]+|goods-detail/[A-Za-z0-9]+)$"
+    r"^/explore/[A-Za-z0-9]+$"
 )
 _BLOCK_MARKERS = (
     "requiring CAPTCHA", "安全验证", "访问的页面不见了", "页面不见了", "我要申诉",
@@ -128,7 +130,7 @@ class XiaohongshuPublicChannel:
             url = normalize_public_url(exact.group(0))
             return "direct", [SearchHit(url=url, title=url, snippet="", rank=1)]
         outcome = await web_search(
-            f"{query} site:xiaohongshu.com",
+            f"{query} site:xiaohongshu.com/explore",
             max_results=max_results,
             default_provider=self.config.search.default_provider,
             allow_duckduckgo_fallback=self.config.search.allow_duckduckgo_fallback,
@@ -137,7 +139,12 @@ class XiaohongshuPublicChannel:
             return outcome, []
         return outcome.provider, [hit for hit in outcome.hits if _allowed_xhs_url(hit.url)]
 
-    async def search(self, query: str, max_results: int) -> ChannelOutcome:
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+    ) -> ChannelOutcome:
         discovery, hits = await self._discover(query, max_results)
         if not isinstance(discovery, str):
             return ChannelOutcome(
@@ -172,7 +179,7 @@ class XiaohongshuPublicChannel:
                 observed_at=observed_at,
                 confidence="medium" if verified else "low",
             )
-            results.append(ChannelResult(
+            result = ChannelResult(
                 channel="xiaohongshu",
                 provider=f"{discovery}+jina" if verified else discovery,
                 query=query,
@@ -182,7 +189,14 @@ class XiaohongshuPublicChannel:
                 verified=verified,
                 limitation=None if verified else limitation or "仅发现公开索引，详情未验证",
                 provenance=provenance,
-            ))
+            )
+            results.append(result)
+            report_progress(
+                progress,
+                provider=result.provider,
+                result_count=len(results),
+                evidence_count=len(evidence),
+            )
             if verified:
                 evidence.append(ChannelEvidence(
                     channel="xiaohongshu",
@@ -195,6 +209,13 @@ class XiaohongshuPublicChannel:
                     captured_at=observed_at,
                     provenance=provenance,
                 ))
+                report_progress(
+                    progress,
+                    provider=result.provider,
+                    result_count=len(results),
+                    evidence_count=len(evidence),
+                    source=result,
+                )
         return ChannelOutcome(
             ok=True,
             channel="xiaohongshu",

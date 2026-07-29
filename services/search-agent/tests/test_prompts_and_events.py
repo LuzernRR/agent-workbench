@@ -100,7 +100,7 @@ def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> 
     assert agent_config().search.force_search is True
     assert "need_search 必须为 true" in SUPERVISOR_PROMPT
     assert "不使用固定模板" in SUPERVISOR_PROMPT
-    assert "概括已搜索证据" in VERIFIER_PROMPT
+    assert "已经通过正文质量检查" in VERIFIER_PROMPT
     assert "不使用 Markdown" in RESEARCHER_PROMPT
 
 

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -74,3 +75,33 @@ class ChannelOutcome(StrictChannelModel):
 
     def public_payload(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class ChannelProgress(StrictChannelModel):
+    """渠道在真实发现或正文读取完成时发出的单调进度。"""
+
+    provider: str
+    result_count: int = Field(ge=0, le=50)
+    evidence_count: int = Field(ge=0, le=50)
+    source: ChannelResult | None = None
+
+
+ChannelProgressReporter = Callable[[ChannelProgress], None]
+
+
+def report_progress(
+    reporter: ChannelProgressReporter | None,
+    *,
+    provider: str,
+    result_count: int,
+    evidence_count: int,
+    source: ChannelResult | None = None,
+) -> None:
+    if reporter is None:
+        return
+    reporter(ChannelProgress(
+        provider=provider,
+        result_count=result_count,
+        evidence_count=evidence_count,
+        source=source,
+    ))

@@ -1,6 +1,9 @@
 # Agent 开发手册
 
-本目录是智能工作台的工程基线。当前仓库已实现 Next.js BFF、Python/LangGraph 多 Agent、真实网页搜索、PostgreSQL 事件持久化、D 盘 Milvus 证据记忆以及匿名会话恢复；3110 Playwright 才使用浏览器可访问的确定性 mock，3100 固定走真实 live 服务。
+本目录是智能工作台的工程基线。当前仓库已实现 Next.js BFF、Python/LangGraph
+多 Agent、Web/X/小红书真实搜索、PostgreSQL 事件持久化、D 盘 Milvus 证据记忆
+以及匿名会话恢复；`3110` Playwright 才使用确定性 mock，生产 live 入口为
+`127.0.0.1:3000` 与 [https://luzern.cc.cd](https://luzern.cc.cd)。
 
 ## 阅读顺序
 

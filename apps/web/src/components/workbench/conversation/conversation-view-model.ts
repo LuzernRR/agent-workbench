@@ -78,3 +78,25 @@ export function selectSearchSegmentTools(state: AgentThreadState, representative
   }
   return segment;
 }
+
+/**
+ * The latest visible activity stays open after its own terminal event. It is
+ * no longer current only when another process step (or the answer/status)
+ * actually appears, which prevents completed adjacent thoughts from briefly
+ * folding and reopening.
+ */
+export function selectCurrentActivityIds(items: readonly TimelineItem[]) {
+  const currentByRun = new Map<string, string>();
+  for (const item of items) {
+    if (item.kind === "thinking" || item.kind === "tool") {
+      currentByRun.set(item.runId, item.id);
+    } else if (
+      item.kind === "approval"
+      || item.kind === "status"
+      || (item.kind === "message" && item.role === "assistant" && item.text)
+    ) {
+      currentByRun.delete(item.runId);
+    }
+  }
+  return new Set(currentByRun.values());
+}

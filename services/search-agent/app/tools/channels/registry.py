@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.config.agent import AgentConfig
-from app.tools.channels.base import ChannelName, ChannelOutcome
+from app.tools.channels.base import ChannelName, ChannelOutcome, ChannelProgressReporter
 from app.tools.channels.web import WebChannel
 from app.tools.channels.x_public import XPublicChannel
 from app.tools.channels.xiaohongshu_mcp import XiaohongshuMcpChannel
@@ -33,7 +33,13 @@ class ChannelRegistry:
         return [channel for channel in requested if any(item["channel"] == channel for item in planned)]
 
     async def execute(
-        self, channel: ChannelName, query: str, max_results: int
+        self,
+        channel: ChannelName,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+        *,
+        xiaohongshu_public_only: bool = False,
     ) -> ChannelOutcome:
         if not self._enabled.get(channel, False):
             return ChannelOutcome(
@@ -45,4 +51,10 @@ class ChannelRegistry:
                 error_message=f"渠道 {channel} 未启用",
             )
         adapter = self._channels[channel]
-        return await adapter.search(query, max_results)
+        if channel == "xiaohongshu" and xiaohongshu_public_only:
+            return await adapter.search_public_after_mcp_failure(
+                query,
+                max_results,
+                progress=progress,
+            )
+        return await adapter.search(query, max_results, progress=progress)

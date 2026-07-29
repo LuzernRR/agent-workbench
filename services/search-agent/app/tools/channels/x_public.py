@@ -18,8 +18,10 @@ from app.config.agent import AgentConfig
 from app.tools.channels.base import (
     ChannelEvidence,
     ChannelOutcome,
+    ChannelProgressReporter,
     ChannelResult,
     SourceProvenance,
+    report_progress,
 )
 from app.tools.channels.normalization import normalize_public_url, source_dedup_key
 from app.tools.robots_policy import check_robots
@@ -277,7 +279,12 @@ class XPublicChannel:
             )
         return SearchOutcome(ok=True, query=query, provider=provider, hits=[])
 
-    async def search(self, query: str, max_results: int) -> ChannelOutcome:
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+    ) -> ChannelOutcome:
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         status_match = _STATUS_RE.search(query)
         profile_match = _PROFILE_RE.search(query)
@@ -309,6 +316,28 @@ class XPublicChannel:
         results: list[ChannelResult] = []
         evidence: list[ChannelEvidence] = []
         seen: set[str] = set()
+
+        def append_result(
+            result: ChannelResult,
+            item_evidence: ChannelEvidence | None = None,
+        ) -> None:
+            results.append(result)
+            report_progress(
+                progress,
+                provider=result.provider,
+                result_count=len(results),
+                evidence_count=len(evidence),
+            )
+            if item_evidence:
+                evidence.append(item_evidence)
+                report_progress(
+                    progress,
+                    provider=result.provider,
+                    result_count=len(results),
+                    evidence_count=len(evidence),
+                    source=result,
+                )
+
         for status in self._status_items(payload)[:max_results]:
             normalized = self._normalize_status(status, query, observed_at)
             if not normalized:
@@ -318,14 +347,12 @@ class XPublicChannel:
             if key in seen:
                 continue
             seen.add(key)
-            results.append(result)
-            if item_evidence:
-                evidence.append(item_evidence)
+            append_result(result, item_evidence)
 
         if direct_candidate and direct_candidate[1] == "status" and not results:
             canonical, _, handle, _ = direct_candidate
             seen.add(source_dedup_key(canonical))
-            results.append(ChannelResult(
+            append_result(ChannelResult(
                 channel="x",
                 provider="direct+fxembed",
                 query=query,
@@ -350,7 +377,7 @@ class XPublicChannel:
         if direct_candidate and direct_candidate[1] == "profile" and not results:
             canonical, _, handle, _ = direct_candidate
             seen.add(source_dedup_key(canonical))
-            results.append(ChannelResult(
+            append_result(ChannelResult(
                 channel="x",
                 provider="direct+fxembed",
                 query=query,
@@ -417,9 +444,7 @@ class XPublicChannel:
                             ),
                         )
                         item_evidence = None
-                    results.append(result)
-                    if item_evidence:
-                        evidence.append(item_evidence)
+                    append_result(result, item_evidence)
                     if len(results) >= max_results:
                         break
 

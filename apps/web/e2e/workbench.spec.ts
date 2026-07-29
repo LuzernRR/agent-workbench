@@ -144,14 +144,17 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await page.getByLabel("任务输入").fill("请运行代码实现一个任务面板页面，并整理方案文档");
   await page.getByRole("button", { name: "发送", exact: true }).click();
 
-  const thinking = page.getByRole("button", { name: /思考结束/u });
-  await expect(thinking).toBeVisible();
-  await expect(thinking).toHaveAttribute("aria-expanded", "false");
-  await thinking.click();
   const thinkingBlock = page.locator("[data-thinking-id]").first();
+  await expect(thinkingBlock).toBeVisible();
+  await expect(thinkingBlock).toHaveAttribute("data-activity-status", "completed");
+  const thinkingToggle = thinkingBlock.getByRole("button", { name: "思考结束" });
+  await expect(thinkingToggle).toHaveAttribute("aria-expanded", "false");
+  await thinkingToggle.click();
   await expect(thinkingBlock).toContainText("这次请求需要围绕");
   await expect(thinkingBlock).toContainText("我会先读取当前可用上下文");
   await expect(thinkingBlock).toContainText("请运行代码实现一个任务面板页面，并整理方案文档");
+  await expect(thinkingToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(thinkingBlock).not.toContainText(/思考中|思考结果/u);
   expect(await thinkingBlock.innerText()).not.toMatch(/问题判断|能力限制|建议方案|处理计划|回答重点|^\s*(?:[-*#]|\d+[.、])\s+/mu);
   expect(await page.getByTestId("conversation-viewport").innerText()).not.toContain("reasoning_content");
 
@@ -201,11 +204,11 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await expect(workspace).toBeVisible();
 
   await page.reload();
-  const restoredThinking = page.getByRole("button", { name: /思考结束/u });
+  const restoredThinking = page.locator("[data-thinking-id]").first();
   await expect(restoredThinking).toBeVisible();
-  await expect(restoredThinking).toHaveAttribute("aria-expanded", "false");
-  await restoredThinking.click();
-  await expect(page.getByText(/这次请求需要围绕/u)).toBeVisible();
+  await expect(restoredThinking).toHaveAttribute("data-activity-status", "completed");
+  await restoredThinking.getByRole("button", { name: "思考结束" }).click();
+  await expect(restoredThinking).toContainText(/这次请求需要围绕/u);
 });
 
 test("运行可停止并恢复发送状态", async ({ page }) => {

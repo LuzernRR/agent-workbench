@@ -29,8 +29,8 @@ export function summarizeSearchActivity(items: readonly ToolItem[]) {
   const evidenceCount = verifiedUrls || items.reduce((total, item) => total + (item.evidenceCount || 0), 0);
   const active = items.some((item) => ["preparing", "running", "waiting"].includes(item.status));
 
-  if (active) return "搜索中";
   if (resultCount || evidenceCount) return `找到 ${resultCount} 条结果，读取 ${evidenceCount} 个来源`;
+  if (active) return "搜索中";
   if (items.some((item) => item.status === "failed" || item.status === "unknown")) return "搜索未完成";
   return "未找到相关结果，读取 0 个来源";
 }
@@ -40,22 +40,25 @@ function sourceLine(source: NonNullable<ToolItem["sources"]>[number], fallback: 
   const author = source.author ? source.author.replace(/^@/u, "").trim() : "";
   const identity = author ? `${platform ? `${platform} · ` : ""}@${author}` : platform;
   const title = source.displayText || safeLinkLabel(source.title, fallback);
-  return identity && !title.includes(`@${author}`) ? `${identity}：${title}` : platform ? `${platform} · ${title}` : title;
+  return author && identity && !title.includes(`@${author}`)
+    ? `${identity}：${title}`
+    : platform ? `${platform} · ${title}` : title;
 }
 
-export function SearchActivitySummary({ items }: { items: readonly ToolItem[] }) {
-  const active = items.some((item) => ["preparing", "running", "waiting"].includes(item.status));
+export function SearchActivitySummary({ items, isCurrentStep = false }: { items: readonly ToolItem[]; isCurrentStep?: boolean }) {
+  const active = items.some((item) =>
+    ["preparing", "running", "waiting"].includes(item.status) || item.sourcePresentationActive);
   const settledKey = active ? null : items.map((item) => `${item.toolCallId}:${item.status}`).join("|");
   const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
   if (!items.length) return null;
-  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
+  const expanded = active || isCurrentStep || (settledKey !== null && manuallyOpenedKey === settledKey);
   const sources = new Map<string, NonNullable<ToolItem["sources"]>[number]>();
   for (const item of items) {
     for (const source of item.sources || []) {
+      if (!source.verified || !source.displayText) continue;
       const href = safeWorkbenchHref(source.url);
       if (!href) continue;
-      const current = sources.get(href);
-      sources.set(href, current?.verified ? current : { ...source, url: href });
+      sources.set(href, { ...source, url: href });
     }
   }
   return <div
@@ -71,7 +74,7 @@ export function SearchActivitySummary({ items }: { items: readonly ToolItem[] })
       aria-expanded={expanded}
       aria-label={`${expanded ? "收起" : "展开"}搜索详情`}
       onClick={() => {
-        if (settledKey === null) return;
+        if (settledKey === null || isCurrentStep) return;
         setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
       }}
     >
@@ -84,11 +87,11 @@ export function SearchActivitySummary({ items }: { items: readonly ToolItem[] })
   </div>;
 }
 
-export function ActivityRow({ item }: { item: ToolItem }) {
+export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; isCurrentStep?: boolean }) {
   const active = ["preparing", "running", "waiting"].includes(item.status);
   const settledKey = active ? null : `${item.toolCallId}:${item.status}`;
   const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
-  const expanded = active || (settledKey !== null && manuallyOpenedKey === settledKey);
+  const expanded = active || isCurrentStep || (settledKey !== null && manuallyOpenedKey === settledKey);
   const duration = typeof item.durationMs === "number"
     ? `${(item.durationMs / 1000).toFixed(item.durationMs >= 10000 ? 0 : 1)} 秒`
     : "";
@@ -101,7 +104,7 @@ export function ActivityRow({ item }: { item: ToolItem }) {
   return (
     <div className="conversation-lane my-2" data-tool-call-id={item.toolCallId}>
       <button type="button" className="group flex min-h-9 w-full min-w-0 items-start gap-2 rounded-lg px-0.5 py-1 text-left text-tertiary transition-colors duration-150 hover:text-secondary" onClick={() => {
-        if (settledKey === null) return;
+        if (settledKey === null || isCurrentStep) return;
         setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
       }} aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}工具调用：${item.name}`} title={summary}>
         <SquareTerminal className="mt-1 size-[18px] shrink-0 stroke-[1.5]" />

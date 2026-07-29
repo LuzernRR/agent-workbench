@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from app.graph.schemas import (
     IntentResult,
     PlanResult,
     ReflectResult,
+    SourcePresentationResult,
     VerifyResult,
 )
 from app.graph.state import initial_state
@@ -30,7 +32,7 @@ from app.llm.deepseek import (
     StructuredOutputError,
 )
 from app.persistence.tool_ledger import LedgerDecision
-from app.tools.channels.base import SourceProvenance
+from app.tools.channels.base import ChannelProgress, SourceProvenance
 from app.tools.search_tool import (
     PublicSearchResult,
     SearchEvidence,
@@ -60,6 +62,89 @@ def test_xiaohongshu_tool_requires_a_meaningful_window_before_finalization() -> 
     web_timeout = nodes.tool_timeout_seconds(state, "web")
     assert web_timeout is not None
     assert 29 <= web_timeout <= 30
+
+
+@pytest.mark.asyncio
+async def test_xiaohongshu_mcp_failure_opens_public_strategy_for_later_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        plans=[["query one", "query two"]],
+        channels_by_query={
+            "query one": "xiaohongshu",
+            "query two": "xiaohongshu",
+        },
+        evidence_by_query={"query one": True, "query two": True},
+        provider_by_query={
+            "query one": "xiaohongshu-mcp-fallback[MCP_TIMEOUT]+tavily",
+            "query two": "xiaohongshu-mcp-fallback[MCP_CIRCUIT_OPEN]+tavily",
+        },
+    )
+
+    await run_scenario(monkeypatch, scenario)
+
+    assert scenario.tool_execution_public_only == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_zero_evidence_platform_round_can_recover_via_web(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        plans=[["xhs query"], ["official web query"]],
+        reflects=[
+            {
+                "sufficient": False,
+                "missing": "缺少可读取正文",
+                "extra_searches": [{"query": "official web query", "channel": "web"}],
+                "source_presentations": [],
+            },
+            {
+                "sufficient": True,
+                "missing": "",
+                "extra_searches": [],
+                "source_presentations": [{
+                    "url": "https://example.com/2",
+                    "text": "官方资料解释了三个产品各自承担的职责。",
+                }],
+            },
+        ],
+        evidence_by_query={
+            "xhs query": False,
+            "official web query": True,
+        },
+        channels_by_query={
+            "xhs query": "xiaohongshu",
+            "official web query": "web",
+        },
+    )
+
+    output, _events = await run_scenario(
+        monkeypatch,
+        scenario,
+        max_rounds=3,
+        no_progress_limit=3,
+    )
+
+    assert scenario.tool_execution_searches == [
+        {"query": "xhs query", "channel": "xiaohongshu"},
+        {"query": "official web query", "channel": "web"},
+    ]
+    assert output["response_status"] == "completed"
+
+
+def test_public_process_drops_fetch_noise_without_inventing_replacement() -> None:
+    for text in (
+        "本次搜索渠道降级为公开索引。",
+        "其余来源正文均未读取。",
+        "仅发现公开候选，未获取内容。",
+    ):
+        assert nodes._effective_process_text(text) is None
+
+    useful = "现有证据支持 LangChain 与 LangGraph 的区别，仍缺少 LangSmith。"
+    assert nodes._effective_process_text(useful) == useful
 
 
 class MemoryLedger:
@@ -93,7 +178,15 @@ class Scenario:
     supervisor_channels: list[str] = field(default_factory=lambda: ["web"])
     plans: list[list[str]] = field(default_factory=lambda: [["query one"]])
     reflects: list[dict[str, Any]] = field(
-        default_factory=lambda: [{"sufficient": True, "missing": "", "extra_searches": []}]
+        default_factory=lambda: [{
+            "sufficient": True,
+            "missing": "",
+            "extra_searches": [],
+            "source_presentations": [{
+                "url": "https://example.com/1",
+                "text": "该来源给出了与测试问题直接相关的可核验做法。",
+            }],
+        }]
     )
     verifier_actions: list[str] = field(default_factory=lambda: ["pass"])
     researcher_mode: str = "valid"
@@ -101,6 +194,7 @@ class Scenario:
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
     result_count_by_query: dict[str, int] = field(default_factory=dict)
     limitations_by_query: dict[str, str] = field(default_factory=dict)
+    provider_by_query: dict[str, str] = field(default_factory=dict)
     channels_by_query: dict[str, str] = field(default_factory=dict)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
@@ -110,7 +204,9 @@ class Scenario:
     researcher_messages: list[list[dict[str, Any]]] = field(default_factory=list)
     tool_executions: list[str] = field(default_factory=list)
     tool_execution_searches: list[dict[str, str]] = field(default_factory=list)
+    tool_execution_public_only: list[bool] = field(default_factory=list)
     tool_delay_seconds: float = 0
+    progress_before_delay: bool = False
     tool_call_index: int = 0
     checkpoint_values: dict[str, Any] = field(default_factory=dict)
 
@@ -123,10 +219,11 @@ class Scenario:
         model_id: str | None = None,
         allow_repair: bool = False,
     ) -> tuple[Any, ModelUsage]:
-        self.structured_repair_permissions.append((role, allow_repair))
-        self.structured_messages.setdefault(role, []).append(copy.deepcopy(messages))
-        index = self.structured_calls.get(role, 0)
-        self.structured_calls[role] = index + 1
+        role_key = "source_curator" if schema is SourcePresentationResult else role
+        self.structured_repair_permissions.append((role_key, allow_repair))
+        self.structured_messages.setdefault(role_key, []).append(copy.deepcopy(messages))
+        index = self.structured_calls.get(role_key, 0)
+        self.structured_calls[role_key] = index + 1
         if role in self.invalid_structured_roles:
             raise StructuredOutputError(ModelUsage(
                 20,
@@ -135,7 +232,16 @@ class Scenario:
                 0.000002,
                 attempts=2 if allow_repair else 1,
             ))
-        if role == "supervisor":
+        if schema is SourcePresentationResult:
+            urls = re.findall(
+                r"URL: (https?://\S+)",
+                str(messages[-1].content),
+            )
+            result = SourcePresentationResult(source_presentations=[{
+                "url": urls[0],
+                "text": "该来源正文提供了与用户问题直接相关的有效事实。",
+            }])
+        elif role == "supervisor":
             result = IntentResult(
                 task_type="research" if self.need_search else "direct_answer",
                 need_search=self.need_search,
@@ -254,7 +360,20 @@ class Scenario:
             finish_reason="tool_calls",
         )
 
-    async def execute_tool(self, arguments: Any, config: Any) -> SearchExecutionResult:
+    async def execute_tool(
+        self,
+        arguments: Any,
+        config: Any,
+        progress: Any = None,
+        *,
+        xiaohongshu_public_only: bool = False,
+    ) -> SearchExecutionResult:
+        if self.progress_before_delay and progress:
+            progress(ChannelProgress(
+                provider="deterministic",
+                result_count=5,
+                evidence_count=0,
+            ))
         if self.tool_delay_seconds:
             await asyncio.sleep(self.tool_delay_seconds)
         query = arguments.query
@@ -262,18 +381,20 @@ class Scenario:
         self.tool_execution_searches.append(
             {"query": query, "channel": arguments.channel}
         )
+        self.tool_execution_public_only.append(xiaohongshu_public_only)
         has_evidence = self.evidence_by_query.get(query, False)
         result_count = self.result_count_by_query.get(query, 1)
         limitation = self.limitations_by_query.get(query)
+        provider = self.provider_by_query.get(query, "deterministic")
         url = f"https://example.com/{len(self.tool_executions)}"
         return SearchExecutionResult(
             ok=True,
             channel=arguments.channel,
             query=query,
-            provider="deterministic",
+            provider=provider,
             results=[PublicSearchResult(
                 channel=arguments.channel,
-                provider="deterministic",
+                provider=provider,
                 query=query,
                 title=f"Result {query}",
                 url=url,
@@ -290,7 +411,7 @@ class Scenario:
             )] if result_count else [],
             evidence=[SearchEvidence(
                 channel=arguments.channel,
-                provider="deterministic",
+                provider=provider,
                 title=f"Evidence {query}",
                 url=url,
                 text=f"verified evidence for {query}",
@@ -365,7 +486,10 @@ async def test_force_search_runs_real_tool_even_when_supervisor_suggests_direct(
     assert scenario.tool_executions == ["query one"]
     assert [event["type"] for event in events if event["type"].startswith("tool.")] == [
         "tool.started",
+        "tool.progress",
+        "tool.progress",
         "tool.completed",
+        "tool.presented",
     ]
 
 
@@ -436,7 +560,18 @@ async def test_single_search_runs_think_search_observe_and_pairs_ids(
     assert assistant_ids == tool_ids == {"call_1"}
 
     tool_events = [event for event in events if event.get("toolCallId") == "call_1"]
-    assert [event["type"] for event in tool_events] == ["tool.started", "tool.completed"]
+    assert [event["type"] for event in tool_events] == [
+        "tool.started",
+        "tool.progress",
+        "tool.progress",
+        "tool.completed",
+        "tool.presented",
+    ]
+    assert [
+        (event["resultCount"], event["evidenceCount"])
+        for event in tool_events
+        if event["type"] == "tool.progress"
+    ] == [(1, 0), (1, 1)]
 
 
 @pytest.mark.asyncio
@@ -463,6 +598,37 @@ async def test_reflector_presents_only_current_real_candidate_urls(
     }]
     assert output["candidates"][0]["tool_call_id"] == "call_1"
     assert output["candidates"][0]["iteration"] == 1
+
+
+@pytest.mark.asyncio
+async def test_source_curator_replaces_invalid_presentations_with_agent_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(reflects=[{
+        "sufficient": True,
+        "missing": "",
+        "extra_searches": [],
+        "source_presentations": [
+            {"url": "https://example.com/1", "text": "但帖子详情/正文内容未读取。"},
+            {"url": "https://example.com/1", "text": "仅发现公开候选，尚未核验。"},
+            {"url": "https://example.com/1", "text": "正文仅包含标签，无有效对比内容。"},
+            {
+                "url": "https://example.com/1",
+                "text": "该教程未涉及 LangChain 与 LangSmith 的区别。",
+            },
+        ],
+    }])
+
+    _output, events = await run_scenario(monkeypatch, scenario)
+
+    presented = [event for event in events if event["type"] == "tool.presented"]
+    assert scenario.structured_calls["source_curator"] == 1
+    assert len(presented) == 1
+    assert presented[0]["toolCallId"] == "call_1"
+    assert presented[0]["sources"] == [{
+        "url": "https://example.com/1",
+        "text": "该来源正文提供了与用户问题直接相关的有效事实。",
+    }]
 
 
 @pytest.mark.asyncio
@@ -553,6 +719,28 @@ async def test_zero_result_without_suggestion_replans_from_tool_feedback(
             '"limitation": "未找到公开候选"',
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_verifier_does_not_apply_candidate_limitations_to_read_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limitation = "受单轮详情读取上限限制，其他候选正文未读取"
+    scenario = Scenario(
+        limitations_by_query={"query one": limitation},
+        evidence_by_query={"query one": True},
+    )
+
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    assert output["verification_passed"] is True
+    verifier_input = str(
+        scenario.structured_messages["verifier"][0][-1].content
+    )
+    assert limitation not in verifier_input
+    assert '"evidenceCount": 1' in verifier_input
+    assert "URL: https://example.com/1" in verifier_input
+    assert "verified evidence for query one" in verifier_input
 
 
 @pytest.mark.asyncio
@@ -660,6 +848,7 @@ async def test_tool_timeout_preserves_finalization_instead_of_failing_run(
 ) -> None:
     scenario = Scenario(
         tool_delay_seconds=0.05,
+        progress_before_delay=True,
         evidence_by_query={"query one": False},
     )
     monkeypatch.setattr(nodes, "tool_timeout_seconds", lambda _state, _channel: 0.01)
@@ -672,9 +861,12 @@ async def test_tool_timeout_preserves_finalization_instead_of_failing_run(
     tool_events = [event for event in events if event.get("toolCallId") == "call_1"]
     assert [event["type"] for event in tool_events] == [
         "tool.started",
+        "tool.progress",
         "tool.failed",
     ]
     assert tool_events[-1]["reasonCode"] == "RUN_TIME_RESERVE"
+    assert tool_events[-1]["resultCount"] == 5
+    assert tool_events[-1]["evidenceCount"] == 0
 
 
 @pytest.mark.asyncio

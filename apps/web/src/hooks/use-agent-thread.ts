@@ -69,8 +69,10 @@ export function useAgentThread(threadId: string | null) {
     if (!activeThread || !runId || ["idle", "completed", "failed", "stopped"].includes(activeRunStatus || "idle")) {
       return;
     }
-    const source = new EventSource(workbenchApi.eventUrl(runId, lastSeqRef.current));
+    let source: EventSource | null = null;
     let instantCatchup = document.visibilityState !== "visible";
+    let disposed = false;
+    let snapshotRecoveryInFlight = false;
 
     const applyEvent = (event: AgentEvent) => {
       setState((current) => (current ? reduceAgentEvent(current, event) : current));
@@ -106,15 +108,50 @@ export function useAgentThread(threadId: string | null) {
         console.error("Invalid AgentEvent", error);
       }
     };
-    AGENT_EVENT_TYPES.forEach((type) => source.addEventListener(type, onEvent));
-    source.onmessage = onEvent;
-    source.onopen = () => setConnection("connected");
-    source.onerror = () => setConnection(source.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
+    const connectEventSource = () => {
+      if (disposed) return;
+      source?.close();
+      const nextSource = new EventSource(workbenchApi.eventUrl(runId, lastSeqRef.current));
+      source = nextSource;
+      AGENT_EVENT_TYPES.forEach((type) => nextSource.addEventListener(type, onEvent));
+      nextSource.onmessage = onEvent;
+      nextSource.onopen = () => setConnection("connected");
+      nextSource.onerror = () => {
+        setConnection(nextSource.readyState === EventSource.CLOSED ? "disconnected" : "reconnecting");
+        void recoverFromDurableSnapshot();
+      };
+    };
+    const recoverFromDurableSnapshot = async () => {
+      if (disposed || snapshotRecoveryInFlight) return;
+      snapshotRecoveryInFlight = true;
+      try {
+        const refreshed = await workbenchApi.thread(activeThreadId!);
+        if (
+          disposed
+          || refreshed.state.threadId !== activeThreadId
+          || refreshed.state.lastSeq <= lastSeqRef.current
+        ) return;
+
+        // A half-open Cloudflare SSE is replaced at the current durable cursor.
+        // Missed events still pass through the render queue, so no Agent text
+        // jumps from an empty block directly to a completed paragraph.
+        connectEventSource();
+      } catch {
+        // The next timer or native EventSource reconnect uses the same cursor.
+      } finally {
+        snapshotRecoveryInFlight = false;
+      }
+    };
+    connectEventSource();
+    const snapshotRecoveryTimer = setInterval(() => {
+      void recoverFromDurableSnapshot();
+    }, 10_000);
     return () => {
+      disposed = true;
+      clearInterval(snapshotRecoveryTimer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       renderQueue.dispose();
-      AGENT_EVENT_TYPES.forEach((type) => source.removeEventListener(type, onEvent));
-      source.close();
+      source?.close();
     };
   }, [state?.activeRunId, state?.projectId, state?.threadId, state?.runStatus, threadId]);
 

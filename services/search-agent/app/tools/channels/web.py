@@ -8,8 +8,10 @@ from app.config.agent import AgentConfig
 from app.tools.channels.base import (
     ChannelEvidence,
     ChannelOutcome,
+    ChannelProgressReporter,
     ChannelResult,
     SourceProvenance,
+    report_progress,
 )
 from app.tools.fetch_page import fetch_pages
 from app.tools.web_search import web_search
@@ -21,7 +23,12 @@ class WebChannel:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
 
-    async def search(self, query: str, max_results: int) -> ChannelOutcome:
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+    ) -> ChannelOutcome:
         outcome = await web_search(
             query,
             max_results=max_results,
@@ -38,7 +45,16 @@ class WebChannel:
                 error_message=outcome.error or "网页搜索失败",
             )
 
-        selected = outcome.hits[: self.config.graph.max_pages_per_call]
+        hits = outcome.hits[:max_results]
+        for result_count in range(1, len(hits) + 1):
+            report_progress(
+                progress,
+                provider=outcome.provider,
+                result_count=result_count,
+                evidence_count=0,
+            )
+
+        selected = hits[: self.config.graph.max_pages_per_call]
         pages = await fetch_pages(
             [hit.url for hit in selected], concurrency=min(3, len(selected))
         ) if selected else []
@@ -86,8 +102,17 @@ class WebChannel:
                     confidence="high" if hit.url in verified else "low",
                 ),
             )
-            for hit in outcome.hits
+            for hit in hits
         ]
+        result_by_url = {result.url: result for result in results if result.verified}
+        for evidence_count, item in enumerate(evidence, start=1):
+            report_progress(
+                progress,
+                provider=outcome.provider,
+                result_count=len(results),
+                evidence_count=evidence_count,
+                source=result_by_url.get(item.url),
+            )
         return ChannelOutcome(
             ok=True,
             channel="web",

@@ -11,8 +11,8 @@ Milvus、etcd、MinIO 与内部 `xiaohongshu-mcp`。Milvus 使用项目独立目
 - `config/agent-runtime.local.json`、`config/search.local.json` 与
   `config/deploy.local.env` 已按本地规范准备；
 - `D:\001-agent\milvus` 是专用于本项目的新目录，包含 `etcd`、`minio`、`milvus`；
-- 正式 Web 使用 `127.0.0.1:3100`，Search Agent 健康/调试端口使用
-  `127.0.0.1:18100`；Milvus gRPC/健康端口只在 `agent-milvus` 私网内使用。
+- 正式 Web 使用 `127.0.0.1:3000`，Search Agent 健康/调试端口使用
+  `127.0.0.1:8080`；Milvus gRPC/健康端口只在 `agent-milvus` 私网内使用。
 
 只做静态解析且不输出插值后的密钥：
 
@@ -30,11 +30,17 @@ docker compose --env-file config/deploy.local.env -f deploy/compose.yaml ps
 验证 Web、Search Agent 与项目 Milvus：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:3100/health
-Invoke-RestMethod http://127.0.0.1:18100/health
+Invoke-RestMethod http://127.0.0.1:3000/health
+Invoke-RestMethod http://127.0.0.1:8080/health
 docker compose --env-file config/deploy.local.env -f deploy/compose.yaml exec milvus `
   curl --fail http://127.0.0.1:9091/healthz
 ```
+
+正式公网入口为
+[https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)。当前
+Cloudflare Tunnel 只把 `luzern.cc.cd` 与 `www.luzern.cc.cd` 转发到
+`http://127.0.0.1:3000`；不得添加 Search Agent、数据库、Milvus、MinIO 或
+MCP 的公网 ingress。
 
 Search Agent 的 `/health` 在 Milvus 不可达时返回 `degraded`，进程仍可执行不带
 向量记忆的搜索。PostgreSQL 不可达时服务启动失败，这是有意的 fail-closed：
@@ -150,6 +156,9 @@ PostgreSQL 使用 `pg_dump --format=custom` 做逻辑备份，并只恢复到新
   写入告警；搜索与核验链路继续运行，恢复后再做召回抽样。
 - Search Agent 发布失败：回滚上一镜像，保持 PostgreSQL schema 与 Milvus
   collection 不动；检查 checkpoint/工具账本后再恢复流量。
+- 新入口回滚：旧容器 `kanna-workbench-backend-1` 仅被停止，没有删除镜像、卷
+  或数据；需要恢复时执行 `docker start kanna-workbench-backend-1`。恢复前先
+  确认它要占用的端口不会与本项目 `127.0.0.1:8080` 冲突。
 - 不要将 Milvus 2.6 的逻辑备份直接恢复到更低版本。需要降级 Milvus 时，启动
   隔离的兼容版本并使用升级前备份验证，原 2.6.21 实例保持不变直到验收完成。
 

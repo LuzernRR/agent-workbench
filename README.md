@@ -1,6 +1,11 @@
 # Agent Workbench
 
-中文多 Agent 搜索工作台。正式运行在 `3100`，使用 Next.js、React、assistant-ui、DeepSeek、Python 3.12、LangGraph、PostgreSQL 17、Milvus 与真实网页搜索；一次运行已形成“模型摘要 → 搜索工具 → 证据观察 → 反思/核验 → 最终回答”的可恢复闭环。
+中文多 Agent 搜索工作台。生产入口为
+[https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)，宿主机只在
+`127.0.0.1:3000` 暴露 Web、在 `127.0.0.1:8080` 暴露 Search Agent 健康/调试
+入口。系统使用 Next.js、React、assistant-ui、DeepSeek、Python 3.12、
+LangGraph、PostgreSQL 17、Milvus 与真实多渠道搜索；一次运行已形成“Agent
+公开文段 → 搜索工具 → 有效来源 → 反思/核验 → 最终回答”的可恢复闭环。
 
 ## 当前能力
 
@@ -19,9 +24,9 @@
 | 停止运行 | 收到真实 `runId` 后才显示停止；AbortController 中断上游；数据库原子抢占唯一终态 | 重复停止幂等返回当前终态；取消事件后不再写正文、完成事件或项目记忆 |
 | 拖拽 | 项目直接拖动排序，会话可拖入、拖出或跨项目移动 | 使用专用手柄，排序和归属持久化 |
 | LangGraph 编排 | Supervisor、Planner、Researcher、Reflector、Writer、Verifier 通过条件边形成有界循环 | 公开的只是各 Agent 结构化 LLM 摘要，不保存或展示私有思维链 |
-| 真实搜索 | Researcher 调用 Tavily，工具 started/completed 按 `toolCallId` 配对并写幂等账本 | 当前产品配置为 `forceSearch: true`；搜索失败时诚实降级 |
-| 过程展示 | 按真实 seq 显示思考、搜索和核验；只把时间上连续的同类活动合并为一行 | 类型切换后立即开新行，后续思考不会回填到搜索前的旧行；核验与思考分开 |
-| 搜索展示 | 同一连续搜索段随真实完成事件递增，如 `5/1 → 10/3 → 15/4` | 点击后只逐行显示安全来源；状态、Provider、耗时、查询和 Agent 摘要不在搜索详情重复出现 |
+| 真实搜索 | Researcher 自主选择 Web、X 或小红书；每个 `toolCallId` 保留 started/progress/completed 幂等账本 | 当前产品配置为 `forceSearch: true`；零结果或证据不足时可改写查询、换渠道并在三轮硬预算内补搜 |
+| 过程展示 | 按真实 seq 显示各 Agent 的公开自然语言文段，思考与核验通过持久 `thinking.delta` 渐进呈现 | 当前步骤展开；自身完成后不立即折叠，直到下一个不同步骤出现。连续同类输出留在同一区域，不折叠后重开；不展示私有 CoT |
+| 搜索展示 | 同一连续搜索段随真实 `tool.progress` 增加为“找到 N 条结果，读取 M 个来源”，已读来源说明通过 `tool.source.delta` 逐字增长 | 展开区只显示已读取且具有 LLM 有效说明的安全 URL；未读候选和“正文未读取”等废话不会投影到会话 |
 | 证据记忆 | 已核验证据可写入 D 盘 Milvus，并按访客、项目、类型和 embedding 版本过滤 | Milvus 不可用时发布 degraded，主搜索继续运行 |
 
 ## 运行链路
@@ -64,7 +69,11 @@ npm install
 npm run dev
 ```
 
-开发地址：[http://localhost:3100/workbench](http://localhost:3100/workbench)。生产方式：
+本地开发地址仍为
+[http://localhost:3100/workbench](http://localhost:3100/workbench)；Compose 生产
+入口为 [http://127.0.0.1:3000/workbench](http://127.0.0.1:3000/workbench)，
+公网由 Cloudflare Tunnel 映射到
+[https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)。生产方式：
 
 ```powershell
 cd apps/web
@@ -133,7 +142,10 @@ cd ../../services/search-agent
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；正式 live 服务固定为 `3100`。真实 LangGraph、搜索递增摘要、刷新恢复与停止验收记录在 [Issue #7 开发记录](docs/development/2026-07-28-006-langgraph-search-agent.md)。
+Playwright 在 `3110` 使用确定性 mock，不消耗真实 API；生产 live 验收默认访问
+`127.0.0.1:3000`，也可通过 `PLAYWRIGHT_LIVE_BASE_URL` 指向
+`https://luzern.cc.cd`。最新公开文段流式展示、真实搜索进度与有效来源验收记录在
+[Issue #9 开发记录](docs/development/2026-07-29-008-streamed-process-effective-sources.md)。
 
 ## 模块目录
 

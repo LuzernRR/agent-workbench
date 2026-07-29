@@ -140,6 +140,7 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     const citations = Array.from({ length: 60 }, (_, index) => ({ label: `来源 ${index + 1}`, url: `https://example.com/${index + 1}` }));
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.completed", answerMarkdown: "回答", promptVersion: "2026-07-28.v2", responseStatus: "completed", citations, verificationPassed: true, stopReason: "VERIFIED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 1, toolCalls: 1, evidenceCount: 60 }).type).toBe("run.completed");
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }).type).toBe("tool.failed");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_partial", toolName: "web_search", query: "LangGraph", channel: "xiaohongshu", provider: "xiaohongshu-mcp", reasonCode: "RUN_TIME_RESERVE", message: "为核验保留时间", retryable: false, resultCount: 5, evidenceCount: 1 }).type).toBe("tool.failed");
   });
 
   it("接受由 Reflector 生成且只绑定真实 URL 的逐行来源说明", () => {
@@ -156,6 +157,33 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       toolCallId: "call_one",
       sources: [{ url: "javascript:alert(1)", text: "危险来源" }]
     })).toThrow();
+  });
+
+  it("严格接受逐步累加的工具进度与可选已读来源", () => {
+    expect(parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "tool.progress",
+      toolCallId: "call_one",
+      toolName: "web_search",
+      query: "LangGraph 最新文档",
+      channel: "web",
+      provider: "tavily",
+      resultCount: 1,
+      evidenceCount: 0,
+      source: null
+    }).type).toBe("tool.progress");
+    expect(parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "tool.progress",
+      toolCallId: "call_one",
+      toolName: "web_search",
+      query: "LangGraph 最新文档",
+      channel: "web",
+      provider: "tavily",
+      resultCount: 2,
+      evidenceCount: 1,
+      source: webResult({ verified: true, limitation: null })
+    }).type).toBe("tool.progress");
   });
 
   it("接受隔离登录态读取的来源类型，但公开事件仍不允许凭据字段", () => {

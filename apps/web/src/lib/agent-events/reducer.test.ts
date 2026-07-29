@@ -157,7 +157,7 @@ describe("reduceAgentEvent", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "tool.started", { toolCallId: "search-presented", name: "X 搜索", summary: "搜索中", channel: "x" }),
       event(2, "tool.completed", { toolCallId: "search-presented", sources: [
-        { title: "原始标题", url: "https://x.com/example/status/1", verified: false, channel: "x", author: "example" }
+        { title: "原始标题", url: "https://x.com/example/status/1", verified: true, channel: "x", author: "example" }
       ] }),
       event(3, "tool.updated", { toolCallId: "search-presented", sourcePresentations: [
         { url: "https://x.com/example/status/1", text: "这条公开帖子讨论了状态图的工具循环。" },
@@ -170,6 +170,75 @@ describe("reduceAgentEvent", () => {
         url: "https://x.com/example/status/1",
         displayText: "这条公开帖子讨论了状态图的工具循环。"
       }]
+    });
+  });
+
+  it("工具进度计数只单调增加，并逐个合并已读来源", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "tool.started", { toolCallId: "search-progress", name: "网页搜索", summary: "搜索中" }),
+      event(2, "tool.progress", { toolCallId: "search-progress", resultCount: 1, evidenceCount: 0, sources: [] }),
+      event(3, "tool.progress", { toolCallId: "search-progress", resultCount: 2, evidenceCount: 1, sources: [
+        { title: "来源一", url: "https://example.com/one", verified: true }
+      ] }),
+      event(4, "tool.progress", { toolCallId: "search-progress", resultCount: 1, evidenceCount: 0, sources: [
+        { title: "来源二", url: "https://example.com/two", verified: true }
+      ] })
+    ]);
+    expect(state.items["tool:search-progress"]).toMatchObject({
+      resultCount: 2,
+      evidenceCount: 1,
+      sources: [
+        { url: "https://example.com/one", verified: true },
+        { url: "https://example.com/two", verified: true }
+      ]
+    });
+  });
+
+  it("流式追加公开思考文段，并拒绝无效来源说明", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "thinking.started", { thinkingId: "thinking-stream", activityKind: "thinking" }),
+      event(2, "thinking.delta", { thinkingId: "thinking-stream", paragraphId: "paragraph", delta: "先核对" }),
+      event(3, "thinking.delta", { thinkingId: "thinking-stream", paragraphId: "paragraph", delta: "来源。" }),
+      event(4, "tool.started", { toolCallId: "search-invalid", name: "网页搜索", summary: "搜索中" }),
+      event(5, "tool.completed", { toolCallId: "search-invalid", sources: [
+        { title: "来源", url: "https://example.com/source", verified: true }
+      ] }),
+      event(6, "tool.updated", { toolCallId: "search-invalid", sourcePresentations: [
+        { url: "https://example.com/source", text: "但帖子详情/正文内容未读取。" },
+        { url: "https://example.com/source", text: "正文仅包含标签，无有效对比内容。" },
+        { url: "https://example.com/source", text: "该教程未涉及 LangChain 与 LangSmith 的区别。" }
+      ] })
+    ]);
+    expect(state.items["thinking-stream"]).toMatchObject({
+      paragraphs: [{ id: "paragraph", text: "先核对来源。" }]
+    });
+    expect(state.items["tool:search-invalid"]).toMatchObject({
+      sources: [{ url: "https://example.com/source", displayText: undefined }]
+    });
+  });
+
+  it("只向已核验来源逐字追加展示文字，并在完成后结束展示态", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "tool.started", { toolCallId: "search-source-stream", name: "小红书搜索", summary: "搜索中" }),
+      event(2, "tool.completed", { toolCallId: "search-source-stream", sources: [
+        { title: "已读取来源", url: "https://example.com/read", verified: true },
+        { title: "候选来源", url: "https://example.com/candidate", verified: false }
+      ] }),
+      event(3, "tool.updated", { toolCallId: "search-source-stream", sourcePresentationActive: true, sourcePresentationUrls: ["https://example.com/read"] }),
+      event(4, "tool.source.delta", { toolCallId: "search-source-stream", url: "https://example.com/read", delta: "这条" }),
+      event(5, "tool.source.delta", { toolCallId: "search-source-stream", url: "https://example.com/read", delta: "笔记有实质内容。" }),
+      event(6, "tool.source.delta", { toolCallId: "search-source-stream", url: "https://example.com/candidate", delta: "不得展示" }),
+      event(7, "tool.updated", { toolCallId: "search-source-stream", sourcePresentationActive: true, sourcePresentationUrls: ["https://example.com/read"] }),
+      event(8, "tool.source.delta", { toolCallId: "search-source-stream", url: "https://example.com/read", delta: "重新润色后的有效说明。" }),
+      event(9, "tool.updated", { toolCallId: "search-source-stream", sourcePresentationActive: false })
+    ]);
+    expect(state.items["tool:search-source-stream"]).toMatchObject({
+      status: "completed",
+      sourcePresentationActive: false,
+      sources: [
+        { url: "https://example.com/read", verified: true, displayText: "重新润色后的有效说明。" },
+        { url: "https://example.com/candidate", verified: false, displayText: undefined }
+      ]
     });
   });
 

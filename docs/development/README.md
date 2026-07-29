@@ -30,4 +30,5 @@
 - [前端 Agent 工作台：过程、引导与消息队列](2026-07-27-005-agent-frontend.md)
 - [真实 LangGraph 多 Agent 搜索闭环与递增展示](2026-07-28-006-langgraph-search-agent.md)
 - [LangGraph 自适应多渠道搜索 Agent](2026-07-29-007-multichannel-search-agent.md)
+- [Agent 公开文段流式展示与有效来源增量](2026-07-29-008-streamed-process-effective-sources.md)
 - [开发记录模板](TEMPLATE.md)

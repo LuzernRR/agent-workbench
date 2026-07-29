@@ -21,6 +21,7 @@ from app.graph.schemas import (
     IntentResult,
     PlanResult,
     ReflectResult,
+    SourcePresentationResult,
     VerifyResult,
 )
 from app.graph.state import (
@@ -44,10 +45,12 @@ from app.prompts.agents import (
     PLANNER_PROMPT,
     REFLECTOR_PROMPT,
     RESEARCHER_PROMPT,
+    SOURCE_CURATOR_PROMPT,
     SUPERVISOR_PROMPT,
     VERIFIER_PROMPT,
     WRITER_PROMPT,
 )
+from app.tools.channels.base import ChannelProgress
 from app.tools.search_tool import (
     SEARCH_TOOL_SPEC,
     SearchExecutionResult,
@@ -62,6 +65,24 @@ _MIN_TOOL_WINDOW_SECONDS = {
     "x": 10,
     "xiaohongshu": 45,
 }
+_INEFFECTIVE_SOURCE_TEXT = re.compile(
+    r"(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|"
+    r"仅(?:发现|检索到).{0,12}(?:候选|索引)|"
+    r"(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}"
+    r"(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|"
+    r"(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|"
+    r"(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}"
+    r"(?:对比|区别|内容|信息|说明|细节|证据)|"
+    r"(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}"
+    r"(?:内容|信息|证据|说明))",
+)
+_INEFFECTIVE_PROCESS_TEXT = re.compile(
+    r"(?:渠道降级|"
+    r"未(?:成功)?(?:读取|获取|加载).{0,12}(?:正文|内容|详情)|"
+    r"(?:正文|详情).{0,12}未(?:读取|获取|加载)|"
+    r"仅(?:发现|检索到).{0,12}(?:候选|索引)|"
+    r"其余来源.{0,16}未读取)",
+)
 
 
 def _step(node: str, kind: str, summary: str | None, detail: str = "") -> list[ThinkStep]:
@@ -246,6 +267,21 @@ def _tool_feedback(state: SearchState) -> list[dict[str, Any]]:
     ]
 
 
+def _verification_tool_feedback(state: SearchState) -> list[dict[str, Any]]:
+    """核验只接收调用级计数，避免把未读候选限制误套到已读 Evidence。"""
+
+    return [
+        {
+            "query": item["query"],
+            "channel": item["channel"],
+            "resultCount": item["result_count"],
+            "evidenceCount": item["evidence_count"],
+            "errorCode": item.get("error_code"),
+        }
+        for item in (state.get("tool_traces") or [])[-12:]
+    ]
+
+
 def _fresh_follow_up_searches(
     state: SearchState, items: list[Any]
 ) -> list[SearchRequest]:
@@ -276,6 +312,42 @@ def _result_limitation(result: SearchExecutionResult) -> str | None:
     elif result.ok and result.results and not result.evidence and not values:
         values.append("仅发现公开候选，未读取到可核验正文")
     return safe_public_text("；".join(values), max_chars=500)
+
+
+def _effective_source_text(value: str | None) -> str | None:
+    text = safe_public_text(value, max_chars=180)
+    if not text or _INEFFECTIVE_SOURCE_TEXT.search(text):
+        return None
+    return text
+
+
+def _effective_process_text(value: str | None) -> str | None:
+    """只透传 Agent 的有用公开摘要；不以本地模板替代被拒绝内容。"""
+
+    text = safe_public_text(value)
+    if not text or _INEFFECTIVE_PROCESS_TEXT.search(text):
+        return None
+    return text
+
+
+def _group_source_presentations(
+    presentations: list[Any],
+    current_evidence: list[Evidence],
+) -> dict[str, list[dict[str, str]]]:
+    evidence_by_url = {item["url"]: item for item in current_evidence}
+    by_call: dict[str, list[dict[str, str]]] = {}
+    seen: set[str] = set()
+    for presentation in presentations:
+        evidence_item = evidence_by_url.get(presentation.url)
+        public_text = _effective_source_text(presentation.text)
+        if not evidence_item or not public_text or presentation.url in seen:
+            continue
+        seen.add(presentation.url)
+        by_call.setdefault(evidence_item["tool_call_id"], []).append({
+            "url": presentation.url,
+            "text": public_text,
+        })
+    return by_call
 
 
 async def load_context(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
@@ -355,7 +427,7 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
         "steps": _step(
             "classify_intent",
             "model",
-            safe_public_text(result.summary),
+            _effective_process_text(result.summary),
             f"task_type={result.task_type} need_search={need_search} channels={result.channels}",
         ),
     }
@@ -443,7 +515,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
         "steps": _step(
             "plan_research",
             "model",
-            safe_public_text(result.summary),
+            _effective_process_text(result.summary),
             f"new_searches={len(fresh_searches)}",
         ),
     }
@@ -466,8 +538,30 @@ async def _run_one_search(
     arguments: SearchToolInput,
     *,
     timeout_seconds: float | None = None,
+    xiaohongshu_public_only: bool = False,
 ) -> tuple[SearchExecutionResult, SearchTrace]:
     writer = get_stream_writer()
+    progress_emitted = False
+    observed_result_count = 0
+    observed_evidence_count = 0
+
+    def stream_progress(update: ChannelProgress) -> None:
+        nonlocal observed_evidence_count, observed_result_count, progress_emitted
+        progress_emitted = True
+        observed_result_count = max(observed_result_count, update.result_count)
+        observed_evidence_count = max(observed_evidence_count, update.evidence_count)
+        writer(runtime_event(
+            "tool.progress",
+            toolCallId=tool_call_id,
+            toolName="web_search",
+            query=arguments.query,
+            channel=arguments.channel,
+            provider=update.provider,
+            resultCount=update.result_count,
+            evidenceCount=update.evidence_count,
+            source=update.source.model_dump(mode="json") if update.source else None,
+        ))
+
     idempotency_key, input_hash = _idempotency_key(state, arguments)
     writer(runtime_event(
         "tool.started",
@@ -582,11 +676,26 @@ async def _run_one_search(
             status = "cached" if result.ok else "failed"
     else:
         try:
+            execution_options = (
+                {"xiaohongshu_public_only": True}
+                if xiaohongshu_public_only
+                else {}
+            )
             if timeout_seconds is None:
-                result = await execute_search_tool(arguments, runtime.context.config)
+                result = await execute_search_tool(
+                    arguments,
+                    runtime.context.config,
+                    progress=stream_progress,
+                    **execution_options,
+                )
             else:
                 async with asyncio.timeout(max(0.001, timeout_seconds)):
-                    result = await execute_search_tool(arguments, runtime.context.config)
+                    result = await execute_search_tool(
+                        arguments,
+                        runtime.context.config,
+                        progress=stream_progress,
+                        **execution_options,
+                    )
         except TimeoutError:
             code = "RUN_TIME_RESERVE"
             result = SearchExecutionResult(
@@ -707,7 +816,30 @@ async def _run_one_search(
                 ))
                 status = "unknown"
 
+    if result.ok and not progress_emitted:
+        for result_count in range(1, len(result.results) + 1):
+            stream_progress(ChannelProgress(
+                provider=result.provider,
+                result_count=result_count,
+                evidence_count=0,
+            ))
+        source_by_url = {item.url: item for item in result.results if item.verified}
+        for evidence_count, item in enumerate(result.evidence, start=1):
+            source = source_by_url.get(item.url)
+            stream_progress(ChannelProgress(
+                provider=result.provider,
+                result_count=len(result.results),
+                evidence_count=evidence_count,
+                source=(
+                    None
+                    if source is None
+                    else source.model_dump()
+                ),
+            ))
+
     public_results = [item.model_dump(mode="json") for item in result.results]
+    settled_result_count = max(observed_result_count, len(result.results))
+    settled_evidence_count = max(observed_evidence_count, len(result.evidence))
     if result.ok:
         writer(runtime_event(
             "tool.completed",
@@ -733,6 +865,8 @@ async def _run_one_search(
             reasonCode=result.error_code or "SEARCH_FAILED",
             message=result.error_message or "搜索失败",
             retryable=(result.error_code or "") in {"TIMEOUT", "PROVIDER_UNAVAILABLE", "RATE_LIMITED"},
+            resultCount=settled_result_count,
+            evidenceCount=settled_evidence_count,
         ))
 
     trace = SearchTrace(
@@ -969,12 +1103,24 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             else:
                 assert arguments is not None
                 current_tool_timeout = tool_timeout_seconds(state, target_channel)
+                prior_traces = [*state.get("tool_traces", []), *traces]
+                xiaohongshu_public_only = (
+                    target_channel == "xiaohongshu"
+                    and any(
+                        trace["channel"] == "xiaohongshu"
+                        and trace["provider"].startswith(
+                            "xiaohongshu-mcp-fallback["
+                        )
+                        for trace in prior_traces
+                    )
+                )
                 result, trace = await _run_one_search(
                     state,
                     runtime,
                     call.id,
                     arguments,
                     timeout_seconds=current_tool_timeout,
+                    xiaohongshu_public_only=xiaohongshu_public_only,
                 )
                 traces.append(trace)
                 if result.error_code == "RUN_TIME_RESERVE":
@@ -1031,7 +1177,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             thinking=True,
         )
         usages.append(summary_turn.usage)
-        research_summary = safe_public_text(summary_turn.content)
+        research_summary = _effective_process_text(summary_turn.content)
         projected_limit = _projected_budget_reason(state, usages)
 
     # 到这里立即丢弃 messages；其中可能含 reasoning_content，绝不进 State。
@@ -1073,6 +1219,11 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
 
 async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
     evidence = state.get("evidence") or []
+    current_evidence = [
+        item
+        for item in evidence
+        if item.get("iteration") == state.get("round", 0)
+    ]
     current_candidates = [
         item
         for item in state.get("candidates") or []
@@ -1109,6 +1260,10 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         )
         for item in current_candidates
     ) or "（当前轮没有候选）"
+    presentation_digest = "\n\n".join(
+        f"[已读来源] {item['title']}\nURL: {item['url']}\n{item['text'][:1000]}"
+        for item in current_evidence
+    ) or "（当前轮没有已读取来源，不得生成 source_presentations）"
     feedback = _tool_feedback(state)
     try:
         result, usage = await invoke_structured(
@@ -1120,7 +1275,10 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
                     f"用户问题：{state['question']}"
                     f"\n逐次真实工具反馈：{json.dumps(feedback, ensure_ascii=False)}"
                     f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
-                    f"\n\n当前轮候选（只允许为这些 URL 生成逐行说明）：\n{candidate_digest}"
+                    f"\n\n当前轮候选反馈（仅用于判断覆盖，不得为未读候选生成来源说明）：\n"
+                    f"{candidate_digest}"
+                    f"\n\n当前轮已读取来源（source_presentations 只允许使用这些 URL）：\n"
+                    f"{presentation_digest}"
                     f"\n\n已读取证据：\n{digest}"
                 )),
             ],
@@ -1150,26 +1308,53 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
     extra = [item["query"] for item in extra_searches]
     sufficient = bool(result.sufficient and evidence)
-    candidate_by_url = {item["url"]: item for item in current_candidates}
-    presentations_by_call: dict[str, list[dict[str, str]]] = {}
-    seen_presentations: set[str] = set()
-    for presentation in result.source_presentations:
-        candidate = candidate_by_url.get(presentation.url)
-        public_text = safe_public_text(presentation.text, max_chars=180)
-        if not candidate or not public_text or presentation.url in seen_presentations:
-            continue
-        seen_presentations.add(presentation.url)
-        presentations_by_call.setdefault(candidate["tool_call_id"], []).append({
-            "url": presentation.url,
-            "text": public_text,
-        })
+    usages = [usage]
+    presentations_by_call = _group_source_presentations(
+        result.source_presentations,
+        current_evidence,
+    )
+    remaining_seconds = remaining_run_seconds(state)
+    can_curate = (
+        bool(current_evidence)
+        and not presentations_by_call
+        and _remaining_model_calls(state) >= usage.attempts + 3
+        and (remaining_seconds is None or remaining_seconds >= 15)
+    )
+    if can_curate:
+        try:
+            curated, curator_usage = await invoke_structured(
+                "reflector",
+                SourcePresentationResult,
+                [
+                    SystemMessage(content=SOURCE_CURATOR_PROMPT),
+                    HumanMessage(content=(
+                        f"用户问题：{state['question']}"
+                        f"\n\n已读取来源（URL 必须原样复制）：\n"
+                        f"{presentation_digest}"
+                    )),
+                ],
+                model_id=state.get("model_id") or None,
+                allow_repair=(
+                    usage.attempts == 1
+                    and _allow_structured_repair(state)
+                    and _remaining_model_calls(state) >= usage.attempts + 4
+                ),
+            )
+            usages.append(curator_usage)
+            presentations_by_call = _group_source_presentations(
+                curated.source_presentations,
+                current_evidence,
+            )
+        except StructuredOutputError as exc:
+            usages.append(exc.usage)
     writer = get_stream_writer()
     for tool_call_id, presentations in presentations_by_call.items():
-        writer(runtime_event(
-            "tool.presented",
-            toolCallId=tool_call_id,
-            sources=presentations,
-        ))
+        for presentation in presentations:
+            writer(runtime_event(
+                "tool.presented",
+                toolCallId=tool_call_id,
+                sources=[presentation],
+            ))
     stop_reason = state.get("stop_reason")
     if not sufficient:
         if state.get("round", 0) >= state.get("max_rounds", 2):
@@ -1186,11 +1371,11 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         "replan_required": replan_required,
         "verification_issue": result.missing,
         "stop_reason": stop_reason,
-        **_structured_usage_patch(state, usage),
+        **_structured_usage_patch(state, _sum_usage(usages)),
         "steps": _step(
             "reflect",
             "model",
-            safe_public_text(result.summary),
+            _effective_process_text(result.summary),
             f"sufficient={sufficient} extra_searches={len(extra_searches)}",
         ),
     }
@@ -1250,7 +1435,7 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         "steps": _step(
             "compose",
             "model",
-            safe_public_text(result.summary),
+            _effective_process_text(result.summary),
             f"answer_chars={len(result.answer_markdown)} sources={len(evidence)}",
         ),
     }
@@ -1288,7 +1473,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         }
 
     digest = "\n\n".join(
-        f"[来源{i + 1}] {item['title']}\n{item['text'][:1200]}"
+        f"[来源{i + 1}] {item['title']}\nURL: {item['url']}\n{item['text'][:1200]}"
         for i, item in enumerate(evidence)
     )
     result, usage = await invoke_structured(
@@ -1299,7 +1484,8 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
             HumanMessage(content=(
                 f"用户问题：{state['question']}"
                 f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
-                f"\n逐次真实工具反馈：{json.dumps(_tool_feedback(state), ensure_ascii=False)}"
+                f"\n调用级搜索统计（只表示发现与已读数量，不得据此否定下方已读来源）："
+                f"{json.dumps(_verification_tool_feedback(state), ensure_ascii=False)}"
                 f"\n\n回答：\n{answer}\n\n来源：\n{digest}"
             )),
         ],
@@ -1338,7 +1524,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         "steps": _step(
             "verify",
             "model",
-            safe_public_text(result.summary),
+            _effective_process_text(result.summary),
             f"passed={passed} action={action}",
         ),
     }

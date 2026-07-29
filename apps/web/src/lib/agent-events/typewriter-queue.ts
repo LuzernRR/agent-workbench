@@ -34,7 +34,8 @@ export type RenderQueueOptions = {
   maxCharsPerFrame?: number;
 };
 
-const TEXT_TYPES = new Set<AgentEvent["type"]>(["text.delta", "message.delta"]);
+const TEXT_TYPES = new Set<AgentEvent["type"]>(["text.delta", "message.delta", "thinking.delta", "tool.source.delta"]);
+const RESETTABLE_MESSAGE_TEXT_TYPES = new Set<AgentEvent["type"]>(["text.delta", "message.delta"]);
 const TERMINAL_TYPES = new Set<AgentEvent["type"]>(["run.completed", "run.failed", "run.cancelled"]);
 
 export function createRenderQueue(options: RenderQueueOptions) {
@@ -84,6 +85,14 @@ export function createRenderQueue(options: RenderQueueOptions) {
           return;
         }
         queue.shift();
+        // Let React paint the final grapheme before applying the following
+        // control event. Without this boundary, a `thinking.completed` or the
+        // end of a source presentation can collapse the row in the same render
+        // batch, so the user never actually sees the last streamed character.
+        if (queue[0] && !queue[0].characters) {
+          frame = requestFrame(drain);
+          return;
+        }
         continue;
       }
       queue.shift();
@@ -100,7 +109,7 @@ export function createRenderQueue(options: RenderQueueOptions) {
       // A quality retry invalidates any unrendered portion of the previous
       // draft. Drop only queued deltas, preserve preceding control/tool
       // events, then apply the reset in durable order.
-      const retained = queue.filter((item) => !TEXT_TYPES.has(item.event.type));
+      const retained = queue.filter((item) => !RESETTABLE_MESSAGE_TEXT_TYPES.has(item.event.type));
       queue.splice(0, queue.length, ...retained, { event, characters: null, offset: 0 });
       schedule();
       return;

@@ -26,8 +26,10 @@ from app.config.agent import AgentConfig
 from app.tools.channels.base import (
     ChannelEvidence,
     ChannelOutcome,
+    ChannelProgressReporter,
     ChannelResult,
     SourceProvenance,
+    report_progress,
 )
 from app.tools.channels.xiaohongshu_public import XiaohongshuPublicChannel
 
@@ -36,18 +38,62 @@ _MCP_HOST = "xiaohongshu-mcp"
 _MCP_PORT = 18060
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_EVIDENCE_CHARS = 2_400
+_MIN_SUBSTANTIVE_DESCRIPTION_CHARS = 12
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,96}$")
 _SAFE_TOKEN_RE = re.compile(r"^[^\s]{8,4096}$")
+_TOPIC_TAG_RE = re.compile(r"#[^#]{1,80}(?:\[话题\])?#")
 _SEARCH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
     WeakKeyDictionary()
 )
 _FALLBACK_ERROR_CODES = {
     "AUTH_REQUIRED",
+    "CAPTCHA_REQUIRED",
+    "MCP_NETWORK_ERROR",
     "MCP_TIMEOUT",
     "MCP_UNAVAILABLE",
     "MCP_OUTPUT_INVALID",
     "MCP_RATE_LIMITED",
 }
+
+
+def _server_failure_code(response: httpx.Response) -> str:
+    """把受控 MCP 500 响应细分为稳定错误码，不泄露上游详情。"""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return "MCP_UNAVAILABLE"
+    detail = _safe_text(_dict(payload).get("details"), 500).casefold()
+    if any(
+        marker in detail
+        for marker in (
+            "安全验证",
+            "captcha",
+        )
+    ):
+        return "CAPTCHA_REQUIRED"
+    if any(
+        marker in detail
+        for marker in (
+            "deadline exceeded",
+            "deadlineexceeded",
+            "timeout",
+            "timed out",
+        )
+    ):
+        return "MCP_TIMEOUT"
+    if any(
+        marker in detail
+        for marker in (
+            "net.operror",
+            "connection reset",
+            "connection refused",
+            "network is unreachable",
+            "tls handshake",
+        )
+    ):
+        return "MCP_NETWORK_ERROR"
+    return "MCP_UNAVAILABLE"
 
 
 def _search_lock() -> asyncio.Lock:
@@ -158,6 +204,20 @@ def _safe_text(value: Any, limit: int) -> str:
 def _safe_optional(value: Any, limit: int) -> str | None:
     text = _safe_text(value, limit)
     return text or None
+
+
+def _substantive_description(value: str) -> str:
+    """标题、话题标签和表情不单独算作可供回答的正文证据。"""
+
+    text = _safe_text(value, _MAX_EVIDENCE_CHARS)
+    without_topics = _TOPIC_TAG_RE.sub(" ", text)
+    without_mentions = re.sub(r"(?<!\w)@[^\s#]+", " ", without_topics)
+    informative = re.findall(r"[\u3400-\u9fffA-Za-z0-9]", without_mentions)
+    return (
+        text
+        if len(informative) >= _MIN_SUBSTANTIVE_DESCRIPTION_CHARS
+        else ""
+    )
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -291,7 +351,18 @@ class XiaohongshuMcpClient:
                     "小红书登录态服务当前不可用",
                 ) from exc
 
-            if response.status_code >= 500 and attempt + 1 < attempts:
+            server_failure = (
+                _server_failure_code(response)
+                if response.status_code >= 500
+                else ""
+            )
+            # 页面级 deadline 或安全验证已经给出确定结果，再重试只会成倍
+            # 消耗 LangGraph 运行预算；网络瞬断和未分类 5xx 仍保留一次受限重试。
+            if (
+                response.status_code >= 500
+                and server_failure not in {"CAPTCHA_REQUIRED", "MCP_TIMEOUT"}
+                and attempt + 1 < attempts
+            ):
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
             break
@@ -318,9 +389,15 @@ class XiaohongshuMcpClient:
                 "小红书登录状态已失效，需要重新扫码",
             )
         if response.status_code >= 500:
+            code = _server_failure_code(response)
+            message = {
+                "CAPTCHA_REQUIRED": "小红书搜索需要安全验证",
+                "MCP_TIMEOUT": "小红书登录态搜索超时",
+                "MCP_NETWORK_ERROR": "小红书登录态搜索网络异常",
+            }.get(code, "小红书登录态服务读取失败")
             raise XiaohongshuMcpError(
-                "MCP_UNAVAILABLE",
-                "小红书登录态服务读取失败",
+                code,
+                message,
             )
         if response.status_code >= 400:
             raise XiaohongshuMcpError(
@@ -549,8 +626,17 @@ class XiaohongshuMcpChannel:
         query: str,
         max_results: int,
         original_error: XiaohongshuMcpError,
+        progress: ChannelProgressReporter | None = None,
     ) -> ChannelOutcome:
-        outcome = await self.public_fallback.search(query, max_results)
+        outcome = (
+            await self.public_fallback.search(query, max_results)
+            if progress is None
+            else await self.public_fallback.search(
+                query,
+                max_results,
+                progress=progress,
+            )
+        )
         if not outcome.ok:
             return ChannelOutcome(
                 ok=False,
@@ -586,23 +672,61 @@ class XiaohongshuMcpChannel:
         )
         return outcome
 
-    async def search(self, query: str, max_results: int) -> ChannelOutcome:
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+    ) -> ChannelOutcome:
         async with _search_lock():
-            return await self._search_serialized(query, max_results)
+            return await self._search_serialized(query, max_results, progress)
+
+    async def search_public_after_mcp_failure(
+        self,
+        query: str,
+        max_results: int,
+        progress: ChannelProgressReporter | None = None,
+    ) -> ChannelOutcome:
+        """本次 LangGraph 运行已观察到 MCP 故障时直接切换公开策略。"""
+
+        return await self._fallback(
+            query,
+            max_results,
+            XiaohongshuMcpError(
+                "MCP_CIRCUIT_OPEN",
+                "本次运行已切换到小红书公开检索策略",
+            ),
+            progress,
+        )
 
     async def _search_serialized(
         self,
         query: str,
         max_results: int,
+        progress: ChannelProgressReporter | None = None,
     ) -> ChannelOutcome:
         if self.client is None:
-            return await self.public_fallback.search(query, max_results)
+            return (
+                await self.public_fallback.search(query, max_results)
+                if progress is None
+                else await self.public_fallback.search(
+                    query,
+                    max_results,
+                    progress=progress,
+                )
+            )
 
         try:
+            login = await self.client.check_login_status()
+            if not login.is_logged_in:
+                raise XiaohongshuMcpError(
+                    "AUTH_REQUIRED",
+                    "小红书登录状态已失效，需要重新扫码",
+                )
             candidates = await self.client.search_feeds(query, max_results)
         except XiaohongshuMcpError as exc:
             if exc.code in _FALLBACK_ERROR_CODES:
-                return await self._fallback(query, max_results, exc)
+                return await self._fallback(query, max_results, exc, progress)
             return ChannelOutcome(
                 ok=False,
                 channel="xiaohongshu",
@@ -619,7 +743,15 @@ class XiaohongshuMcpChannel:
             max_results,
             self.config.graph.max_pages_per_call,
         )
-        for index, candidate in enumerate(candidates[:max_results]):
+        visible_candidates = candidates[:max_results]
+        for result_count in range(1, len(visible_candidates) + 1):
+            report_progress(
+                progress,
+                provider=_MCP_PROVIDER,
+                result_count=result_count,
+                evidence_count=0,
+            )
+        for index, candidate in enumerate(visible_candidates):
             detail: XiaohongshuFeedDetail | None = None
             detail_error: XiaohongshuMcpError | None = None
             if index < max_details:
@@ -635,11 +767,16 @@ class XiaohongshuMcpChannel:
             title = (detail.title if detail and detail.title else candidate.title)[:300]
             author = detail.author if detail and detail.author else candidate.author
             metrics = detail.metrics if detail and detail.metrics else candidate.metrics
+            description = (
+                _substantive_description(detail.description)
+                if detail
+                else ""
+            )
             body = ""
-            if detail:
+            if detail and description:
                 body = "\n".join(
                     part
-                    for part in (detail.title, detail.description)
+                    for part in (detail.title, description)
                     if part
                 )[:_MAX_EVIDENCE_CHARS]
             verified = bool(body)
@@ -650,8 +787,12 @@ class XiaohongshuMcpChannel:
                     str(detail_error)
                     if detail_error
                     else (
-                        "登录态搜索已发现笔记，但受单轮详情读取上限限制，"
-                        "未读取正文"
+                        "登录态详情缺少可用于回答的实质正文"
+                        if detail
+                        else (
+                            "登录态搜索已发现笔记，但受单轮详情读取上限限制，"
+                            "未读取正文"
+                        )
                     )
                 )
             )
@@ -662,22 +803,21 @@ class XiaohongshuMcpChannel:
                 observed_at=observed_at,
                 confidence="high" if verified else "medium",
             )
-            results.append(
-                ChannelResult(
-                    channel="xiaohongshu",
-                    provider=_MCP_PROVIDER,
-                    query=query,
-                    url=url,
-                    title=title,
-                    snippet=detail.description[:500] if detail else "",
-                    verified=verified,
-                    author=author,
-                    published_at=detail.published_at if detail else None,
-                    metrics=metrics,
-                    limitation=limitation,
-                    provenance=provenance,
-                )
+            result = ChannelResult(
+                channel="xiaohongshu",
+                provider=_MCP_PROVIDER,
+                query=query,
+                url=url,
+                title=title,
+                snippet=detail.description[:500] if detail else "",
+                verified=verified,
+                author=author,
+                published_at=detail.published_at if detail else None,
+                metrics=metrics,
+                limitation=limitation,
+                provenance=provenance,
             )
+            results.append(result)
             if verified:
                 evidence.append(
                     ChannelEvidence(
@@ -695,6 +835,13 @@ class XiaohongshuMcpChannel:
                         limitation=limitation,
                         provenance=provenance,
                     )
+                )
+                report_progress(
+                    progress,
+                    provider=_MCP_PROVIDER,
+                    result_count=len(visible_candidates),
+                    evidence_count=len(evidence),
+                    source=result,
                 )
         return ChannelOutcome(
             ok=True,

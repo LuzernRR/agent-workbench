@@ -97,11 +97,11 @@ describe("live Search Agent engine", () => {
     await vi.waitFor(() => expect(store.finalizeLiveRun).toHaveBeenCalledWith(expect.objectContaining({ agentId: "search-agent" }), "completed", expect.objectContaining({ promptVersion: "2026-07-28.v2", verificationPassed: true, partial: false, sourceEventId: "stream_test_000001" }), expect.anything()));
 
     expect(searchAgent.streamSearchAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: "run_one", visitorId: "visitor_one", question: "最新 LangGraph 是什么？", resume: false }), expect.any(AbortSignal));
-    expect(store.persistLiveEvent.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["run.started", "thinking.started", "thinking.paragraph", "tool.started", "tool.completed"]));
+    expect(store.persistLiveEvent.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["run.started", "thinking.started", "thinking.delta", "tool.started", "tool.completed"]));
     const thinkingPayloads = store.persistLiveEvent.mock.calls.filter((call) => String(call[1]).startsWith("thinking.")).map((call) => call[2]);
     expect(thinkingPayloads.every((payload) => payload.thinkingId === "thinking:run_one:research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBe(true);
     expect(thinkingPayloads[0]).toEqual(expect.objectContaining({ activityKind: "thinking" }));
-    expect(thinkingPayloads.find((payload) => payload.text)?.text).toBe("已观察搜索结果并整理证据覆盖");
+    expect(thinkingPayloads.find((payload) => payload.delta)?.delta).toBe("已观察搜索结果并整理证据覆盖");
     expect(JSON.stringify(thinkingPayloads)).not.toMatch(/正在|【/u);
     expect(JSON.stringify(store.persistLiveEvent.mock.calls)).not.toContain("不得持久化");
     const completion = store.finalizeLiveRun.mock.calls.at(-1)?.[3] as { events: Array<{ type: string; payload: Record<string, unknown> }> };

@@ -7,13 +7,13 @@
   "graph": {
     "defaultDepth": "balanced",
     "recursionLimit": 48,
-    "maxIterations": 2,
+    "maxIterations": 3,
     "maxModelCalls": 16,
     "maxToolCalls": 6,
     "maxRunSeconds": 240,
     "maxTotalTokens": 120000,
     "maxCostUsd": 0.25,
-    "noProgressLimit": 2,
+    "noProgressLimit": 3,
     "maxResultsPerCall": 5,
     "maxPagesPerCall": 3
   },

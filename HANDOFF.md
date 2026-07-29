@@ -1,5 +1,68 @@
 # 项目交接
 
+## 当前结论（2026-07-29，Issue #9 等待用户验收）
+
+- 当前唯一活动功能是
+  [#9](https://github.com/LuzernRR/agent-workbench/issues/9)“Agent 公开过程流式展示、
+  有效来源增量与生产域名切换”，状态为 `ready`，`Execution Gate: allowed`。
+  实现、部署和技术验收完成后必须停在用户确认门；验收前不得 stage、commit、
+  push、关闭 Issue 或开始下一功能。
+- 生产入口为
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)。Cloudflare
+  Tunnel 只把 `luzern.cc.cd` 与 `www.luzern.cc.cd` 转到
+  `http://127.0.0.1:3000`；Search Agent 只绑定 `127.0.0.1:8080`，PostgreSQL、
+  Milvus、etcd、MinIO 与 `xiaohongshu-mcp` 均未对公网发布。
+- Prompt 版本为 `2026-07-29.v12-cross-channel-recovery`。Planner、Researcher、
+  Reflector、Writer、Verifier 的公开摘要通过版本化 LangGraph 输出产生；事件
+  投影不读取或展示 `reasoning_content`，也不保存私有 CoT。
+- `node.completed` 与 `verification.completed` 被投影为持久
+  `thinking.started → thinking.delta → thinking.completed`。Web 渲染队列按
+  grapheme 渐进消费真实 delta。当前步骤以“思考中/核验中”展开，完成后仍保持
+  展开；只有下一个不同步骤真正出现才折叠为“思考结束/核验结束”。相邻同类节点
+  保留在同一展开区中的多个独立段落，因此不会在两段连续思考之间折叠后又重开；
+  类型交替后新建下方时间段，绝不回填旧段。
+- Web、X、小红书公开渠道和登录态 `xiaohongshu-mcp` 都在真实发现候选与读取
+  正文时上报 `tool.progress`。BFF 按原始 `toolCallId` 持久化，Reducer 只接受
+  单调不减的 `resultCount/evidenceCount`；同一连续搜索段显示动态
+  “找到 N 条结果，读取 M 个来源”，刷新后从事件账本重建一致数字。
+- Reflector 的 `source_presentations` 只允许引用当前轮真实 Evidence URL，并按
+  来源逐条发布 `tool.presented`。BFF 将其投影为持久
+  `tool.source.delta`，与思考共用 grapheme 队列，链接文字逐字增长；最后一个
+  字符先获得独立绘制帧，随后才允许步骤切换。Prompt、Python 投影、BFF Mapper、
+  Reducer 与 Conversation UI 均拒绝未读候选和“正文未读取、仅发现候选、尚未
+  核验”等无效文案；展开区只显示 verified URL 与 LLM 基于已读正文生成的有效
+  说明。缺少合格说明时由受限 Source Curator Agent 基于同一 Evidence 补齐，
+  不使用前端模板兜底。
+- 小红书标题与话题标签不再计为 Evidence。登录态探测约 1 秒确认有效；站内搜索
+  被平台跳转到安全验证时，以 `CAPTCHA_REQUIRED` 在约 1 秒内受控返回，不绕过
+  验证码、不重试验证码页。Reflector 在平台正文受限时切换 Web 等互补只读渠道；
+  配置允许最多三轮、连续三轮无进展才熔断。
+- 真实公网小红书多轮验收生成的桌面和移动端证据位于
+  `docs/development/evidence/2026-07-29-issue-9-{desktop,mobile}.png`。移动端
+  `390×844` 没有横向溢出，呈现顺序为自然文段、动态搜索及有效来源、新自然
+  文段和后续搜索。
+- 最新门禁：Search Agent `138 passed`，Ruff/compileall 通过；Web
+  `339 passed, 1 skipped`，typecheck、全量 ESLint、production build 通过；
+  3110 deterministic Playwright `16 passed, 2 skipped`；公网真实 Playwright
+  两项全部通过。`xiaohongshu-mcp` 镜像构建内 `go test ./...` 全部通过。
+- Compose 七服务运行于 project `001-agent-live`。旧容器
+  `kanna-workbench-backend-1` 仅被可恢复地停止，当前 exit code 为 `143`；
+  没有删除容器、镜像、卷或数据。回滚命令：
+  `docker start kanna-workbench-backend-1`。恢复前必须先处理它与本项目
+  `127.0.0.1:8080` 的端口冲突。
+- 中文记录：
+  `docs/development/2026-07-29-008-streamed-process-effective-sources.md`。
+
+### Issue #9 收口边界
+
+1. Search Agent pytest/Ruff/compileall、Web test/typecheck/lint/build、3110
+   E2E 与生产 live E2E 已完成；提交验收前仍需复核 Compose、域名、日志和
+   `git diff --check`。
+2. 验收前保持暂存集合为空；保留 `config/*.local.*`、小红书私有 session volume、
+   D 盘 Milvus 和所有现有数据。
+3. 用户明确回复“通过”后，才允许为 Issue #9 执行一次受控
+   stage、commit、push 与 Issue close；提交必须包含规定的 Codex 联合署名。
+
 ## 当前结论（2026-07-29，Issue #8 已获用户验收）
 
 - 用户已于 2026-07-29 明确回复“验收通过”，验收 Issue

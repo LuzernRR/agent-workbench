@@ -30,6 +30,24 @@ function channelName(channel: "web" | "x" | "xiaohongshu") {
   return channel === "x" ? "X 搜索" : channel === "xiaohongshu" ? "小红书搜索" : "网页搜索";
 }
 
+type SearchResultEvent = Extract<SearchAgentEvent, { type: "tool.completed" }>["results"][number];
+
+const ineffectiveSourceText = /(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明))/u;
+
+function verifiedSource(result: SearchResultEvent | null) {
+  if (!result?.verified) return null;
+  const url = safeUrl(result.url);
+  if (!url) return null;
+  return {
+    title: oneLine(result.title, 300),
+    url,
+    verified: true,
+    channel: result.channel,
+    author: result.author ? oneLine(result.author, 160) : undefined,
+    publishedAt: result.published_at || undefined
+  };
+}
+
 function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): SearchAgentProjection {
   if (event.type === "node.started") {
     // 节点开始时还没有可公开的模型摘要。若此时先创建思考项，工具事件会
@@ -44,11 +62,11 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     return { events: [
       { type: "thinking.started", payload: { thinkingId: id, activityKind: "thinking" } },
       {
-        type: "thinking.paragraph",
+        type: "thinking.delta",
         payload: {
           thinkingId: id,
           paragraphId: `${id}:detail`,
-          text: oneLine(event.publicSummary),
+          delta: oneLine(event.publicSummary),
           agent: event.agent,
           node: event.node,
           iteration: event.iteration,
@@ -71,29 +89,63 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     const unknown = event.toolName === "unknown_tool";
     return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
   }
+  if (event.type === "tool.progress") {
+    const source = verifiedSource(event.source);
+    return {
+      events: [{
+        type: "tool.progress",
+        payload: {
+          toolCallId: event.toolCallId,
+          channel: event.channel,
+          query: oneLine(event.query, 300),
+          provider: oneLine(event.provider, 80),
+          resultCount: event.resultCount,
+          evidenceCount: event.evidenceCount,
+          sources: source ? [source] : []
+        }
+      }]
+    };
+  }
   if (event.type === "tool.completed") {
-    const sources = event.results.map((result) => ({
-      title: oneLine(result.title, 300),
-      url: safeUrl(result.url),
-      verified: result.verified,
-      channel: result.channel,
-      author: result.author ? oneLine(result.author, 160) : undefined,
-      publishedAt: result.published_at || undefined,
-      limitation: result.limitation ? oneLine(result.limitation, 500) : undefined
-    })).filter((result) => result.url);
+    const sources = event.results
+      .map((result) => verifiedSource(result))
+      .filter((result): result is NonNullable<typeof result> => Boolean(result));
     return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached } }] };
   }
   if (event.type === "tool.presented") {
     const sourcePresentations = event.sources.map((source) => ({
       url: safeUrl(source.url),
       text: oneLine(source.text, 180)
-    })).filter((source) => source.url && source.text);
+    })).filter((source) => source.url && source.text && !ineffectiveSourceText.test(source.text));
     return sourcePresentations.length
-      ? { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, sourcePresentations } }] }
+      ? {
+          events: [
+            {
+              type: "tool.updated",
+              payload: {
+                toolCallId: event.toolCallId,
+                sourcePresentationActive: true,
+                sourcePresentationUrls: sourcePresentations.map((source) => source.url)
+              }
+            },
+            ...sourcePresentations.map((source) => ({
+              type: "tool.source.delta" as const,
+              payload: {
+                toolCallId: event.toolCallId,
+                url: source.url,
+                delta: source.text
+              }
+            })),
+            {
+              type: "tool.updated",
+              payload: { toolCallId: event.toolCallId, sourcePresentationActive: false }
+            }
+          ]
+        }
       : { events: [] };
   }
   if (event.type === "tool.failed") {
-    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable } }] };
+    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable, resultCount: event.resultCount ?? 0, evidenceCount: event.evidenceCount ?? 0 } }] };
   }
   if (event.type === "tool.unknown") {
     return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", channel: event.channel, query: oneLine(event.query, 300), error: event.reasonCode } }] };
@@ -112,11 +164,11 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     return { events: [
       { type: "thinking.started", payload: { thinkingId: id, activityKind: "verification" } },
       {
-        type: "thinking.paragraph",
+        type: "thinking.delta",
         payload: {
           thinkingId: id,
           paragraphId: `${id}:detail`,
-          text: oneLine(event.publicSummary),
+          delta: oneLine(event.publicSummary),
           agent: "verifier",
           node: "verify"
         }

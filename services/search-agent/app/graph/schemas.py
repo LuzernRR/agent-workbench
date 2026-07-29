@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
@@ -59,7 +60,39 @@ class SourcePresentation(StrictModel):
     text: str = Field(
         min_length=1,
         max_length=500,
-        description="只基于该候选可见字段写成的一句中文，不补造未读取事实；节点会再压缩到180字",
+        description="只基于已读取正文写成的一句有效中文，不描述未读取、访问限制或候选状态；节点会再压缩到180字",
+    )
+
+
+_INEFFECTIVE_PRESENTATION_TEXT = re.compile(
+    r"(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|"
+    r"仅(?:发现|检索到).{0,12}(?:候选|索引)|"
+    r"(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|"
+    r"(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}"
+    r"(?:对比|区别|内容|信息|说明|细节|证据)|"
+    r"(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}"
+    r"(?:内容|信息|证据|说明))",
+)
+
+
+class CuratedSourcePresentation(SourcePresentation):
+    """Source Curator 必须返回能直接展示的有效说明。"""
+
+    @field_validator("text")
+    @classmethod
+    def require_effective_text(cls, value: str) -> str:
+        if _INEFFECTIVE_PRESENTATION_TEXT.search(value):
+            raise ValueError("来源说明必须包含正文中的有效信息")
+        return value
+
+
+class SourcePresentationResult(StrictModel):
+    """独立 Source Curator Agent 的结构化结果。"""
+
+    source_presentations: list[CuratedSourcePresentation] = Field(
+        description="为已读取来源生成至少一条可直接展示的有效中文说明",
+        min_length=1,
+        max_length=10,
     )
 
 
@@ -75,7 +108,7 @@ class ReflectResult(StrictModel):
     )
     source_presentations: list[SourcePresentation] = Field(
         default_factory=list,
-        description="仅为当前轮候选 URL 生成逐条单行公开说明；节点只接受真实候选 URL",
+        description="仅为当前轮已读取 Evidence URL 生成逐条有效说明；未读候选不得出现",
         max_length=50,
     )
     summary: str = Field(description="一句话说明证据评估结论，面向用户，不超过80字")

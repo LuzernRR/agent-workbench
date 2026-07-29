@@ -205,7 +205,7 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
     ports:
-      - "${SEARCH_AGENT_BIND_ADDRESS:-127.0.0.1}:${SEARCH_AGENT_HOST_PORT:-18100}:8100"
+      - "${SEARCH_AGENT_BIND_ADDRESS:-127.0.0.1}:${SEARCH_AGENT_HOST_PORT:-8080}:8100"
     volumes:
       - type: bind
         source: ../config
@@ -267,7 +267,7 @@ services:
       WORKBENCH_SEARCH_AGENT_ORIGIN: http://search-agent:8100
       WORKBENCH_INTERNAL_TOKEN: ${WORKBENCH_INTERNAL_TOKEN:?WORKBENCH_INTERNAL_TOKEN is required}
     ports:
-      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3100}:3100"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3100"
     volumes:
       - type: bind
         source: ../config

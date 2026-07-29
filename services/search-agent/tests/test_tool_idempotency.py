@@ -69,7 +69,11 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
     executions = 0
     events: list[dict[str, Any]] = []
 
-    async def execute(arguments: SearchToolInput, config: Any) -> SearchExecutionResult:
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+    ) -> SearchExecutionResult:
         nonlocal executions
         executions += 1
         return SearchExecutionResult(
@@ -112,7 +116,11 @@ async def test_cancellation_marks_inflight_tool_operation_unknown(
     ledger = Ledger()
     entered = asyncio.Event()
 
-    async def execute(arguments: SearchToolInput, config: Any) -> SearchExecutionResult:
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+    ) -> SearchExecutionResult:
         entered.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -146,7 +154,11 @@ async def test_cached_status_without_result_fails_closed(
     executions = 0
     events: list[dict[str, Any]] = []
 
-    async def execute(arguments: SearchToolInput, config: Any) -> SearchExecutionResult:
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+    ) -> SearchExecutionResult:
         nonlocal executions
         executions += 1
         raise AssertionError("provider must not be replayed")
@@ -174,7 +186,11 @@ async def test_ledger_settlement_failure_closes_tool_as_unknown(
         async def complete(self, key: str, result: dict[str, Any]) -> None:
             raise RuntimeError("database down")
 
-    async def execute(arguments: SearchToolInput, config: Any) -> SearchExecutionResult:
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+    ) -> SearchExecutionResult:
         return SearchExecutionResult(
             ok=True,
             channel=arguments.channel,

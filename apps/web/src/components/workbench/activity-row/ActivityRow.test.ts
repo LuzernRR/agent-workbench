@@ -74,6 +74,41 @@ describe("isPlaceholderTool", () => {
 });
 
 describe("SearchActivitySummary", () => {
+  it("已结束的当前搜索保持展开，下一步骤出现后再折叠", () => {
+    const item = {
+      kind: "tool" as const,
+      id: "tool:search-current",
+      runId: "run-one",
+      toolCallId: "search-current",
+      name: "网页搜索",
+      summary: "找到 1 条结果",
+      status: "completed" as const,
+      resultCount: 1,
+      evidenceCount: 1,
+      sources: [{
+        title: "已读来源",
+        url: "https://example.com/current",
+        verified: true,
+        displayText: "这条来源文字已经完整流式展示。"
+      }],
+      createdAt: "2026-07-29T00:00:00.000Z"
+    };
+    const view = render(createElement(SearchActivitySummary, {
+      items: [item],
+      isCurrentStep: true
+    }));
+
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("这条来源文字已经完整流式展示。");
+
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [item],
+      isCurrentStep: false
+    }));
+    expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(view.container.querySelector("[data-search-activity-details]")).toBeNull();
+  });
+
   it("搜索进行中自动展开，完成后折叠并保留真实累计计数与手动展开", () => {
     const running = {
       kind: "tool" as const,
@@ -85,38 +120,38 @@ describe("SearchActivitySummary", () => {
       status: "running" as const,
       resultCount: 2,
       evidenceCount: 1,
-      sources: [{ title: "进行中的来源", url: "https://example.com/live", verified: true }],
+      sources: [{ title: "进行中的来源", url: "https://example.com/live", verified: true, displayText: "该来源给出了当前检索所需的有效信息。" }],
       createdAt: "2026-07-28T00:00:00.000Z"
     };
     const view = render(createElement(SearchActivitySummary, { items: [running] }));
 
-    expect(screen.getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
-    expect(view.container).toHaveTextContent("搜索中");
-    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("进行中的来源");
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源给出了当前检索所需的有效信息。");
 
     view.rerender(createElement(SearchActivitySummary, {
       items: [{ ...running, status: "completed" as const }]
     }));
-    expect(screen.getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
     expect(view.container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
     expect(view.container.querySelector("[data-search-activity-details]")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "展开搜索详情" }));
-    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("进行中的来源");
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源给出了当前检索所需的有效信息。");
 
     const nextRunning = {
       ...running,
       id: "tool:search-next",
       toolCallId: "search-next",
       resultCount: 3,
-      sources: [{ title: "下一轮来源", url: "https://example.com/next", verified: true }]
+      sources: [{ title: "下一轮来源", url: "https://example.com/next", verified: true, displayText: "下一轮读取了另一条有效来源。" }]
     };
     view.rerender(createElement(SearchActivitySummary, {
       items: [{ ...running, status: "completed" as const }, nextRunning]
     }));
-    expect(screen.getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
-    expect(view.container).toHaveTextContent("搜索中");
-    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("下一轮来源");
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("下一轮读取了另一条有效来源。");
 
     view.rerender(createElement(SearchActivitySummary, {
       items: [
@@ -124,8 +159,40 @@ describe("SearchActivitySummary", () => {
         { ...nextRunning, status: "completed" as const }
       ]
     }));
-    expect(screen.getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
     expect(view.container).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+  });
+
+  it("来源文字仍在流式展示时重新展开，展示完成后自动折叠", () => {
+    const item = {
+      kind: "tool" as const,
+      id: "tool:source-stream",
+      runId: "run-one",
+      toolCallId: "source-stream",
+      name: "小红书搜索",
+      summary: "搜索完成",
+      status: "completed" as const,
+      resultCount: 3,
+      evidenceCount: 1,
+      sourcePresentationActive: true,
+      sources: [{
+        title: "已读取来源",
+        url: "https://example.com/read",
+        verified: true,
+        channel: "xiaohongshu" as const,
+        displayText: "正在增长"
+      }],
+      createdAt: "2026-07-29T00:00:00.000Z"
+    };
+    const view = render(createElement(SearchActivitySummary, { items: [item] }));
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("正在增长");
+
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [{ ...item, sourcePresentationActive: false }]
+    }));
+    expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
+    expect(view.container.querySelector("[data-search-activity-details]")).toBeNull();
   });
 
   it("把多次真实搜索合并成一条纯文字，并按 URL 去重来源", () => {
@@ -157,8 +224,8 @@ describe("SearchActivitySummary", () => {
         resultCount: 5,
         evidenceCount: 2,
         sources: [
-          { title: "来源一重复", url: "https://example.com/one", verified: true },
-          { title: "来源三", url: "https://example.com/three", verified: true }
+          { title: "来源一重复", url: "https://example.com/one", verified: true, channel: "web" as const, displayText: "后一轮对同一来源给出了更新说明。" },
+          { title: "来源三", url: "https://example.com/three", verified: true, displayText: "另一来源补充了状态持久化的实现细节。" }
         ],
         createdAt: "2026-07-28T00:00:01.000Z"
       }
@@ -175,14 +242,14 @@ describe("SearchActivitySummary", () => {
     expect(toggle).not.toBeNull();
     fireEvent.click(toggle!);
     const detailPanel = container.querySelector("[data-search-activity-details]");
-    expect(detailPanel).toHaveTextContent("来源二");
-    expect(detailPanel).toHaveTextContent("X · @OpenAI：这条帖子介绍了状态图的公开实践。");
-    expect(detailPanel).toHaveTextContent("来源二");
-    expect(detailPanel).toHaveTextContent("来源三");
+    expect(detailPanel).toHaveTextContent("网页 · 后一轮对同一来源给出了更新说明。");
+    expect(detailPanel).not.toHaveTextContent("这条帖子介绍了状态图的公开实践。");
+    expect(detailPanel).toHaveTextContent("另一来源补充了状态持久化的实现细节。");
+    expect(detailPanel).not.toHaveTextContent("来源二");
     expect(detailPanel).not.toHaveTextContent(/搜索服务|执行耗时|检索查询|检索计划|核验结论/u);
     expect(within(detailPanel as HTMLElement).queryByText("状态")).not.toBeInTheDocument();
-    expect(detailPanel?.querySelectorAll("p")).toHaveLength(3);
-    expect(detailPanel?.querySelectorAll("a")).toHaveLength(3);
+    expect(detailPanel?.querySelectorAll("p")).toHaveLength(2);
+    expect(detailPanel?.querySelectorAll("a")).toHaveLength(2);
     expect(container.querySelector("table")).toBeNull();
   });
 
