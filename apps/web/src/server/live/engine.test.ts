@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PreparedImageInput } from "@/server/media/image-input";
 
 const searchAgent = vi.hoisted(() => ({
   streamSearchAgentRun: vi.fn(),
@@ -24,6 +25,7 @@ const store = vi.hoisted(() => {
       run: { id: "run_one", visitorId: "visitor_one", threadId: "thread_one", projectId: "project_one", modelId: "deepseek-v4-flash", agentId: "search-agent" },
       history: [],
       attachmentContext: "",
+      imageInputs: [] as PreparedImageInput[],
       projectMemoryContext: "",
       userMessageId: "user_one"
     })),
@@ -107,8 +109,35 @@ describe("live Search Agent engine", () => {
     const completion = store.finalizeLiveRun.mock.calls.at(-1)?.[3] as { events: Array<{ type: string; payload: Record<string, unknown> }> };
     expect(completion.events).toEqual([
       expect.objectContaining({ type: "message.started", payload: expect.objectContaining({ agentId: "search-agent" }) }),
+      expect.objectContaining({ type: "message.delta", payload: expect.objectContaining({ delta: "基于来源的回答" }) }),
       expect.objectContaining({ type: "message.completed", payload: expect.objectContaining({ text: "基于来源的回答", citations: [{ label: "官方来源", url: "https://example.com/source" }] }) })
     ]);
+  });
+
+  it("图片模型未启用时只发送安全引用，并明确不把图片当作已读内容", async () => {
+    const image = Buffer.alloc(24);
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(image, 0);
+    image.write("IHDR", 12, "ascii");
+    image.writeUInt32BE(3, 16);
+    image.writeUInt32BE(2, 20);
+    store.prepareLiveRun.mockResolvedValueOnce({
+      run: { id: "run_image", visitorId: "visitor_one", threadId: "thread_one", projectId: "project_one", modelId: "deepseek-v4-flash", agentId: "search-agent" },
+      history: [],
+      attachmentContext: "附件《截图.png》（image/png，24 字节）",
+      imageInputs: [{ attachmentId: "att_image_1", mimeType: "image/png", sizeBytes: 24, sha256: "a".repeat(64), bytes: image }],
+      projectMemoryContext: "",
+      userMessageId: "user_one"
+    });
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () { yield completedEvent; });
+    const engine = await freshEngine();
+    await engine.startLiveRun({ visitorId: "visitor_one", threadId: "thread_one", message: "这张图片是什么？", modelId: "deepseek-v4-flash", reasoningEffort: "high", attachmentIds: ["att_image_1"] });
+    await vi.waitFor(() => expect(searchAgent.streamSearchAgentRun).toHaveBeenCalled());
+
+    const request = searchAgent.streamSearchAgentRun.mock.calls[0][0] as Record<string, unknown>;
+    expect(request.imageInputs).toEqual([{ attachmentId: "att_image_1", mimeType: "image/png", sizeBytes: 24, sha256: "a".repeat(64) }]);
+    expect(String(request.question)).toContain("图片内容未发送给模型、搜索工具或作为回答依据");
+    expect(JSON.stringify(request)).not.toContain(image.toString("base64"));
+    expect(JSON.stringify(store.persistLiveEvent.mock.calls)).not.toContain(image.toString("base64"));
   });
 
   it("恢复 search-agent 运行时复用 runId、设置 resume 且不重复 run.started", async () => {

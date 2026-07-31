@@ -31,18 +31,21 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
   };
 });
 
-function renderConversation(fixture: S01ProcessFixtureCatalog | null) {
+function renderConversation(
+  fixture: S01ProcessFixtureCatalog | null,
+  onStartRun = vi.fn(async () => undefined)
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } }
   });
   const state = createEmptyThreadState(null, "thread-product");
 
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <Conversation
         state={state}
         composerThreadId="thread-product"
-        onStartRun={vi.fn(async () => undefined)}
+        onStartRun={onStartRun}
         onStopRun={vi.fn(async () => undefined)}
         onResolveApproval={vi.fn(async () => undefined)}
         isResolvingApproval={false}
@@ -51,6 +54,7 @@ function renderConversation(fixture: S01ProcessFixtureCatalog | null) {
       />
     </QueryClientProvider>
   );
+  return { ...view, onStartRun };
 }
 
 beforeEach(() => {
@@ -86,7 +90,21 @@ describe("Conversation S01 preview placement", () => {
     expect(screen.queryByTestId("v2-process-panel")).not.toBeInTheDocument();
     expect(document.querySelector('[data-preview-placement="above-composer"]')).toBeNull();
     expect(screen.getByRole("heading", { name: "今天想做什么？" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "填入案例：学生 · 英国硕士奖学金" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "填入案例：女性通勤 · 油敏皮夏季防晒" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "填入案例：求职学生 · AI 产品岗位动态" })).toBeInTheDocument();
     expect(screen.queryByText("测试数据")).not.toBeInTheDocument();
+  });
+
+  it("fills and focuses the selected example without automatically starting a run", async () => {
+    const { onStartRun } = renderConversation(null);
+    const input = screen.getByRole("textbox", { name: "任务输入" });
+
+    fireEvent.click(screen.getByRole("button", { name: "填入案例：女性通勤 · 油敏皮夏季防晒" }));
+
+    await screen.findByDisplayValue(/请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记/);
+    expect(input).toHaveFocus();
+    expect(onStartRun).not.toHaveBeenCalled();
   });
 });
 

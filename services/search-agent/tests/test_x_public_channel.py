@@ -10,24 +10,37 @@ from app.tools.channels.x_public import (
     XProviderError,
     XPublicChannel,
     _canonical_x_candidate,
+    _query_handle,
+    _requires_robots_check,
 )
 from app.tools.robots_policy import RobotsDecision
 from app.tools.web_search import SearchHit, SearchOutcome
 
 
 @pytest.mark.asyncio
-async def test_fx_api_obeys_robots_before_network(
+async def test_non_api_origin_obeys_robots_before_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     channel = XPublicChannel(agent_config())
+    channel.origin = "https://x.com"
 
     async def denied(url: str, **kwargs: Any) -> RobotsDecision:
-        return RobotsDecision(False, "ROBOTS_DENIED", "https://api.fxtwitter.com/robots.txt", 200)
+        return RobotsDecision(False, "ROBOTS_DENIED", "https://x.com/robots.txt", 200)
 
     monkeypatch.setattr(module, "check_robots", denied)
     with pytest.raises(XProviderError) as raised:
         await channel._get_json("/2/search")
     assert raised.value.code == "ROBOTS_DENIED"
+
+
+def test_fx_public_json_api_is_not_treated_as_page_crawl() -> None:
+    assert _requires_robots_check(
+        "https://api.fxtwitter.com/2/status/2050557187089465497"
+    ) is False
+    assert _requires_robots_check(
+        "http://api.fxtwitter.com/2/status/2050557187089465497"
+    ) is True
+    assert _requires_robots_check("https://x.com/OpenAI/status/123") is True
 
 
 @pytest.mark.asyncio
@@ -62,6 +75,43 @@ async def test_profile_route_returns_verified_public_api_evidence(
     assert outcome.results[0].author == "OpenAI"
     assert outcome.results[0].metrics == {"likes": 10}
     assert "第三方公共 API" in (outcome.results[0].limitation or "")
+
+
+@pytest.mark.asyncio
+async def test_direct_status_payload_becomes_verified_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = XPublicChannel(agent_config())
+
+    async def get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        assert path == "/2/status/2050557187089465497"
+        return {
+            "status": {
+                "url": "https://x.com/PCMag/status/2050557187089465497",
+                "text": "A real public X post returned by the status endpoint.",
+                "created_at": "2026-07-30T12:00:00Z",
+                "likes": 12,
+                "views": 3456,
+                "author": {"screen_name": "PCMag", "name": "PCMag"},
+            }
+        }
+
+    monkeypatch.setattr(channel, "_get_json", get)
+    outcome = await channel.search(
+        "https://x.com/PCMag/status/2050557187089465497",
+        5,
+    )
+
+    assert outcome.ok is True
+    assert len(outcome.evidence) == 1
+    assert outcome.evidence[0].channel == "x"
+    assert outcome.evidence[0].text.startswith("A real public X post")
+    assert outcome.results[0].verified is True
+    assert outcome.results[0].metrics == {"likes": 12, "views": 3456}
+
+
+def test_from_at_handle_query_uses_the_profile_route() -> None:
+    assert _query_handle("from:@LangChain LangGraph since:2026-04-30") == "LangChain"
 
 
 @pytest.mark.asyncio

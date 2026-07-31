@@ -1,4 +1,5 @@
 import type { AgentEventType, ReasoningEffort } from "@/lib/agent-events/types";
+import type { PreparedImageInput } from "@/server/media/image-input";
 import type { SearchAgentEvent } from "./events";
 
 export type PersistableSearchAgentEvent = { type: AgentEventType; payload: Record<string, unknown> };
@@ -110,7 +111,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     const sources = event.results
       .map((result) => verifiedSource(result))
       .filter((result): result is NonNullable<typeof result> => Boolean(result));
-    return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached } }] };
+    return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached, durationMs: event.durationMs } }] };
   }
   if (event.type === "tool.presented") {
     const sourcePresentations = event.sources.map((source) => ({
@@ -145,7 +146,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
       : { events: [] };
   }
   if (event.type === "tool.failed") {
-    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable, resultCount: event.resultCount ?? 0, evidenceCount: event.evidenceCount ?? 0 } }] };
+    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable, resultCount: event.resultCount ?? 0, evidenceCount: event.evidenceCount ?? 0, durationMs: event.durationMs } }] };
   }
   if (event.type === "tool.unknown") {
     return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", channel: event.channel, query: oneLine(event.query, 300), error: event.reasonCode } }] };
@@ -232,6 +233,8 @@ export type SearchAgentExecutionInput = {
   message: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
   attachmentContext: string;
+  imageInputs?: PreparedImageInput[];
+  modelSupportsImageInput?: boolean;
   projectMemoryContext: string;
   reasoningEffort: ReasoningEffort;
   resume?: boolean;

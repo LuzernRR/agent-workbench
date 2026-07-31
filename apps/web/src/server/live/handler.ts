@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig, publicModelDefinitions } from "@/server/config/runtime-config";
+import { ImageInputError } from "@/server/media/image-input";
 import { resolveVisitor, VisitorSessionError } from "@/server/session/visitor";
 import { ensureLiveRecovery, startLiveRun, stopLiveRun, subscribeLiveRun } from "./engine";
 import {
@@ -230,6 +231,7 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
     return fail(`未实现的接口 ${method} ${path}`, 404, "NOT_IMPLEMENTED");
   } catch (error) {
     if (error instanceof VisitorSessionError) return fail(error.message, 401, "VISITOR_SESSION_INVALID");
+    if (error instanceof ImageInputError) return fail(error.message, 400, error.code);
     console.error("Live workbench request failed", error instanceof Error ? error.message : error);
     return fail("真实工作台服务暂不可用", 503, "LIVE_SERVICE_UNAVAILABLE");
   }

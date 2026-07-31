@@ -242,6 +242,35 @@ describe("reduceAgentEvent", () => {
     });
   });
 
+  it("把正文规范 URL 的末尾斜杠说明挂回同一条搜索来源", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "tool.started", { toolCallId: "search-canonical", name: "网页搜索", summary: "搜索中" }),
+      event(2, "tool.completed", { toolCallId: "search-canonical", resultCount: 1, evidenceCount: 1, sources: [
+        { title: "AWS LangChain", url: "https://aws.amazon.com/cn/what-is/langchain", verified: true, channel: "web" }
+      ] }),
+      event(3, "tool.updated", {
+        toolCallId: "search-canonical",
+        sourcePresentationActive: true,
+        sourcePresentationUrls: ["https://aws.amazon.com/cn/what-is/langchain/"]
+      }),
+      event(4, "tool.source.delta", {
+        toolCallId: "search-canonical",
+        url: "https://aws.amazon.com/cn/what-is/langchain/",
+        delta: "该来源解释了 LangChain 的组件与应用边界。"
+      }),
+      event(5, "tool.updated", { toolCallId: "search-canonical", sourcePresentationActive: false })
+    ]);
+
+    expect(state.items["tool:search-canonical"]).toMatchObject({
+      evidenceCount: 1,
+      sources: [{
+        url: "https://aws.amazon.com/cn/what-is/langchain",
+        verified: true,
+        displayText: "该来源解释了 LangChain 的组件与应用边界。"
+      }]
+    });
+  });
+
   it("编辑用户消息时立即截断目标运行和全部下游内容", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "run.created", {}),

@@ -1,5 +1,6 @@
 import type { AgentEvent, ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig } from "@/server/config/runtime-config";
+import { negotiateImageInputs } from "@/server/media/image-input";
 import { requestSearchAgentStop, SearchAgentRequestError, streamSearchAgentRun } from "@/server/search-agent/client";
 import { mapSearchAgentEvent, type SearchAgentExecutionInput } from "@/server/search-agent/mapper";
 import {
@@ -116,7 +117,8 @@ async function finalize(
 async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
   const messageId = `msg_${runtime.run.id.replace(/[^A-Za-z0-9]/gu, "")}_assistant`;
   if (!input.resume) await emit(runtime, "run.started", { agentId: "search-agent", modelId: runtime.run.modelId });
-  const question = (input.attachmentContext ? `${input.message}\n\n${input.attachmentContext}` : input.message).slice(0, 20_000);
+  const imageInput = negotiateImageInputs(input.imageInputs || [], Boolean(input.modelSupportsImageInput));
+  const question = [input.message, input.attachmentContext, imageInput.context].filter(Boolean).join("\n\n").slice(0, 20_000);
   const retryableCodes = new Set(["SEARCH_AGENT_UNAVAILABLE", "SEARCH_AGENT_STREAM_ENDED", "SEARCH_AGENT_ALREADY_ACTIVE"]);
   for (let attempt = 0; attempt <= SEARCH_AGENT_RECONNECT_DELAYS_MS.length; attempt += 1) {
     let receivedOnRetry = false;
@@ -132,6 +134,7 @@ async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
         reasoningEffort: input.reasoningEffort,
         history: input.history.slice(-40).map((message) => ({ ...message, content: message.content.slice(0, 20_000) })),
         projectMemoryContext: input.projectMemoryContext.slice(-20_000),
+        imageInputs: imageInput.references,
         resume: Boolean(input.resume || attempt > 0)
       }, runtime.abortController.signal)) {
         if (runtime.cancelled) return;
@@ -156,6 +159,7 @@ async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
         await finalize(runtime, "completed", projection.terminal.payload, {
           events: [
             { type: "message.started", payload: { messageId, role: "assistant", text: "", agentId: "search-agent", agentName: "搜索 Agent" } },
+            { type: "message.delta", payload: { messageId, delta: projection.terminal.answer } },
             { type: "message.completed", payload: { messageId, text: projection.terminal.answer, citations: projection.terminal.citations } }
           ],
           memory: projection.terminal.remember ? { userMessage: input.message, assistantMessage: projection.terminal.answer } : undefined
@@ -232,8 +236,10 @@ export async function startLiveRun(input: {
   launchRuntime(runtime, {
     message: input.message,
     history: prepared.history,
-    attachmentContext: prepared.attachmentContext,
-    projectMemoryContext: prepared.projectMemoryContext,
+      attachmentContext: prepared.attachmentContext,
+      imageInputs: prepared.imageInputs,
+      modelSupportsImageInput: Boolean(model.capabilities?.imageInput),
+      projectMemoryContext: prepared.projectMemoryContext,
     reasoningEffort: model.reasoningEfforts.includes(input.reasoningEffort) ? input.reasoningEffort : model.defaultReasoningEffort
   });
   return { runId: runtime.run.id };

@@ -9,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.config.agent import agent_config
+from app.tools.channels import xiaohongshu_mcp as xiaohongshu_mcp_module
 from app.tools.channels.base import (
     ChannelOutcome,
     ChannelResult,
@@ -215,6 +216,71 @@ async def test_title_and_topic_tags_do_not_count_as_substantive_evidence() -> No
 
 
 @pytest.mark.asyncio
+async def test_first_retryable_detail_failure_switches_to_public_path_without_reading_more_notes() -> None:
+    paths: list[str] = []
+
+    class PublicFallback:
+        async def search(self, query: str, max_results: int) -> ChannelOutcome:
+            return ChannelOutcome(
+                ok=True,
+                channel="xiaohongshu",
+                provider="test-public-index",
+                query=query,
+                results=[],
+                evidence=[],
+            )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/v1/login/status":
+            return logged_in_response()
+        if request.url.path == "/api/v1/feeds/search":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "feeds": [
+                            {
+                                "id": "feed_001",
+                                "xsecToken": "signed-token-detail-001",
+                                "modelType": "note",
+                                "noteCard": {"displayTitle": "第一条"},
+                            },
+                            {
+                                "id": "feed_002",
+                                "xsecToken": "signed-token-detail-002",
+                                "modelType": "note",
+                                "noteCard": {"displayTitle": "第二条"},
+                            },
+                        ],
+                        "count": 2,
+                    },
+                },
+            )
+        if request.url.path == "/api/v1/feeds/detail":
+            return httpx.Response(500, json={"error": "temporary browser failure"})
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    channel = XiaohongshuMcpChannel(
+        agent_config(),
+        origin=ORIGIN,
+        transport=httpx.MockTransport(handler),
+        public_fallback=PublicFallback(),  # type: ignore[arg-type]
+    )
+
+    outcome = await channel.search("油敏皮通勤防晒", 5)
+
+    assert outcome.ok is True
+    assert outcome.provider == "xiaohongshu-mcp-fallback[MCP_UNAVAILABLE]+test-public-index"
+    assert paths == [
+        "/api/v1/login/status",
+        "/api/v1/feeds/search",
+        "/api/v1/feeds/detail",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_write_operations_are_rejected_before_network() -> None:
     network_requests: list[httpx.Request] = []
 
@@ -361,6 +427,37 @@ async def test_transient_search_failure_is_retried_without_status_preflight() ->
 
     assert await client.search_feeds("重试测试", 5) == []
     assert paths == ["/api/v1/feeds/search", "/api/v1/feeds/search"]
+
+
+@pytest.mark.asyncio
+async def test_slow_server_failure_falls_back_without_expensive_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return httpx.Response(500, json={"error": "slow browser failure"})
+
+    monkeypatch.setattr(
+        xiaohongshu_mcp_module,
+        "_MAX_RETRYABLE_ATTEMPT_SECONDS",
+        0.001,
+    )
+    client = XiaohongshuMcpClient(
+        ORIGIN,
+        timeout_ms=10_000,
+        max_attempts=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(XiaohongshuMcpError) as raised:
+        await client.search_feeds("慢失败测试", 5)
+
+    assert raised.value.code == "MCP_UNAVAILABLE"
+    assert calls == 1
 
 
 @pytest.mark.asyncio

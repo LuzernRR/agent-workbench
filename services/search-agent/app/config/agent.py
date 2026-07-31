@@ -61,6 +61,12 @@ class XiaohongshuChannelConfig(BaseModel):
     provider: Literal["mcp_preferred"]
     reader_origin: HttpUrl = Field(alias="readerOrigin")
     request_timeout_ms: int = Field(alias="requestTimeoutMs", ge=3_000, le=90_000)
+    detail_timeout_ms: int = Field(
+        default=18_000,
+        alias="detailTimeoutMs",
+        ge=3_000,
+        le=60_000,
+    )
     max_attempts: int = Field(default=2, alias="maxAttempts", ge=1, le=3)
     read_public_details: bool = Field(alias="readPublicDetails")
 

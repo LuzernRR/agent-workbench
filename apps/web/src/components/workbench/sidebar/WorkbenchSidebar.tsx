@@ -217,7 +217,7 @@ export function WorkbenchSidebar({ projectId, threadId, onSelectThread, onCollap
     <aside className="flex h-full min-w-0 flex-col bg-sidebar" aria-label="项目与会话">
       <div className="flex min-h-[52px] shrink-0 items-center gap-2.5 border-b border-line px-3 py-2">
         <span className="grid size-7 shrink-0 place-items-center rounded-md bg-ink text-white" aria-hidden><PanelsTopLeft className="size-4" /></span>
-        <div className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap text-[15px] font-semibold">智能工作台</div>
+        <div className="min-w-0 flex-1 overflow-hidden text-clip whitespace-nowrap text-[15px] font-semibold">平台万能搜</div>
         <button className="icon-button" onClick={onCollapse} title="折叠左栏" aria-label="折叠左栏"><PanelLeftClose className="size-4" /></button>
       </div>
 

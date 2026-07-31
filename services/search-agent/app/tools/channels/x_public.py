@@ -35,14 +35,24 @@ _PROFILE_RE = re.compile(
     r"https?://(?:www\.)?(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})(?:[/?#]|$)",
     re.IGNORECASE,
 )
-_HANDLE_RE = re.compile(r"(?:^|\s)(?:from:|@)([A-Za-z0-9_]{1,15})(?:\s|$)", re.IGNORECASE)
+_HANDLE_RE = re.compile(r"(?:^|\s)(?:from:\s*@?|@)([A-Za-z0-9_]{1,15})(?:\s|$)", re.IGNORECASE)
 _MAX_BODY_BYTES = 1_048_576
+_FX_PUBLIC_API_HOSTS = {"api.fxtwitter.com"}
 _RESERVED_HANDLES = {
     "about", "compose", "explore", "home", "i", "intent", "login", "messages",
     "notifications", "privacy", "search", "settings", "share", "signup", "tos",
 }
 
 XCandidateKind = Literal["profile", "status"]
+
+
+def _requires_robots_check(endpoint: str) -> bool:
+    """robots.txt 只约束网页抓取，不把公共 JSON API 当页面爬虫。"""
+    parts = urlsplit(endpoint)
+    return not (
+        parts.scheme.casefold() == "https"
+        and (parts.hostname or "").casefold() in _FX_PUBLIC_API_HOSTS
+    )
 
 
 def _canonical_x_candidate(raw_url: str) -> tuple[str, XCandidateKind, str, str | None] | None:
@@ -104,12 +114,13 @@ class XPublicChannel:
 
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         endpoint = f"{self.origin}{path}"
-        robots = await check_robots(endpoint)
-        if not robots.allowed:
-            raise XProviderError(
-                "ROBOTS_DENIED",
-                "X 第三方公共 API 的 robots.txt 不允许当前服务读取",
-            )
+        if _requires_robots_check(endpoint):
+            robots = await check_robots(endpoint)
+            if not robots.allowed:
+                raise XProviderError(
+                    "ROBOTS_DENIED",
+                    "X 第三方来源的 robots.txt 不允许当前服务读取",
+                )
         headers = {
             "User-Agent": "agent-workbench-search/0.2 (+https://github.com/LuzernRR/agent-workbench)",
             "Accept": "application/json",

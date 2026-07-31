@@ -80,9 +80,11 @@ function preview(
 }
 
 function Harness({
-  interaction
+  interaction,
+  prefillRequest = null
 }: {
   interaction: V2PreviewInteractionRuntime | null;
+  prefillRequest?: { readonly id: string; readonly text: string } | null;
 }) {
   const runtime = useLocalRuntime(modelAdapter);
   const [client] = useState(() => new QueryClient({
@@ -94,6 +96,7 @@ function Harness({
         <AgentComposer
           threadId="thread-product"
           previewInteraction={interaction}
+          prefillRequest={prefillRequest}
         />
       </AssistantRuntimeProvider>
     </QueryClientProvider>
@@ -117,6 +120,18 @@ afterEach(() => {
 });
 
 describe("AgentComposer v2 preview routing", () => {
+  it("writes an externally selected example into the composer and does not send it", async () => {
+    render(<Harness interaction={null} prefillRequest={{
+      id: "example-web-1",
+      text: "请搜索 LangGraph 的官方发布说明。"
+    }} />);
+
+    const input = screen.getByRole("textbox", { name: "任务输入" });
+    await waitFor(() => expect(input).toHaveValue("请搜索 LangGraph 的官方发布说明。"));
+    expect(input).toHaveFocus();
+    expect(modelRun).not.toHaveBeenCalled();
+  });
+
   it("routes Enter to enqueue and Ctrl/Cmd+Enter to steer", async () => {
     const interaction = preview();
     render(<Harness interaction={interaction} />);

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -38,6 +39,7 @@ _MCP_HOST = "xiaohongshu-mcp"
 _MCP_PORT = 18060
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_EVIDENCE_CHARS = 2_400
+_MAX_RETRYABLE_ATTEMPT_SECONDS = 3.0
 _MIN_SUBSTANTIVE_DESCRIPTION_CHARS = 12
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,96}$")
 _SAFE_TOKEN_RE = re.compile(r"^[^\s]{8,4096}$")
@@ -289,11 +291,20 @@ class XiaohongshuMcpClient:
         origin: str,
         *,
         timeout_ms: int,
+        detail_timeout_ms: int | None = None,
         max_attempts: int = 2,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.origin = _validate_internal_origin(origin)
         self.timeout = httpx.Timeout(timeout_ms / 1000, connect=5.0)
+        effective_detail_timeout = min(
+            timeout_ms,
+            detail_timeout_ms if detail_timeout_ms is not None else timeout_ms,
+        )
+        self.detail_timeout = httpx.Timeout(
+            effective_detail_timeout / 1000,
+            connect=min(5.0, effective_detail_timeout / 1000),
+        )
         self.max_attempts = max(1, min(max_attempts, 3))
         self.transport = transport
 
@@ -302,6 +313,7 @@ class XiaohongshuMcpClient:
         operation: XiaohongshuMcpOperation | str,
         *,
         body: dict[str, Any] | None = None,
+        timeout: httpx.Timeout | None = None,
     ) -> Any:
         try:
             approved = XiaohongshuMcpOperation(operation)
@@ -320,10 +332,11 @@ class XiaohongshuMcpClient:
         attempts = self.max_attempts if approved in _RETRYABLE_OPERATIONS else 1
         response: httpx.Response | None = None
         for attempt in range(attempts):
+            attempt_started = time.monotonic()
             try:
                 async with httpx.AsyncClient(
                     base_url=self.origin,
-                    timeout=self.timeout,
+                    timeout=timeout or self.timeout,
                     follow_redirects=False,
                     trust_env=False,
                     transport=self.transport,
@@ -335,7 +348,11 @@ class XiaohongshuMcpClient:
                 ) as client:
                     response = await client.request(method, path, json=body)
             except httpx.TimeoutException as exc:
-                if attempt + 1 < attempts:
+                elapsed = time.monotonic() - attempt_started
+                if (
+                    attempt + 1 < attempts
+                    and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
+                ):
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 raise XiaohongshuMcpError(
@@ -343,7 +360,11 @@ class XiaohongshuMcpClient:
                     "小红书登录态读取超时",
                 ) from exc
             except httpx.HTTPError as exc:
-                if attempt + 1 < attempts:
+                elapsed = time.monotonic() - attempt_started
+                if (
+                    attempt + 1 < attempts
+                    and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
+                ):
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 raise XiaohongshuMcpError(
@@ -356,12 +377,15 @@ class XiaohongshuMcpClient:
                 if response.status_code >= 500
                 else ""
             )
+            elapsed = time.monotonic() - attempt_started
             # 页面级 deadline 或安全验证已经给出确定结果，再重试只会成倍
-            # 消耗 LangGraph 运行预算；网络瞬断和未分类 5xx 仍保留一次受限重试。
+            # 消耗 LangGraph 运行预算；只有快速返回的网络瞬断和未分类 5xx
+            # 才保留一次受限重试，慢失败直接交给公开渠道和图内重规划。
             if (
                 response.status_code >= 500
                 and server_failure not in {"CAPTCHA_REQUIRED", "MCP_TIMEOUT"}
                 and attempt + 1 < attempts
+                and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
             ):
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
@@ -519,6 +543,7 @@ class XiaohongshuMcpClient:
                 "xsec_token": token,
                 "load_all_comments": False,
             },
+            timeout=self.detail_timeout,
         )
         note = _dict(_dict(_dict(data).get("data")).get("note"))
         note_id = _safe_text(note.get("noteId"), 96)
@@ -613,6 +638,7 @@ class XiaohongshuMcpChannel:
             XiaohongshuMcpClient(
                 configured_origin,
                 timeout_ms=self.settings.request_timeout_ms,
+                detail_timeout_ms=self.settings.detail_timeout_ms,
                 max_attempts=self.settings.max_attempts,
                 transport=transport,
             )
@@ -762,6 +788,16 @@ class XiaohongshuMcpChannel:
                     )
                 except XiaohongshuMcpError as exc:
                     detail_error = exc
+                    # 同一登录会话下的详情错误通常是平台挑战、浏览器超时或
+                    # 短暂服务故障；继续串行等待其余候选只会耗尽用户可见运行。
+                    # 立即切到受限的公开只读路径，仍然只把真正读到的正文作为证据。
+                    if exc.code in _FALLBACK_ERROR_CODES:
+                        return await self._fallback(
+                            query,
+                            max_results,
+                            exc,
+                            progress,
+                        )
 
             url = f"https://www.xiaohongshu.com/explore/{candidate.feed_id}"
             title = (detail.title if detail and detail.title else candidate.title)[:300]

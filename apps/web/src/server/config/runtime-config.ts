@@ -9,7 +9,10 @@ const modelSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
   reasoningEfforts: z.array(reasoningEffortSchema).min(1),
-  defaultReasoningEffort: reasoningEffortSchema
+  defaultReasoningEffort: reasoningEffortSchema,
+  // 配置在服务端；当前所有 DeepSeek 模型均为 false。未来视觉模型还必须
+  // 实现媒体 adapter，engine 才会把图片 bytes 交给 Provider。
+  capabilities: z.object({ imageInput: z.boolean() }).strict().default({ imageInput: false })
 }).strict();
 
 const databaseSchema = z.object({

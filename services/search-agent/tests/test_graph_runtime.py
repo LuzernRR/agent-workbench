@@ -88,7 +88,7 @@ async def test_xiaohongshu_mcp_failure_opens_public_strategy_for_later_query(
 
 
 @pytest.mark.asyncio
-async def test_zero_evidence_platform_round_can_recover_via_web(
+async def test_zero_evidence_platform_round_keeps_web_fallback_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
@@ -132,7 +132,10 @@ async def test_zero_evidence_platform_round_can_recover_via_web(
         {"query": "xhs query", "channel": "xiaohongshu"},
         {"query": "official web query", "channel": "web"},
     ]
-    assert output["response_status"] == "completed"
+    assert output["response_status"] == "partial"
+    assert output["verification_passed"] is False
+    assert output["stop_reason"] == "MAX_ITERATIONS"
+    assert "Evidence：xiaohongshu" in output["verification_issue"]
 
 
 def test_public_process_drops_fetch_noise_without_inventing_replacement() -> None:
@@ -224,7 +227,7 @@ class Scenario:
         self.structured_messages.setdefault(role_key, []).append(copy.deepcopy(messages))
         index = self.structured_calls.get(role_key, 0)
         self.structured_calls[role_key] = index + 1
-        if role in self.invalid_structured_roles:
+        if role_key in self.invalid_structured_roles:
             raise StructuredOutputError(ModelUsage(
                 20,
                 4,
@@ -237,10 +240,14 @@ class Scenario:
                 r"URL: (https?://\S+)",
                 str(messages[-1].content),
             )
-            result = SourcePresentationResult(source_presentations=[{
-                "url": urls[0],
-                "text": "该来源正文提供了与用户问题直接相关的有效事实。",
-            }])
+            result = SourcePresentationResult(source_presentations=[
+                {
+                    "url": url,
+                    "include_in_details": True,
+                    "text": "该来源正文提供了与用户问题直接相关的有效事实。",
+                }
+                for url in dict.fromkeys(urls)
+            ])
         elif role == "supervisor":
             result = IntentResult(
                 task_type="research" if self.need_search else "direct_answer",
@@ -261,7 +268,9 @@ class Scenario:
                 summary="已形成检索计划",
             )
         elif role == "reflector":
-            data = self.reflects[min(index, len(self.reflects) - 1)]
+            data = copy.deepcopy(self.reflects[min(index, len(self.reflects) - 1)])
+            for presentation in data.get("source_presentations", []):
+                presentation.setdefault("include_in_details", True)
             result = ReflectResult(summary="已评估证据覆盖", **data)
         elif role == "writer":
             result = ComposeResult(
@@ -505,7 +514,8 @@ async def test_invalid_reflector_structure_uses_evidence_and_continues_to_verifi
     assert output["verification_passed"] is True
     assert output["stop_reason"] == "VERIFIED"
     assert scenario.structured_calls["reflector"] == 1
-    assert not any(event["type"] == "tool.presented" for event in events)
+    assert scenario.structured_calls["source_curator"] == 1
+    assert any(event["type"] == "tool.presented" for event in events)
     reflect_completed = [
         event
         for event in events
@@ -572,6 +582,9 @@ async def test_single_search_runs_think_search_observe_and_pairs_ids(
         for event in tool_events
         if event["type"] == "tool.progress"
     ] == [(1, 0), (1, 1)]
+    completed = next(event for event in tool_events if event["type"] == "tool.completed")
+    assert isinstance(completed["durationMs"], int)
+    assert completed["durationMs"] >= 0
 
 
 @pytest.mark.asyncio
@@ -598,6 +611,27 @@ async def test_reflector_presents_only_current_real_candidate_urls(
     }]
     assert output["candidates"][0]["tool_call_id"] == "call_1"
     assert output["candidates"][0]["iteration"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reflector_excludes_read_but_irrelevant_evidence_from_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(reflects=[{
+        "sufficient": False,
+        "missing": "该来源不符合用户限定条件",
+        "extra_searches": [],
+        "source_presentations": [{
+            "url": "https://example.com/1",
+            "include_in_details": False,
+            "text": "",
+        }],
+    }])
+
+    _output, events = await run_scenario(monkeypatch, scenario)
+
+    assert not [event for event in events if event["type"] == "tool.presented"]
+    assert scenario.structured_calls.get("source_curator", 0) == 0
 
 
 @pytest.mark.asyncio
@@ -632,6 +666,44 @@ async def test_source_curator_replaces_invalid_presentations_with_agent_output(
 
 
 @pytest.mark.asyncio
+async def test_source_curator_fills_every_missing_current_evidence_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["query one", "query two"]],
+        evidence_by_query={"query one": True, "query two": True},
+        reflects=[{
+            "sufficient": True,
+            "missing": "",
+            "extra_searches": [],
+            "source_presentations": [{
+                "url": "https://example.com/1",
+                "text": "第一条来源给出了与问题相关的可核验做法。",
+            }],
+        }],
+    )
+
+    _output, events = await run_scenario(monkeypatch, scenario)
+
+    presented = [event for event in events if event["type"] == "tool.presented"]
+    presented_urls = {
+        source["url"]
+        for event in presented
+        for source in event["sources"]
+    }
+    assert presented_urls == {
+        "https://example.com/1",
+        "https://example.com/2",
+    }
+    assert scenario.structured_calls["source_curator"] == 1
+    curator_prompt = str(
+        scenario.structured_messages["source_curator"][0][-1].content
+    )
+    assert "https://example.com/2" in curator_prompt
+    assert "https://example.com/1" not in curator_prompt
+
+
+@pytest.mark.asyncio
 async def test_supervisor_and_planner_route_x_query_into_real_x_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,6 +720,21 @@ async def test_supervisor_and_planner_route_x_query_into_real_x_tool_call(
     started = next(event for event in events if event["type"] == "tool.started")
     assert started["channel"] == "x"
     assert scenario.tool_executions == ["OpenAI 最新帖子"]
+
+
+@pytest.mark.asyncio
+async def test_planner_receives_the_current_date_for_relative_time_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["OpenAI 近 90 天帖子"]],
+        evidence_by_query={"OpenAI 近 90 天帖子": True},
+    )
+
+    await run_scenario(monkeypatch, scenario)
+
+    planner_prompt = str(scenario.structured_messages["planner"][0][-1].content)
+    assert f"当前日期：{datetime.now(UTC).date().isoformat()}" in planner_prompt
 
 
 @pytest.mark.asyncio
@@ -744,7 +831,37 @@ async def test_verifier_does_not_apply_candidate_limitations_to_read_evidence(
 
 
 @pytest.mark.asyncio
-async def test_reflector_can_open_a_complementary_channel_after_source_gap(
+async def test_verifier_cannot_pass_when_a_required_channel_has_no_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        supervisor_channels=["web", "x"],
+        plans=[["query one"]],
+        channels_by_query={"query one": "web"},
+        evidence_by_query={"query one": True},
+        verifier_actions=["pass"],
+    )
+
+    output, _events = await run_scenario(
+        monkeypatch,
+        scenario,
+        max_rounds=1,
+    )
+
+    assert output["verification_passed"] is False
+    assert output["response_status"] == "partial"
+    assert output["stop_reason"] == "MAX_ITERATIONS"
+    assert "Evidence：x" in output["verification_issue"]
+    verifier_input = str(
+        scenario.structured_messages["verifier"][0][-1].content
+    )
+    assert '"requiredChannels": ["web", "x"]' in verifier_input
+    assert '"evidenceChannels": ["web"]' in verifier_input
+    assert '"missingChannels": ["x"]' in verifier_input
+
+
+@pytest.mark.asyncio
+async def test_complementary_channel_does_not_replace_required_channel_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
@@ -763,7 +880,10 @@ async def test_reflector_can_open_a_complementary_channel_after_source_gap(
     )
     output, _events = await run_scenario(monkeypatch, scenario)
 
-    assert output["response_status"] == "completed"
+    assert output["response_status"] == "partial"
+    assert output["verification_passed"] is False
+    assert output["stop_reason"] == "MAX_ITERATIONS"
+    assert "Evidence：web" in output["verification_issue"]
     assert scenario.tool_execution_searches == [
         {"query": "query one", "channel": "web"},
         {"query": "query x", "channel": "x"},
@@ -808,9 +928,12 @@ async def test_rejected_tool_calls_still_emit_started_then_failed(
     call_events = [event for event in events if event.get("toolCallId") == "call_1"]
     assert [event["type"] for event in call_events] == ["tool.started", "tool.failed"]
     assert call_events[-1]["reasonCode"] == code
+    assert call_events[-1]["durationMs"] == 0
     expected_tool = "unknown_tool" if mode == "unknown_tool" else "web_search"
     assert {event["toolName"] for event in call_events} == {expected_tool}
     assert output["tool_traces"][0]["error_code"] == code
+    # 拒绝的模型调用依然可审计，但没有触发渠道请求，不能耗尽真实检索额度。
+    assert output["tool_calls"] == 0
 
 
 @pytest.mark.asyncio
@@ -825,6 +948,7 @@ async def test_extra_parallel_call_is_paired_but_never_exceeds_tool_limit(
     extra = [event for event in events if event.get("toolCallId") == "call_1_extra"]
     assert [event["type"] for event in extra] == ["tool.started", "tool.failed"]
     assert extra[-1]["reasonCode"] == "TOOL_CALL_LIMIT"
+    assert extra[-1]["durationMs"] == 0
 
 
 @pytest.mark.asyncio
@@ -867,6 +991,7 @@ async def test_tool_timeout_preserves_finalization_instead_of_failing_run(
     assert tool_events[-1]["reasonCode"] == "RUN_TIME_RESERVE"
     assert tool_events[-1]["resultCount"] == 5
     assert tool_events[-1]["evidenceCount"] == 0
+    assert tool_events[-1]["durationMs"] >= 0
 
 
 @pytest.mark.asyncio
@@ -879,10 +1004,52 @@ async def test_max_iterations_has_stable_partial_stop_reason(
             "missing": "more research",
             "extra_searches": [{"query": "query two", "channel": "web"}],
         }],
+        verifier_actions=["research_more"],
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_rounds=1)
     assert output["response_status"] == "partial"
     assert output["stop_reason"] == "MAX_ITERATIONS"
+
+
+@pytest.mark.asyncio
+async def test_verifier_pass_overrides_soft_search_iteration_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        reflects=[{
+            "sufficient": False,
+            "missing": "reflector 仍建议补充，但最终回答已可核验",
+            "extra_searches": [{"query": "query two", "channel": "web"}],
+        }],
+        verifier_actions=["pass"],
+    )
+
+    output, _events = await run_scenario(monkeypatch, scenario, max_rounds=1)
+
+    assert output["response_status"] == "completed"
+    assert output["verification_passed"] is True
+    assert output["stop_reason"] == "VERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_can_finish_after_soft_search_iteration_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        reflects=[{
+            "sufficient": False,
+            "missing": "只需修正回答措辞",
+            "extra_searches": [{"query": "query two", "channel": "web"}],
+        }],
+        verifier_actions=["rewrite", "pass"],
+    )
+
+    output, _events = await run_scenario(monkeypatch, scenario, max_rounds=1)
+
+    assert output["response_status"] == "completed"
+    assert output["verification_passed"] is True
+    assert output["stop_reason"] == "VERIFIED"
+    assert output["repair_count"] == 1
 
 
 @pytest.mark.asyncio

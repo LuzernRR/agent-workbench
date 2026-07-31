@@ -3,8 +3,8 @@ import { Providers } from "@/components/providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "智能工作台",
-  description: "面向项目与会话的智能工作台。"
+  title: "平台万能搜",
+  description: "面向网页、小红书与 X 的智能搜索工作台。"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

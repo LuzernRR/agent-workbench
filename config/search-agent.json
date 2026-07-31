@@ -8,7 +8,7 @@
     "defaultDepth": "balanced",
     "recursionLimit": 48,
     "maxIterations": 3,
-    "maxModelCalls": 16,
+    "maxModelCalls": 20,
     "maxToolCalls": 6,
     "maxRunSeconds": 240,
     "maxTotalTokens": 120000,
@@ -37,6 +37,7 @@
         "provider": "mcp_preferred",
         "readerOrigin": "https://r.jina.ai",
         "requestTimeoutMs": 75000,
+        "detailTimeoutMs": 18000,
         "maxAttempts": 2,
         "readPublicDetails": true
       }

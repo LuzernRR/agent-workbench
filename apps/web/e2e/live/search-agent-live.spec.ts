@@ -28,6 +28,13 @@ function decodeSse(text: string) {
     .map((line) => JSON.parse(line.slice(6)) as { seq: number; type: string; payload: Record<string, unknown> });
 }
 
+function sourceIdentity(value: string) {
+  const url = new URL(value);
+  url.hash = "";
+  if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/u, "");
+  return url.href;
+}
+
 type TimelineAtom = {
   kind: "thinking" | "verification" | "search";
   id: string;
@@ -89,12 +96,14 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       __thinkingLabelHistory?: string[];
       __thinkingDisclosureHistory?: Record<string, string[]>;
       __sourceStreamHistory?: Record<string, string[]>;
+      __answerLengthHistory?: number[];
       __thinkingStreamObserver?: MutationObserver;
     };
     runtime.__thinkingStreamHistory = {};
     runtime.__thinkingLabelHistory = [];
     runtime.__thinkingDisclosureHistory = {};
     runtime.__sourceStreamHistory = {};
+    runtime.__answerLengthHistory = [];
     const record = () => {
       element.querySelectorAll<HTMLElement>("[data-thinking-id]").forEach((block) => {
         const id = block.dataset.thinkingId || "";
@@ -131,6 +140,14 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
         if (history.at(-1) !== text) history.push(text);
         if (runtime.__sourceStreamHistory) runtime.__sourceStreamHistory[href] = history;
       });
+      const answer = [...element.querySelectorAll<HTMLElement>("[data-assistant-stream-length]")].at(-1);
+      const answerLength = Number(answer?.dataset.assistantStreamLength || 0);
+      if (
+        answerLength > 0
+        && runtime.__answerLengthHistory?.at(-1) !== answerLength
+      ) {
+        runtime.__answerLengthHistory?.push(answerLength);
+      }
     };
     runtime.__thinkingStreamObserver = new MutationObserver(record);
     runtime.__thinkingStreamObserver.observe(element, {
@@ -138,7 +155,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ["data-activity-status", "aria-expanded"]
+      attributeFilter: ["data-activity-status", "aria-expanded", "data-assistant-stream-length"]
     });
     record();
   });
@@ -185,6 +202,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect(types).toContain("tool.progress");
   expect(types).toContain("tool.completed");
   expect(types).toContain("tool.source.delta");
+  expect(types).toContain("message.delta");
   expect(types).toContain("message.completed");
   expect(types).toContain("run.completed");
   const completedTools = events.filter((event) => event.type === "tool.completed");
@@ -249,8 +267,9 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
     const urls = presentedByToolCallId.get(toolCallId) || new Set<string>();
     if (url && delta.trim()) {
-      urls.add(url);
-      sourceTextByUrl.set(url, `${sourceTextByUrl.get(url) || ""}${delta}`);
+      const identity = sourceIdentity(url);
+      urls.add(identity);
+      sourceTextByUrl.set(identity, `${sourceTextByUrl.get(identity) || ""}${delta}`);
     }
     if (urls.size) presentedByToolCallId.set(toolCallId, urls);
   }
@@ -268,8 +287,11 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     const results = segmentSettlements.reduce((total, event) => total + Number(event.payload.resultCount || 0), 0);
     const verifiedSources = new Set(segmentSettlements.flatMap((event) => (event.payload.sources as Array<{ url?: string; verified?: boolean }> || []))
       .filter((source) => source.verified && source.url)
-      .map((source) => source.url));
+      .map((source) => sourceIdentity(source.url!)));
     const detailSources = new Set(toolCallIds.flatMap((id) => [...(presentedByToolCallId.get(id) || [])]));
+    // 已读来源只表示正文通过读取；详情还必须由 LangGraph Agent 判定为直接支持
+    // 当前问题且符合用户筛选条件。详情绝不能引入未读或无关 URL。
+    expect([...detailSources].every((url) => verifiedSources.has(url))).toBe(true);
     searchStats.push({ results, verified: verifiedSources.size, details: detailSources.size });
     const summary = searchSummaries.nth(index);
     await expect(summary).toContainText(`找到 ${results} 条结果，读取 ${verifiedSources.size} 个来源`);
@@ -312,12 +334,14 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       __thinkingLabelHistory?: string[];
       __thinkingDisclosureHistory?: Record<string, string[]>;
       __sourceStreamHistory?: Record<string, string[]>;
+      __answerLengthHistory?: number[];
     };
     return {
       histories: runtime.__thinkingStreamHistory || {},
       labels: runtime.__thinkingLabelHistory || [],
       disclosures: runtime.__thinkingDisclosureHistory || {},
-      sourceHistories: runtime.__sourceStreamHistory || {}
+      sourceHistories: runtime.__sourceStreamHistory || {},
+      answerLengths: runtime.__answerLengthHistory || []
     };
   });
   expect(streamObservation.labels).toContain("思考中");
@@ -337,12 +361,27 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     }
   }
   for (const [url, text] of sourceTextByUrl) {
-    const history = streamObservation.sourceHistories[new URL(url).href] || [];
+    const matchingHistory = Object.entries(streamObservation.sourceHistories)
+      .find(([href]) => sourceIdentity(href) === url)?.[1];
+    const history = matchingHistory || [];
     expect(history.length).toBeGreaterThan(1);
     expect(history.some((frame) => frame.includes(text))).toBe(true);
     for (let index = 1; index < history.length; index += 1) {
       expect(Array.from(history[index]).length).toBeGreaterThanOrEqual(Array.from(history[index - 1]).length);
     }
+  }
+  const answerDelta = events
+    .filter((event) => event.type === "message.delta")
+    .map((event) => String(event.payload.delta || ""))
+    .join("");
+  const completedAnswer = [...events]
+    .reverse()
+    .find((event) => event.type === "message.completed" && typeof event.payload.text === "string");
+  expect(answerDelta).toBe(String(completedAnswer?.payload.text || ""));
+  expect(streamObservation.answerLengths.length).toBeGreaterThan(1);
+  expect(streamObservation.answerLengths.at(-1)).toBe(Array.from(answerDelta).length);
+  for (let index = 1; index < streamObservation.answerLengths.length; index += 1) {
+    expect(streamObservation.answerLengths[index]).toBeGreaterThan(streamObservation.answerLengths[index - 1]);
   }
   const thinkingBlocks = page.locator("[data-thinking-id]");
   await expect(thinkingBlocks).toHaveCount(thinkingSegments.length);
@@ -401,7 +440,13 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   const restoredSearchSummaries = page.locator("[data-search-activity-summary]");
   await expect(restoredSearchSummaries).toHaveCount(searchSegments.length);
   for (const [index, stats] of searchStats.entries()) {
-    await expect(restoredSearchSummaries.nth(index)).toContainText(`找到 ${stats.results} 条结果，读取 ${stats.verified} 个来源`);
+    const restoredSummary = restoredSearchSummaries.nth(index);
+    await expect(restoredSummary).toContainText(`找到 ${stats.results} 条结果，读取 ${stats.verified} 个来源`);
+    if (stats.verified) {
+      await restoredSummary.getByRole("button", { name: "展开搜索详情" }).click();
+      await expect(restoredSummary.locator("[data-search-activity-details] a")).toHaveCount(stats.verified);
+      await restoredSummary.getByRole("button", { name: "收起搜索详情" }).click();
+    }
   }
   const restoredRows = page.getByTestId("conversation-viewport").locator("[data-thinking-id], [data-search-activity-summary]");
   await expect(restoredRows).toHaveCount(activitySegments.length);

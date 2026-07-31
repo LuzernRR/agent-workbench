@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -57,10 +57,19 @@ class SourcePresentation(StrictModel):
     """Reflector 对真实候选生成的公开单行说明。"""
 
     url: str = Field(min_length=8, max_length=2048)
+    include_in_details: bool = Field(
+        description=(
+            "只有该来源直接支持用户当前问题、且符合用户的筛选条件时才为 true；"
+            "不相关、不适用、过期或仅用于排除的来源必须为 false"
+        )
+    )
     text: str = Field(
-        min_length=1,
+        min_length=0,
         max_length=500,
-        description="只基于已读取正文写成的一句有效中文，不描述未读取、访问限制或候选状态；节点会再压缩到180字",
+        description=(
+            "include_in_details=true 时，只基于已读取正文写成一句有效中文；"
+            "false 时必须为空字符串。节点会再压缩到180字"
+        ),
     )
 
 
@@ -78,20 +87,23 @@ _INEFFECTIVE_PRESENTATION_TEXT = re.compile(
 class CuratedSourcePresentation(SourcePresentation):
     """Source Curator 必须返回能直接展示的有效说明。"""
 
-    @field_validator("text")
-    @classmethod
-    def require_effective_text(cls, value: str) -> str:
-        if _INEFFECTIVE_PRESENTATION_TEXT.search(value):
+    @model_validator(mode="after")
+    def require_effective_text(self) -> CuratedSourcePresentation:
+        if not self.include_in_details:
+            if self.text:
+                raise ValueError("不纳入详情的来源不得生成公开说明")
+            return self
+        if not self.text or _INEFFECTIVE_PRESENTATION_TEXT.search(self.text):
             raise ValueError("来源说明必须包含正文中的有效信息")
-        return value
+        return self
 
 
 class SourcePresentationResult(StrictModel):
     """独立 Source Curator Agent 的结构化结果。"""
 
     source_presentations: list[CuratedSourcePresentation] = Field(
-        description="为已读取来源生成至少一条可直接展示的有效中文说明",
-        min_length=1,
+        description="只为直接支持用户问题的已读取来源生成可直接展示的中文说明；可以为空",
+        min_length=0,
         max_length=10,
     )
 
@@ -108,7 +120,7 @@ class ReflectResult(StrictModel):
     )
     source_presentations: list[SourcePresentation] = Field(
         default_factory=list,
-        description="仅为当前轮已读取 Evidence URL 生成逐条有效说明；未读候选不得出现",
+        description="为当前轮每一条已读取 Evidence URL 各生成一条有效说明；未读候选不得出现",
         max_length=50,
     )
     summary: str = Field(description="一句话说明证据评估结论，面向用户，不超过80字")

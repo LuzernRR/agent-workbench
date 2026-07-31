@@ -82,7 +82,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       resultCount: 1,
       evidenceCount: 1,
       results: [webResult({ verified: true, reasoning_content: "secret" })],
-      cached: false
+      cached: false,
+      durationMs: 125
     };
     expect(() => parseSearchAgentEvent(completed)).toThrow(/禁止字段/u);
     expect(() => parseSearchAgentEvent({ ...nodeStarted, prompt: "private" })).toThrow(/禁止字段/u);
@@ -139,8 +140,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
   it("允许上限内 60 条安全引用和固定 unknown_tool 防御事件", () => {
     const citations = Array.from({ length: 60 }, (_, index) => ({ label: `来源 ${index + 1}`, url: `https://example.com/${index + 1}` }));
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.completed", answerMarkdown: "回答", promptVersion: "2026-07-28.v2", responseStatus: "completed", citations, verificationPassed: true, stopReason: "VERIFIED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 1, toolCalls: 1, evidenceCount: 60 }).type).toBe("run.completed");
-    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }).type).toBe("tool.failed");
-    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_partial", toolName: "web_search", query: "LangGraph", channel: "xiaohongshu", provider: "xiaohongshu-mcp", reasonCode: "RUN_TIME_RESERVE", message: "为核验保留时间", retryable: false, resultCount: 5, evidenceCount: 1 }).type).toBe("tool.failed");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false, durationMs: 0 }).type).toBe("tool.failed");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_partial", toolName: "web_search", query: "LangGraph", channel: "xiaohongshu", provider: "xiaohongshu-mcp", reasonCode: "RUN_TIME_RESERVE", message: "为核验保留时间", retryable: false, resultCount: 5, evidenceCount: 1, durationMs: 18001 }).type).toBe("tool.failed");
   });
 
   it("接受由 Reflector 生成且只绑定真实 URL 的逐行来源说明", () => {
@@ -212,7 +213,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
           confidence: "high"
         }
       })],
-      cached: false
+      cached: false,
+      durationMs: 432
     };
     expect(parseSearchAgentEvent(completed).type).toBe("tool.completed");
     expect(() => parseSearchAgentEvent({
@@ -237,7 +239,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       resultCount: 1,
       evidenceCount: 0,
       results: [webResult({ title: "官方文档", url: "https://docs.langchain.com/oss/python/langgraph/graph-api", query: "LangGraph 条件边", snippet })],
-      cached: false
+      cached: false,
+      durationMs: 87
     };
     expect(parseSearchAgentEvent(completed).type).toBe("tool.completed");
     expect(() => parseSearchAgentEvent({
@@ -278,8 +281,47 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       resultCount: 1,
       evidenceCount: 0,
       results: [webResult({ title: "来源", url, query: "Unicode URL" })],
-      cached: false
+      cached: false,
+      durationMs: 9
     }).type).toBe("tool.completed");
+  });
+
+  it("工具终态必须携带非负整数真实耗时", () => {
+    const completed = {
+      ...sourceEnvelope,
+      type: "tool.completed",
+      toolCallId: "call_duration",
+      toolName: "web_search",
+      query: "LangGraph",
+      channel: "web",
+      provider: "tavily",
+      summary: "找到 0 条结果",
+      resultCount: 0,
+      evidenceCount: 0,
+      results: [],
+      cached: false
+    };
+    const failed = {
+      ...sourceEnvelope,
+      type: "tool.failed",
+      toolCallId: "call_failed_duration",
+      toolName: "web_search",
+      query: "LangGraph",
+      channel: "web",
+      provider: "tavily",
+      reasonCode: "PROVIDER_UNAVAILABLE",
+      message: "搜索服务暂不可用",
+      retryable: true
+    };
+
+    expect(() => parseSearchAgentEvent(completed)).toThrow();
+    expect(() => parseSearchAgentEvent({ ...completed, durationMs: -1 })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...completed, durationMs: 1.5 })).toThrow();
+    expect(parseSearchAgentEvent({ ...completed, durationMs: 0 }).type).toBe("tool.completed");
+    expect(() => parseSearchAgentEvent(failed)).toThrow();
+    expect(() => parseSearchAgentEvent({ ...failed, durationMs: -1 })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...failed, durationMs: 1.5 })).toThrow();
+    expect(parseSearchAgentEvent({ ...failed, durationMs: 321 }).type).toBe("tool.failed");
   });
 
   it("拒绝 streamSeq/seq 不一致，但不把流内序号当跨恢复 cursor", () => {

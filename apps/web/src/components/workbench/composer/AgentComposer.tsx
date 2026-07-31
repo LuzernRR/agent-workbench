@@ -47,15 +47,19 @@ function isDraftAttachment(attachment: PreviewAttachment): attachment is DraftAt
 export function AgentComposer({
   threadId,
   disabled,
-  previewInteraction = null
+  previewInteraction = null,
+  prefillRequest = null
 }: {
   threadId: string | null;
   disabled?: boolean;
   previewInteraction?: V2PreviewInteractionRuntime | null;
+  prefillRequest?: { readonly id: string; readonly text: string } | null;
 }) {
   const aui = useAui();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const activeThreadId = useRef<string | null>(threadId);
+  const appliedPrefillRequestId = useRef<string | null>(null);
   const previewSubmissionRef = useRef(false);
   const previewStopGenerationRef = useRef(0);
   const isRunning = useAuiState((state) => state.thread.isRunning);
@@ -127,6 +131,13 @@ export function AgentComposer({
       clearPendingDraftAttachments();
     };
   }, [clearPendingAttachments, clearPendingDraftAttachments, threadId]);
+
+  useEffect(() => {
+    if (!prefillRequest || appliedPrefillRequestId.current === prefillRequest.id) return;
+    appliedPrefillRequestId.current = prefillRequest.id;
+    aui.composer().setText(prefillRequest.text);
+    queueMicrotask(() => composerInputRef.current?.focus());
+  }, [aui, prefillRequest]);
 
   const uploadFiles = async (incoming: File[]) => {
     const files = incoming.filter((file) => file.size > 0);
@@ -424,6 +435,7 @@ export function AgentComposer({
           </div>
         ) : null}
         <ComposerPrimitive.Input
+          ref={composerInputRef}
           disabled={disabled || isUploading}
           rows={1}
           aria-label="任务输入"

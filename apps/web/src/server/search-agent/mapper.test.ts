@@ -58,12 +58,14 @@ describe("Search Agent v1 白名单投影", () => {
       resultCount: 1,
       evidenceCount: 1,
       results: [{ channel: "web", provider: "tavily", query: "LangGraph 官方文档", title: "LangGraph", url: "https://docs.langchain.com/oss/python/langgraph", snippet: "不进入持久事件的候选摘要", verified: true, author: "LangChain", published_at: null, metrics: {}, limitation: null, provenance }],
-      cached: false
+      cached: false,
+      durationMs: 347
     }));
     expect(projection.events).toEqual([{ type: "tool.completed", payload: expect.objectContaining({
       query: "LangGraph 官方文档",
       resultCount: 1,
       evidenceCount: 1,
+      durationMs: 347,
       sources: [{ title: "LangGraph", url: "https://docs.langchain.com/oss/python/langgraph", verified: true, channel: "web", author: "LangChain", publishedAt: undefined }],
       sourceEventId: "stream_test_000001",
       sourceStreamId: "stream_test",
@@ -217,7 +219,7 @@ describe("Search Agent v1 白名单投影", () => {
 
   it("把 unknown_tool 显示为被阻止的固定安全工具行", () => {
     const started = mapSearchAgentEvent(source({ type: "tool.started", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", cached: false }));
-    const failed = mapSearchAgentEvent(source({ type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false }));
+    const failed = mapSearchAgentEvent(source({ type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false, durationMs: 0 }));
     expect(started.events[0].payload).toMatchObject({ name: "未知工具请求", summary: "正在拦截未注册工具请求" });
     expect(failed.events[0].payload).toMatchObject({ summary: "未知工具请求已被阻止", error: "UNKNOWN_TOOL", resultCount: 0, evidenceCount: 0 });
   });
@@ -234,13 +236,15 @@ describe("Search Agent v1 白名单投影", () => {
       message: "为最终核验保留时间",
       retryable: false,
       resultCount: 5,
-      evidenceCount: 1
+      evidenceCount: 1,
+      durationMs: 18004
     }));
 
     expect(projection.events[0].payload).toMatchObject({
       toolCallId: "call_partial",
       resultCount: 5,
       evidenceCount: 1,
+      durationMs: 18004,
       error: "RUN_TIME_RESERVE"
     });
   });

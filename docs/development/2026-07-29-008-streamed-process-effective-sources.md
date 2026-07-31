@@ -43,7 +43,7 @@
 
 ### 公开文字与流式边界
 
-Prompt 版本升级为 `2026-07-29.v12-cross-channel-recovery`。公开文字仍只来自
+Prompt 版本升级为 `2026-07-29.v13-complete-source-stream`。公开文字仍只来自
 Supervisor、Planner、Researcher、Reflector、Writer、Verifier 的版本化结构化
 输出。BFF 把每个 `node.completed` 或 `verification.completed` 投影为：
 
@@ -78,9 +78,10 @@ Web、X、小红书公开读取和 `xiaohongshu-mcp` 均实现该协议。前端
 
 Reflector Prompt 明确规定 `source_presentations` 只能使用当前轮真实 Evidence
 URL，不能为候选索引生成说明。Python 侧再次做 URL 白名单交集，并过滤无效说明；
-每个有效来源单独发布一个 `tool.presented`。若当前轮已有合格 Evidence、但
-Reflector 没有生成任何有效说明，受限的 Source Curator Agent 只基于这些已读
-正文补齐说明。BFF 将 `tool.presented` 投影成 presentation start、持久
+每个有效来源单独发布一个 `tool.presented`。Source Curator Agent 会为当前轮
+每一条尚无有效说明的 Evidence 补齐文字，而不再只处理“零条说明”的情况；
+Reflector 结构化输出失败时也会把真实 Evidence 交给 Curator。BFF 将
+`tool.presented` 投影成 presentation start、持久
 `tool.source.delta` 和 presentation end；链接文字与思考共用 grapheme 队列，
 最后一个字符先获得独立绘制帧，下一步骤才可令搜索行折叠。Mapper、Reducer 和
 Conversation UI 再各做一层防护：
@@ -94,6 +95,27 @@ Conversation UI 再各做一层防护：
 
 候选数仍可以大于已读来源数，用于真实呈现搜索覆盖面；未读候选只保留在受控工具
 账本中，不成为对用户没有帮助的详情行。
+
+Web 抓取发生跳转或只补上规范末尾斜杠时，verified result 使用实际读取到的
+正文 URL。Web Reducer 对历史事件额外使用安全来源身份键，忽略非根路径末尾
+斜杠但保留查询参数，从而把 LLM 说明稳定挂回原来源。连续搜索段按同一身份去重，
+摘要中的“读取 M 个来源”和可展开链接数由真实事件共同验证，二者不允许脱节。
+
+### 最终回答流式收口
+
+Search Agent 的 `run.completed` 仍携带已经核验的完整答案，但 BFF 不再直接只写
+`message.completed`，而是在同一终态事务中依次持久化：
+
+```text
+message.started
+message.delta
+message.completed
+run.completed
+```
+
+浏览器渲染队列把 durable `message.delta` 拆成多个绘制帧，并限制终态到达后的
+单帧字符上限；`message.completed` 只有在 delta 排空后才应用同一全文。刷新或
+断线恢复仍从完整账本得到确定答案，运行中则能看到文字持续增长。
 
 ## 主要修改
 
@@ -116,8 +138,11 @@ Conversation UI 再各做一层防护：
 - `src/server/search-agent/mapper.ts`：投影持久 `thinking.delta`、渐进工具数字和
   `tool.source.delta`；拒绝无效来源说明。
 - `src/lib/agent-events/reducer.ts`：累加公开文段、单调合并工具数字与来源。
+- `src/lib/agent-events/source-url.ts`：验证来源 URL，并为末尾斜杠差异建立稳定
+  身份键。
 - `src/lib/agent-events/typewriter-queue.ts`：用同一 durable delta 队列渐进渲染
-  `thinking.delta` 与 `tool.source.delta`，在最后字符和折叠事件之间保留绘制帧。
+  `thinking.delta`、`tool.source.delta` 与 `message.delta`，在最后字符和
+  折叠/完成事件之间保留绘制帧。
 - `src/components/workbench/conversation/Conversation.tsx`：思考/核验显示 Agent
   文段，并根据下一个真实步骤控制自动折叠，不按当前段 terminal 抖动。
 - `src/components/workbench/activity-row/ActivityRow.tsx`：工具运行中只要已有真实
@@ -180,18 +205,22 @@ flowchart LR
 
 ## 验收证据
 
-- Search Agent：`138 passed`；Ruff 与 compileall 通过。
-- Web：`339 passed, 1 skipped`；typecheck、ESLint、production build 通过。
+- Search Agent：`139 passed`；Ruff 与 compileall 通过。
+- Web：`342 passed, 1 skipped`；typecheck、ESLint、production build 通过。
 - 3110 deterministic Playwright：`16 passed, 2 skipped`。
 - 真实生产 Playwright：
   - 小红书受限后跨渠道补证、公开文段、动态数字、链接文字逐字流出、同组思考
-    不提前折叠、刷新与移动端通过；
+    不提前折叠、最终回答多帧增长、已读来源数与可展开链接数严格相等、刷新与
+    移动端通过；
   - 停止、唯一终态、刷新后继续发送通过。
 - 截图：
   - `docs/development/evidence/2026-07-29-issue-9-desktop.png`
   - `docs/development/evidence/2026-07-29-issue-9-mobile.png`
 - Compose 七个服务均 healthy；`https://luzern.cc.cd` 与 `/workbench` 返回 HTTP
   200；Web/Search Agent 只绑定 loopback，内部服务无公网端口。
+- 最新公网运行 `run_0f42d11932a045318830be7d3ef9582c` 产生 1 个完整回答
+  `message.delta`；浏览器记录到多次单调增长。该运行有 5 个去重 verified
+  来源、5 个 LLM 来源说明，缺失数为 0。
 - Web、Search Agent、xiaohongshu-mcp 的发布窗口日志没有未处理异常，也没有
   `xsec_token=` 或敏感字段值。
 

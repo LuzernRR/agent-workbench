@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 def validate_run_id(value: str) -> str:
@@ -25,6 +26,31 @@ class HistoryMessage(ApiModel):
     content: str = Field(min_length=1, max_length=20_000)
 
 
+class ImageInputReference(ApiModel):
+    """跨服务图片引用；不接受 URL、base64 或原始 bytes。"""
+
+    attachment_id: str = Field(alias="attachmentId")
+    mime_type: Literal["image/jpeg", "image/png", "image/webp", "image/gif"] = Field(
+        alias="mimeType"
+    )
+    size_bytes: int = Field(alias="sizeBytes", ge=1, le=10 * 1024 * 1024)
+    sha256: str = Field(min_length=64, max_length=64)
+
+    @field_validator("attachment_id")
+    @classmethod
+    def validate_attachment_id(cls, value: str) -> str:
+        if not _ID.fullmatch(value):
+            raise ValueError("附件 ID 格式无效")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        if not _SHA256.fullmatch(value):
+            raise ValueError("图片摘要格式无效")
+        return value
+
+
 class SearchRunRequest(ApiModel):
     version: Literal[1]
     run_id: str = Field(alias="runId")
@@ -40,6 +66,10 @@ class SearchRunRequest(ApiModel):
     history: list[HistoryMessage] = Field(default_factory=list, max_length=40)
     project_memory_context: str = Field(
         default="", alias="projectMemoryContext", max_length=20_000
+    )
+    # 当前模型没有视觉 adapter，只接收不可逆引用供链路协商和未来实现使用。
+    image_inputs: list[ImageInputReference] = Field(
+        default_factory=list, alias="imageInputs", max_length=4
     )
     depth: Literal["quick", "balanced", "deep"] = "balanced"
     resume: bool = False

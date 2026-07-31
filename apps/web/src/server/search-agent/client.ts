@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from "@/lib/agent-events/types";
+import type { ImageInputReference } from "@/server/media/image-input";
 import { loadSearchAgentServiceConfig } from "./config";
 import { decodeSearchAgentNdjson, SearchAgentEventProtocolError, type SearchAgentEvent } from "./events";
 
@@ -13,6 +14,8 @@ export type SearchAgentRunRequest = {
   reasoningEffort: ReasoningEffort;
   history: Array<{ role: "user" | "assistant"; content: string }>;
   projectMemoryContext: string;
+  /** 仅包含不可逆摘要；不包含 bytes、base64、附件 URL 或任意 Provider URL。 */
+  imageInputs?: ImageInputReference[];
   depth?: "quick" | "balanced" | "deep";
   resume?: boolean;
 };

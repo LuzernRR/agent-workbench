@@ -61,10 +61,12 @@ class WebChannel:
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         evidence: list[ChannelEvidence] = []
         verified: set[str] = set()
+        resolved_urls: dict[str, str] = {}
         for hit, page in zip(selected, pages, strict=True):
             if not page.ok or not page.text:
                 continue
             verified.add(hit.url)
+            resolved_urls[hit.url] = page.url
             provenance = SourceProvenance(
                 discovery_provider=outcome.provider,
                 detail_provider=page.extractor,
@@ -89,7 +91,11 @@ class WebChannel:
                 channel="web",
                 provider=outcome.provider,
                 query=query,
-                url=hit.url,
+                # A verified result must expose the exact page whose body was
+                # read. Redirects and canonical trailing slashes otherwise
+                # split one source into two identities downstream, preventing
+                # the Agent's source presentation from attaching to the row.
+                url=resolved_urls.get(hit.url, hit.url),
                 title=(hit.title or hit.url)[:300],
                 snippet=hit.snippet[:500],
                 verified=hit.url in verified,

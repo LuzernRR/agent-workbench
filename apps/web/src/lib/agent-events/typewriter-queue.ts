@@ -42,8 +42,8 @@ export function createRenderQueue(options: RenderQueueOptions) {
   const requestFrame = options.requestFrame ?? ((callback: () => void) => window.requestAnimationFrame(callback));
   const cancelFrame = options.cancelFrame ?? ((handle: number) => window.cancelAnimationFrame(handle));
   const targetFrames = Math.max(1, options.targetFrames ?? 45);
-  const terminalFrames = Math.max(1, options.terminalFrames ?? 12);
-  const maxCharsPerFrame = Math.max(1, options.maxCharsPerFrame ?? 120);
+  const terminalFrames = Math.max(1, options.terminalFrames ?? 45);
+  const maxCharsPerFrame = Math.max(1, options.maxCharsPerFrame ?? 32);
 
   const queue: QueueItem[] = [];
   let frame = 0;

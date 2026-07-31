@@ -6,6 +6,7 @@ import type { ToolItem } from "@/lib/agent-events/types";
 import { cn } from "@/lib/utils";
 import { getRunFailureMessage } from "@/lib/errors";
 import { safeLinkLabel, safeWorkbenchHref } from "@/lib/api/client";
+import { sourceUrlIdentity } from "@/lib/agent-events/source-url";
 
 export function isPlaceholderTool(item: Pick<ToolItem, "name" | "summary">) {
   return /^(?:工具|活动|任务)$/u.test(item.name.trim()) && /^(?:正在准备|准备中|执行中|正在执行|完成|已完成)$/u.test(item.summary.trim());
@@ -17,7 +18,8 @@ function uniqueSourceCount(items: readonly ToolItem[], verifiedOnly: boolean) {
     for (const source of item.sources || []) {
       if (verifiedOnly && !source.verified) continue;
       const href = safeWorkbenchHref(source.url);
-      if (href) urls.add(href);
+      const identity = sourceUrlIdentity(href);
+      if (identity) urls.add(identity);
     }
   }
   return urls.size;
@@ -57,8 +59,9 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
     for (const source of item.sources || []) {
       if (!source.verified || !source.displayText) continue;
       const href = safeWorkbenchHref(source.url);
-      if (!href) continue;
-      sources.set(href, { ...source, url: href });
+      const identity = sourceUrlIdentity(href);
+      if (!href || !identity) continue;
+      sources.set(identity, { ...source, url: href });
     }
   }
   return <div
@@ -82,7 +85,7 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
       <span>{summarizeSearchActivity(items)}</span>
     </button>
     {expanded && sources.size ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
-      {[...sources.entries()].map(([href, source], index) => <p key={href} className="break-words"><a href={href} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a></p>)}
+      {[...sources.entries()].map(([identity, source], index) => <p key={identity} className="break-words"><a href={source.url} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a></p>)}
     </div> : null}
   </div>;
 }

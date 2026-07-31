@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
 import type { AgentEvent, AgentEventType, AgentThreadState, MessageAttachment, ProjectSummary, ThreadSnapshot, ThreadSummary } from "@/lib/agent-events/types";
+import { ImageInputError, MAX_IMAGE_INPUTS_PER_RUN, prepareImageInput, type PreparedImageInput } from "@/server/media/image-input";
 import { query, transaction } from "@/server/persistence/database";
 
 type ProjectRow = { id: string; name: string; path: string; status: ProjectSummary["status"] };
@@ -71,6 +72,8 @@ export type PreparedRun = {
   run: LiveRunRecord;
   history: Array<{ role: "user" | "assistant"; content: string }>;
   attachmentContext: string;
+  /** 图片 bytes 只保留在 BFF 内存，绝不能进入事件或 Search Agent JSON。 */
+  imageInputs: PreparedImageInput[];
   projectMemoryContext: string;
   userMessageId: string;
 };
@@ -551,7 +554,20 @@ export async function prepareLiveRun(input: {
       ORDER BY created_at
     `, [input.visitorId, input.threadId, input.attachmentIds]) : { rows: [] as AttachmentRow[] };
     const sections: string[] = [];
+    const imageInputs: PreparedImageInput[] = [];
     for (const attachment of attachmentResult.rows) {
+      if (attachment.kind === "image") {
+        try {
+          imageInputs.push(prepareImageInput({
+            id: attachment.id,
+            mimeType: attachment.mime_type,
+            sizeBytes: attachment.size_bytes,
+            bytes: attachment.bytes
+          }));
+        } catch {
+          // 旧附件或被篡改的 MIME 只能保留为用户附件，不得传给任何模型。
+        }
+      }
       const textLike = attachment.mime_type.startsWith("text/") || ["application/json", "application/xml"].includes(attachment.mime_type);
       if (textLike && attachment.bytes.byteLength <= 64 * 1024) {
         try {
@@ -563,6 +579,9 @@ export async function prepareLiveRun(input: {
         }
       }
       sections.push(`附件《${attachment.name}》（${attachment.mime_type}，${attachment.size_bytes} 字节）`);
+    }
+    if (imageInputs.length > MAX_IMAGE_INPUTS_PER_RUN) {
+      throw new ImageInputError("IMAGE_INPUT_TOO_MANY", "单次最多处理 4 张图片");
     }
 
     const run: LiveRunRecord = {
@@ -590,7 +609,7 @@ export async function prepareLiveRun(input: {
     await insertEventWithClient(client, run, "run.created", { agentId: run.agentId, modelId: run.modelId, reasoningEffort: input.reasoningEffort || "medium" });
     await insertEventWithClient(client, run, "message.started", { messageId: userMessageId, role: "user", text: input.message, attachments });
     await insertEventWithClient(client, run, "message.completed", { messageId: userMessageId, text: input.message, attachments });
-    return { run, history, attachmentContext: sections.join("\n\n"), projectMemoryContext, userMessageId };
+    return { run, history, attachmentContext: sections.join("\n\n"), imageInputs, projectMemoryContext, userMessageId };
   });
 }
 
@@ -726,6 +745,10 @@ export async function uploadLiveAttachments(visitorId: string, threadId: string,
       const id = liveId("att");
       const kind = file.type.startsWith("image/") ? "image" : "document";
       const bytes = Buffer.from(await file.arrayBuffer());
+      if (kind === "image") {
+        // 上传时校验 MIME、魔数、尺寸与像素，运行时还会再次 fail-closed 校验。
+        prepareImageInput({ id, mimeType: file.type, sizeBytes: file.size, bytes });
+      }
       await client.query(`
         INSERT INTO wb_attachments (id, visitor_id, thread_id, name, mime_type, size_bytes, kind, bytes)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

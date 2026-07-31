@@ -187,3 +187,35 @@ async def test_successful_memory_event_omits_nullable_reason_code(
     assert events[0]["status"] == "stored"
     assert events[0]["storedCount"] == 1
     assert "reasonCode" not in events[0]
+
+
+@pytest.mark.asyncio
+async def test_partial_run_never_persists_memory_after_a_prior_verification_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Store:
+        health = MilvusHealth(True, True, "ok")
+
+        async def remember(self, **kwargs: Any) -> int:
+            raise AssertionError("partial run must not persist evidence memory")
+
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(nodes, "get_stream_writer", lambda: events.append)
+    runtime = SimpleNamespace(context=RunContext(agent_config(), SimpleNamespace(), Store()))
+    state = initial_state("q", project_id="project_1", visitor_id="visitor_1")
+    state.update({
+        "verification_passed": True,
+        "stop_reason": "TOOL_CALL_LIMIT",
+        "answer": "部分回答",
+        "evidence": [{
+            "url": "https://example.com/source",
+            "title": "Source",
+            "text": "verified text",
+        }],
+    })
+
+    output = await nodes.finalize(state, runtime)
+
+    assert output["response_status"] == "partial"
+    assert output["verification_passed"] is False
+    assert events == []

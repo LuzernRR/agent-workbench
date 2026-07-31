@@ -107,6 +107,50 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
         "tool.completed",
     ]
     assert events[-1]["cached"] is True
+    completed_events = [event for event in events if event["type"] == "tool.completed"]
+    assert all(isinstance(event["durationMs"], int) for event in completed_events)
+    assert all(event["durationMs"] >= 0 for event in completed_events)
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_operation_records_elapsed_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = Ledger()
+    events: list[dict[str, Any]] = []
+
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+    ) -> SearchExecutionResult:
+        await asyncio.sleep(0.02)
+        return SearchExecutionResult(
+            ok=False,
+            channel=arguments.channel,
+            query=arguments.query,
+            provider="test",
+            results=[],
+            evidence=[],
+            error_code="PROVIDER_UNAVAILABLE",
+            error_message="测试渠道不可用",
+        )
+
+    monkeypatch.setattr(nodes, "execute_search_tool", execute)
+    monkeypatch.setattr(nodes, "get_stream_writer", lambda: events.append)
+    runtime = SimpleNamespace(context=RunContext(agent_config(), ledger, None))
+
+    result, trace = await nodes._run_one_search(
+        state(),
+        runtime,
+        "call_failed",
+        SearchToolInput(query="query one", channel="web", max_results=5),
+    )
+
+    assert result.ok is False
+    assert trace["status"] == "failed"
+    failed = next(event for event in events if event["type"] == "tool.failed")
+    assert failed["durationMs"] >= 10
 
 
 @pytest.mark.asyncio

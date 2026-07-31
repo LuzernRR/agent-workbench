@@ -187,6 +187,31 @@ describe("createRenderQueue", () => {
     expect(order.slice(0, -1).join("")).toBe("abcdef");
   });
 
+  it("keeps a completed answer visibly streaming when its terminal is already queued", () => {
+    const frames = manualFrames();
+    const snapshots: string[] = [];
+    let visible = "";
+    const queue = createRenderQueue({
+      apply: (e) => {
+        if (e.type === "message.delta") {
+          visible += String(e.payload.delta);
+          snapshots.push(visible);
+        }
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    const answer = "最终回答需要逐步显示，不能在完成事件到达时整段跳出。".repeat(20);
+    queue.enqueue(event(1, "message.delta", { messageId: "m1", delta: answer }));
+    queue.enqueue(event(2, "message.completed", { messageId: "m1", text: answer }));
+    queue.enqueue(event(3, "run.completed", {}));
+    const drawn = frames.flush();
+
+    expect(visible).toBe(answer);
+    expect(snapshots.length).toBeGreaterThan(20);
+    expect(drawn).toBeGreaterThan(20);
+  });
+
   it("preserves non-text ordering: tool events apply after earlier text drains", () => {
     const frames = manualFrames();
     const order: string[] = [];

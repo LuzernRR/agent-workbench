@@ -2,7 +2,7 @@
 
 // assistant-ui's minimal thread template is the runtime source for the
 // ThreadPrimitive, MessagePrimitive, action bar, and composer composition here.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionBarPrimitive, AssistantRuntimeProvider, AuiIf, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react";
 import { ArrowDown, Check, ChevronDown, ChevronRight, Copy, FileText, Pencil, X } from "lucide-react";
 import type { AgentThreadState, MessageAttachment, MessageItem, RunTiming, ThinkingItem, TimelineItem } from "@/lib/agent-events/types";
@@ -25,6 +25,10 @@ import {
   type V2PreviewInteractionRuntime
 } from "@/lib/agent-events/v2/use-v2-preview-interaction";
 import { getRunFailureMessage } from "@/lib/errors";
+import {
+  SearchPromptExamples,
+  type SearchPromptExample
+} from "./SearchPromptExamples";
 
 function toAppendText(message: AppendMessage) {
   if (typeof message.content === "string") return message.content;
@@ -92,6 +96,8 @@ type V2ProcessPlacement = {
 };
 
 export function Conversation({ state, composerThreadId = state.threadId, onStartRun, onStopRun, onResolveApproval, isResolvingApproval, isStarting, s01ProcessFixture = null }: { state: AgentThreadState; composerThreadId?: string | null; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onStopRun: () => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; isStarting: boolean; s01ProcessFixture?: S01ProcessFixtureCatalog | null }) {
+  const prefillSequence = useRef(0);
+  const [prefillRequest, setPrefillRequest] = useState<{ readonly id: string; readonly text: string } | null>(null);
   const timelineItems = useMemo(
     () => selectConversationTimelineItems(state),
     [state]
@@ -144,6 +150,13 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
     setMessages: () => undefined,
     convertMessage: (message: TimelineItem) => timelineMessageLike(message)
   });
+  const selectExample = (example: SearchPromptExample) => {
+    prefillSequence.current += 1;
+    setPrefillRequest({
+      id: `${example.id}-${prefillSequence.current}`,
+      text: example.prompt
+    });
+  };
 
   const standaloneProcess = visibleProcessPlacement?.anchorRunId === null
     ? <div
@@ -160,7 +173,7 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
       </div>
     : null;
 
-  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} /></div></AssistantRuntimeProvider>;
+  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} onSelectExample={selectExample} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} prefillRequest={prefillRequest} /></div></AssistantRuntimeProvider>;
 }
 
 /**
@@ -189,8 +202,8 @@ export function ConversationSkeleton() {
   </div>;
 }
 
-function ConversationViewport({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
-  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="grid min-h-[48vh] place-items-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages></div><ThreadPrimitive.ScrollToBottom className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
+function ConversationViewport({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction, onSelectExample }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null; onSelectExample: (example: SearchPromptExample) => void }) {
+  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="flex min-h-[48vh] flex-col items-center justify-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2><SearchPromptExamples onSelect={onSelectExample} /></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages></div>{/* The primitive treats an undefined behavior as no follow intent.  Keep an explicit intent so a user who clicks here remains at the live stream's bottom until they scroll up again. */}<ThreadPrimitive.ScrollToBottom behavior="instant" className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
 }
 
 function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
@@ -268,7 +281,7 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply, afte
       <div className={isUser ? `flex min-w-0 max-w-[min(850px,82%)] flex-col items-end${after ? " self-end" : ""}` : "max-w-none"}>
         {!isUser && timing ? <RunElapsed timing={timing} /> : null}
         <MessageAttachments attachments={item.attachments} isUser={isUser} />
-        {item.text ? editing && isUser ? <div data-message-editor className="rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] text-ink"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditing(false); } }} autoFocus rows={2} aria-label="编辑当前消息" className="min-h-12 w-full appearance-none resize-none border-0 bg-transparent p-0 leading-6 outline-none ring-0" /><div className="mt-1 flex justify-end gap-1"><button type="button" className="message-action" onClick={() => setEditing(false)} title="取消编辑" aria-label="取消编辑"><X className="size-4" /></button><button type="button" className="message-action text-ink" onClick={() => void submitEdit()} disabled={!draft.trim() || submitting} title="发送修改" aria-label="发送修改"><Check className="size-4" /></button></div></div> : <div className={isUser ? "rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] font-normal leading-6 text-ink" : item.status === "streaming" ? "streaming-cursor" : ""}>
+        {item.text ? editing && isUser ? <div data-message-editor className="rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] text-ink"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditing(false); } }} autoFocus rows={2} aria-label="编辑当前消息" className="min-h-12 w-full appearance-none resize-none border-0 bg-transparent p-0 leading-6 outline-none ring-0" /><div className="mt-1 flex justify-end gap-1"><button type="button" className="message-action" onClick={() => setEditing(false)} title="取消编辑" aria-label="取消编辑"><X className="size-4" /></button><button type="button" className="message-action text-ink" onClick={() => void submitEdit()} disabled={!draft.trim() || submitting} title="发送修改" aria-label="发送修改"><Check className="size-4" /></button></div></div> : <div className={isUser ? "rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] font-normal leading-6 text-ink" : item.status === "streaming" ? "streaming-cursor" : ""} data-assistant-stream-length={isUser ? undefined : Array.from(item.text).length}>
           {isUser ? <MessagePrimitive.Parts /> : <MessagePrimitive.Parts components={{ Text: () => <MarkdownRenderer>{item.text}</MarkdownRenderer> }} />}
         </div> : null}
         {!isUser && item.citations?.length ? <MessageCitations citations={item.citations} /> : null}

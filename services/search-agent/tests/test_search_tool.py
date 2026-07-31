@@ -12,7 +12,7 @@ from app.tools.web_search import SearchHit, SearchOutcome
 
 
 @pytest.mark.asyncio
-async def test_redirected_fetch_marks_original_candidate_verified(
+async def test_redirected_fetch_uses_the_exact_verified_source_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = "https://example.com/old"
@@ -38,8 +38,10 @@ async def test_redirected_fetch_marks_original_candidate_verified(
 
     monkeypatch.setattr(module, "web_search", search)
     monkeypatch.setattr(module, "fetch_pages", fetch)
-    result = await WebChannel(agent_config()).search("query", 5)
+    progress: list[Any] = []
+    result = await WebChannel(agent_config()).search("query", 5, progress.append)
 
-    assert result.results[0].url == original
+    assert result.results[0].url == final
     assert result.results[0].verified is True
     assert result.evidence[0].url == final
+    assert progress[-1].source.url == final

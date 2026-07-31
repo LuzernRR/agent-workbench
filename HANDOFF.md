@@ -1,18 +1,40 @@
 # 项目交接
 
-## 当前结论（2026-07-29，Issue #9 等待用户验收）
+## 当前结论（2026-07-31，Issue #9 已获用户验收，待受控收口）
 
-- 当前唯一活动功能是
+- **当前 Codex 目标（active）**：持续迭代并上线“平台万能搜”：面向学生、女性、
+  求职者等真实用户场景，以 LangGraph 驱动自适应的思考—真实多渠道搜索—再思考—
+  核验循环；前端按真实时间流式呈现公开过程与可展开的有效来源；完善 Web、
+  小红书、X、Milvus、记忆、工具和安全图片输入接口；持续自审、真实检索与全量
+  测试，保持 3000/8080 和 `luzern.cc.cd` 可靠可用，直到可上线交付。
+- 图片输入当前状态：上传的 PNG/JPEG/WebP/GIF 在 BFF 以 MIME、文件魔数、文件
+  大小、像素数和 SHA-256 做受限准备；原始 bytes、base64、附件私有地址不会进入
+  AgentEvent、日志或跨服务 JSON。现有 DeepSeek 模型的 `capabilities.imageInput`
+  默认 `false`，因此图片绝不被声称为已读取。内部 API 仅传递不可逆元数据引用，
+  并为未来视觉 Provider adapter 预留 data-URL 内容构造接口；adapter 未实现前即使
+  配置误开也会 fail-closed。
+- 2026-07-30 图片能力交付已完成上一轮门禁与部署：Search Agent 全量 `146 passed`，
+  Web 全量 `351 passed, 1 skipped`，3110 Playwright `16 passed, 2 skipped`；
+  `search-agent`、`web` 及其依赖的 `xiaohongshu-mcp` 已重建。3000、8080 和
+  `https://luzern.cc.cd/workbench` 都返回 200，Milvus 启用且可用。详细记录见
+  `docs/development/2026-07-30-010-image-input-capability.md`。
+- 已完成并获得用户验收的功能是
   [#9](https://github.com/LuzernRR/agent-workbench/issues/9)“Agent 公开过程流式展示、
   有效来源增量与生产域名切换”，状态为 `ready`，`Execution Gate: allowed`。
-  实现、部署和技术验收完成后必须停在用户确认门；验收前不得 stage、commit、
-  push、关闭 Issue 或开始下一功能。
+  用户曾验收并发布提交 `119e8777c7f148e814ab7adac396c8709e54db4e`，随后在
+  生产发现最终回答整段出现、部分已读来源无法展开；Issue 已重新开启。当前回归
+  修复已部署并通过技术验证，但仍保持未暂存、未提交，等待用户再次验收。用户
+  随后要求继续优化空会话搜索入口；该体验改动继续在同一 Issue 的搜索交互边界
+  内实施，尚未 stage、commit 或关闭 Issue。
+  2026-07-31 用户明确回复“通过 Issue #9”，允许仅对该 Issue 的既有变更执行一次
+  受控 stage、commit、push 与 Issue close。收口后，新 feature 必须另建唯一 Issue、
+  定义可测试验收条件并标记 `Execution Gate: allowed` 后才能编辑功能代码。
 - 生产入口为
   [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)。Cloudflare
   Tunnel 只把 `luzern.cc.cd` 与 `www.luzern.cc.cd` 转到
   `http://127.0.0.1:3000`；Search Agent 只绑定 `127.0.0.1:8080`，PostgreSQL、
   Milvus、etcd、MinIO 与 `xiaohongshu-mcp` 均未对公网发布。
-- Prompt 版本为 `2026-07-29.v12-cross-channel-recovery`。Planner、Researcher、
+- Prompt 版本为 `2026-07-31.v17-required-channel-evidence`。Planner、Researcher、
   Reflector、Writer、Verifier 的公开摘要通过版本化 LangGraph 输出产生；事件
   投影不读取或展示 `reasoning_content`，也不保存私有 CoT。
 - `node.completed` 与 `verification.completed` 被投影为持久
@@ -25,43 +47,83 @@
   正文时上报 `tool.progress`。BFF 按原始 `toolCallId` 持久化，Reducer 只接受
   单调不减的 `resultCount/evidenceCount`；同一连续搜索段显示动态
   “找到 N 条结果，读取 M 个来源”，刷新后从事件账本重建一致数字。
+- X 公共 JSON API 不再被误套网页 robots 门禁：`api.fxtwitter.com` 只要是公开
+  JSON 请求就可以返回真实正文 Evidence；Verifier 现在会硬性检查
+  `requiredChannels / evidenceChannels / missingChannels`，缺少用户指定渠道正文时
+  绝不允许 `pass`。最新真实验证：X `run_9b5bc0ea48df4f2188e0e65919b2d126`
+  完成并写回 15 条 X 正文 Evidence；小红书案例在缺正文时仍诚实收口为
+  `partial`。
 - Reflector 的 `source_presentations` 只允许引用当前轮真实 Evidence URL，并按
   来源逐条发布 `tool.presented`。BFF 将其投影为持久
   `tool.source.delta`，与思考共用 grapheme 队列，链接文字逐字增长；最后一个
   字符先获得独立绘制帧，随后才允许步骤切换。Prompt、Python 投影、BFF Mapper、
   Reducer 与 Conversation UI 均拒绝未读候选和“正文未读取、仅发现候选、尚未
   核验”等无效文案；展开区只显示 verified URL 与 LLM 基于已读正文生成的有效
-  说明。缺少合格说明时由受限 Source Curator Agent 基于同一 Evidence 补齐，
-  不使用前端模板兜底。
+  说明，不使用前端模板兜底。
+- `SourcePresentation.include_in_details` 由 Reflector/Source Curator 根据当前问题
+  和用户筛选条件决定。相关、已读的真实 Evidence 才能产生可展开来源；不相关、
+  不适用、过期或只用于排除的已读证据仍保留内部账本但绝不展示。终态只有
+  `VERIFIED` 才会保留 `verificationPassed=true` 并写入 Milvus；工具、模型或时间
+  上限导致的 partial 不会伪称已核验，也不会进入长期记忆。Web 正文重定向后的规范
+  URL 仍是 verified 来源真值，Reducer 使用安全身份键关联历史事件，避免 URL 拼写
+  差异导致来源详情丢失。
+- 最终回答在原子结算时持久化为
+  `message.started → message.delta → message.completed → run.completed`。
+  浏览器与思考、来源共用同一渲染队列，完整回答会按多个绘制帧单调增长；
+  `message.completed` 仍保留全文用于刷新恢复和项目记忆，不会抢先整段覆盖。
+- 流式阅读位置遵循用户意图：上滚后不自动抢回；点击“滚动到底部”会恢复持续跟随，
+  所有后续逐字回答、思考与来源增长都保持贴底，直到用户再次向上滚动。该行为由
+  `ThreadPrimitive.ScrollToBottom` 的明确即时滚动意图实现，不产生前端伪造过程文本。
 - 小红书标题与话题标签不再计为 Evidence。登录态探测约 1 秒确认有效；站内搜索
   被平台跳转到安全验证时，以 `CAPTCHA_REQUIRED` 在约 1 秒内受控返回，不绕过
   验证码、不重试验证码页。Reflector 在平台正文受限时切换 Web 等互补只读渠道；
   配置允许最多三轮、连续三轮无进展才熔断。
+- 空会话品牌已更新为“平台万能搜”，并在“今天想做什么？”下提供网页、小红书、
+  X 三张真实案例卡。点击卡片只通过受控 `prefillRequest` 写入并聚焦
+  assistant-ui Composer，不发送请求、不导航、不查询 DOM；同一案例重复点击也会
+  生成新的请求身份。桌面和 `390×844` 移动端均无横向溢出或布局跳动。
+- 三条案例均已在真实服务验证：网页样例完成 4 次 Web 检索并读取 11 个有效来源；
+  小红书样例实际调用登录态 MCP，CAPTCHA 后按受控策略改走 Web 并读取 5 个有效
+  来源；X 样例改用存在的 `@LangChain` 账号。FxEmbed API 对 `@LangChainAI`
+  返回 404，且其 robots 明确禁止 API 爬取，因此 X 当前只能诚实显示候选数量，
+  不将未读取帖子作为来源。适配器已支持 Planner 常用的 `from:@handle` 解析，供
+  平台策略允许读取时使用。
 - 真实公网小红书多轮验收生成的桌面和移动端证据位于
   `docs/development/evidence/2026-07-29-issue-9-{desktop,mobile}.png`。移动端
   `390×844` 没有横向溢出，呈现顺序为自然文段、动态搜索及有效来源、新自然
   文段和后续搜索。
-- 最新门禁：Search Agent `138 passed`，Ruff/compileall 通过；Web
-  `339 passed, 1 skipped`，typecheck、全量 ESLint、production build 通过；
-  3110 deterministic Playwright `16 passed, 2 skipped`；公网真实 Playwright
-  两项全部通过。`xiaohongshu-mcp` 镜像构建内 `go test ./...` 全部通过。
+- 最新门禁：Search Agent `156 passed`，Ruff/compileall 通过；Web
+  `352 passed, 1 skipped`，typecheck、全量 ESLint、production build 通过；
+  3110 deterministic Playwright `16 passed, 3 skipped`；生产 live 案例卡
+  `1 passed`。三张案例卡的显式真实 Provider 回归也已通过；最新真实运行包括
+  奖学金 `run_25316fc68b974f2c8584589cba421b0a`（148.8 秒、16 个 Web Evidence、
+  `MODEL_CALL_LIMIT` partial）、小红书防晒
+  `run_5ebf10ff69774e58ab0f60692b2c3e30`（118.41 秒、6 个 Web Evidence、
+  XHS 正文为 0、`MAX_ITERATIONS` partial）与 X
+  `run_9b5bc0ea48df4f2188e0e65919b2d126`（130.38 秒、15 条 X 正文 Evidence、
+  `VERIFIED`）。`xiaohongshu-mcp` 镜像构建内 `go test ./...` 全部通过。
 - Compose 七服务运行于 project `001-agent-live`。旧容器
   `kanna-workbench-backend-1` 仅被可恢复地停止，当前 exit code 为 `143`；
   没有删除容器、镜像、卷或数据。回滚命令：
   `docker start kanna-workbench-backend-1`。恢复前必须先处理它与本项目
   `127.0.0.1:8080` 的端口冲突。
 - 中文记录：
-  `docs/development/2026-07-29-008-streamed-process-effective-sources.md`。
+  `docs/development/2026-07-29-008-streamed-process-effective-sources.md`、
+  `docs/development/2026-07-29-009-search-prompt-examples.md`、
+  `docs/development/2026-07-30-010-image-input-capability.md`、
+  `docs/development/2026-07-30-011-relevant-sources-and-xhs-latency.md`、
+  `docs/development/2026-07-30-012-stream-follow-recovery.md`。
 
 ### Issue #9 收口边界
 
 1. Search Agent pytest/Ruff/compileall、Web test/typecheck/lint/build、3110
-   E2E 与生产 live E2E 已完成；提交验收前仍需复核 Compose、域名、日志和
-   `git diff --check`。
-2. 验收前保持暂存集合为空；保留 `config/*.local.*`、小红书私有 session volume、
-   D 盘 Milvus 和所有现有数据。
-3. 用户明确回复“通过”后，才允许为 Issue #9 执行一次受控
-   stage、commit、push 与 Issue close；提交必须包含规定的 Codex 联合署名。
+   E2E 与生产 live E2E 已完成；2026-07-30 部署后 Compose、3000/8080、Milvus、
+   域名与最近日志已复核，`git diff --check` 通过。
+2. 用户已于 2026-07-31 明确验收通过；现在允许只对 Issue #9 的既有变更执行一次
+   受控 stage、commit、push 与 Issue close。保留 `config/*.local.*`、小红书私有
+   session volume、D 盘 Milvus 和所有现有数据。
+3. 提交必须包含规定的 Codex 联合署名。Issue #9 收口后，下一功能必须另建唯一
+   Issue、定义可测试验收条件并取得 `Execution Gate: allowed`。
 
 ## 当前结论（2026-07-29，Issue #8 已获用户验收）
 

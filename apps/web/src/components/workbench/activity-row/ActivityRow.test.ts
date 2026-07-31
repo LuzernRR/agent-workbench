@@ -253,6 +253,49 @@ describe("SearchActivitySummary", () => {
     expect(container.querySelector("table")).toBeNull();
   });
 
+  it("把末尾斜杠不同的同一来源合并为一个可展开详情", () => {
+    const base = {
+      kind: "tool" as const,
+      runId: "run-one",
+      name: "网页搜索",
+      summary: "搜索完成",
+      status: "completed" as const,
+      resultCount: 1,
+      evidenceCount: 1,
+      createdAt: "2026-07-29T00:00:00.000Z"
+    };
+    const items = [
+      {
+        ...base,
+        id: "tool:slash-one",
+        toolCallId: "slash-one",
+        sources: [{
+          title: "来源一",
+          url: "https://example.com/topic",
+          verified: true,
+          displayText: "该来源提供了可核验的主题说明。"
+        }]
+      },
+      {
+        ...base,
+        id: "tool:slash-two",
+        toolCallId: "slash-two",
+        sources: [{
+          title: "来源一规范地址",
+          url: "https://example.com/topic/",
+          verified: true,
+          displayText: "该来源的说明已由 Agent 润色。"
+        }]
+      }
+    ];
+    const { container } = render(createElement(SearchActivitySummary, { items }));
+
+    expect(container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    fireEvent.click(within(container).getByRole("button", { name: "展开搜索详情" }));
+    expect(container.querySelectorAll("[data-search-activity-details] a")).toHaveLength(1);
+    expect(container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源的说明已由 Agent 润色。");
+  });
+
   it("同一摘要行随真实完成事件逐次累加计数", () => {
     const first = {
       kind: "tool" as const,

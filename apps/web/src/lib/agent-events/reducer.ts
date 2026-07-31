@@ -13,6 +13,7 @@ import type {
   ToolSource,
   WorkbenchFile
 } from "./types";
+import { safeSourceUrl, sourceUrlIdentity } from "./source-url";
 
 export function createEmptyThreadState(projectId: string | null, threadId: string): AgentThreadState {
   return {
@@ -72,14 +73,14 @@ function sourcesValue(value: unknown): ToolSource[] | undefined {
     const candidate = item as Partial<ToolSource>;
     if (typeof candidate.title !== "string" || typeof candidate.url !== "string" || typeof candidate.verified !== "boolean") return [];
     try {
-      const url = new URL(candidate.url);
-      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return [];
+      const url = safeSourceUrl(candidate.url);
+      if (!url) return [];
       const channel = ["web", "x", "xiaohongshu"].includes(candidate.channel || "")
         ? candidate.channel
         : undefined;
       return [{
         title: candidate.title.trim().slice(0, 300) || "搜索来源",
-        url: url.href,
+        url,
         verified: candidate.verified,
         channel,
         author: typeof candidate.author === "string" && candidate.author.trim() ? candidate.author.trim().slice(0, 160) : undefined,
@@ -105,37 +106,29 @@ function sourcePresentationsValue(value: unknown): Array<{ url: string; text: st
       || /(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明))/u.test(text)
     ) return [];
     try {
-      const url = new URL(candidate.url);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return [];
-      return [{ url: url.href, text }];
+      const url = safeSourceUrl(candidate.url);
+      if (!url) return [];
+      return [{ url, text }];
     } catch {
       return [];
     }
   });
 }
 
-function safeSourceUrl(value: unknown) {
-  if (typeof value !== "string") return "";
-  try {
-    const url = new URL(value);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
-    return url.href;
-  } catch {
-    return "";
-  }
-}
-
 function mergeSources(
   current: ToolSource[] | undefined,
   incoming: ToolSource[]
 ): ToolSource[] {
-  const sources = new Map((current || []).map((source) => [source.url, source]));
+  const sources = new Map((current || []).map((source) => [sourceUrlIdentity(source.url), source]));
   for (const source of incoming) {
-    const previous = sources.get(source.url);
+    const key = sourceUrlIdentity(source.url);
+    if (!key) continue;
+    const previous = sources.get(key);
     if (previous?.verified && !source.verified) continue;
-    sources.set(source.url, {
+    sources.set(key, {
       ...previous,
       ...source,
+      url: previous?.url || source.url,
       displayText: previous?.displayText || source.displayText
     });
   }
@@ -392,15 +385,15 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         ? Math.max(0, finishedAt - startedAt)
         : undefined;
       const sourcePresentations = new Map(
-        sourcePresentationsValue(payload.sourcePresentations).map((item) => [item.url, item.text])
+        sourcePresentationsValue(payload.sourcePresentations).map((item) => [sourceUrlIdentity(item.url), item.text])
       );
       const sourcePresentationUrls = new Set(
         Array.isArray(payload.sourcePresentationUrls)
-          ? payload.sourcePresentationUrls.map(safeSourceUrl).filter(Boolean)
+          ? payload.sourcePresentationUrls.map(sourceUrlIdentity).filter(Boolean)
           : []
       );
       const currentSources = payload.sourcePresentationActive === true && sourcePresentationUrls.size && current.sources
-        ? current.sources.map((source) => source.verified && sourcePresentationUrls.has(source.url)
+        ? current.sources.map((source) => source.verified && sourcePresentationUrls.has(sourceUrlIdentity(source.url))
           ? { ...source, displayText: undefined }
           : source)
         : current.sources;
@@ -408,7 +401,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         ? currentSources.map((source) => ({
             ...source,
             displayText: source.verified
-              ? sourcePresentations.get(source.url) || source.displayText
+              ? sourcePresentations.get(sourceUrlIdentity(source.url)) || source.displayText
               : source.displayText
           }))
         : (() => {
@@ -457,8 +450,9 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
       const url = safeSourceUrl(payload.url);
       const delta = stringValue(payload.delta);
       if (!url || !delta || !current.sources) return next;
+      const presentationKey = sourceUrlIdentity(url);
       const sources = current.sources.map((source) => {
-        if (!source.verified || source.url !== url) return source;
+        if (!source.verified || sourceUrlIdentity(source.url) !== presentationKey) return source;
         return {
           ...source,
           displayText: `${source.displayText || ""}${delta}`.slice(0, 180)

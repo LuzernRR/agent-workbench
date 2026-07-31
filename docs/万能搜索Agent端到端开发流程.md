@@ -54,7 +54,13 @@
 - 对话区按持久事件 `seq` 做相邻同类连续段归并：连续思考、连续搜索、连续核验
   各自归段；同一组不会在两段输出间折叠后重开，类型切换后才新开行并折叠上一
   组。搜索摘要累计当前连续段的真实 `tool.progress`，展开区通过
-  `tool.source.delta` 逐字显示已读 Evidence 对应的有效 LLM 来源说明；每个
+  `tool.source.delta` 逐字显示 Agent 判断为直接相关的已读 Evidence 的有效 LLM
+  来源说明；Source Curator 补齐 Reflector 遗漏的相关项，正文规范 URL 与发现 URL
+  通过安全来源身份关联。“读取 M 个来源”是完整真实工具进度，展开链接则是其中
+  直接支持当前问题的安全子集；未读候选、无效正文、不适用或只作排除依据的来源不
+  对用户展示。最终回答持久化为
+  `message.started → message.delta → message.completed`，同样按多个绘制帧
+  渐进显示；每个
   底层节点原子和 `toolCallId` 仍独立可审计，后续思考不能回填旧行。
 - Milvus 位于 D 盘，证据按租户、访客、项目、记忆类型与 embedding 版本过滤；失败发布 degraded，不阻断主搜索。
 - 真实验证与故障修复证据见 `docs/development/2026-07-28-006-langgraph-search-agent.md`。
@@ -301,7 +307,7 @@ config/                              # 统一运行配置；本地密钥只进 *
 | 对话过程 | `run.status`、`plan.updated` | 当前可公开阶段、计划变更、停止原因 | 原始 CoT、固定“正在深度思考”话术、前端计时猜测 |
 | 工具活动 | `tool.*`、approval event | 工具名、参数摘要、状态、结果计数、耗时、错误 | 把未执行工具显示成成功、暴露敏感参数或完整原始结果 |
 | 证据与引用 | `artifact.created`、`citation.created` | 来源、locator、验证状态、冲突 | 只展示 URL 却没有已读快照和 locator |
-| 最终结果 | `SearchResponse`、`message.completed` | 已核验正文、引用、限制、冲突、停止原因 | 核验前显示草稿、把 transport 分块伪装成模型生成 |
+| 最终结果 | `SearchResponse`、`message.delta`、`message.completed` | 已核验正文逐步增长、引用、限制、冲突、停止原因 | 核验前显示草稿、完成事件抢先整段覆盖、把未持久化 transport 分块冒充模型输出 |
 | 预算与上下文 | usage/budget event | 已用/上限、估算/实际、Context Window 利用率 | 用字符粗估冒充实际 Token 或费用 |
 | 恢复与异常 | snapshot、严格递增事件、terminal | 重连、部分结果、明确失败、继续入口 | 闪回旧线程、吞掉坏事件后推进游标、终态后追加内容 |
 
@@ -2768,17 +2774,19 @@ flowchart LR
    在发现候选、读取正文时发出 `tool.progress`；数字绑定真实 `toolCallId`，
    单调累加并可从 PostgreSQL 事件账本恢复。
 3. **有效来源：已实现，待用户验收**。Reflector/Source Curator 只为本轮
-   Evidence 生成说明，每个来源通过持久 `tool.source.delta` 逐字发布；Prompt、
-   Python、Mapper、Reducer、UI 五层拒绝未读候选及“正文未读取”等废话。
+   Evidence 生成说明并补齐遗漏，每个来源通过持久 `tool.source.delta` 逐字
+   发布；规范 URL 与发现 URL 以安全身份关联，展开链接数严格等于去重已读来源
+   数；Prompt、Python、Mapper、Reducer、UI 五层拒绝未读候选及“正文未读取”
+   等废话。
 4. **生产切换：已实现，待用户验收**。
    [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 只映射
    loopback Web `3000`；Search Agent 为 loopback `8080`，其余服务不公开。
    `kanna-workbench-backend-1` 仅停止，可用
    `docker start kanna-workbench-backend-1` 恢复。
-5. **技术证据：已完成**。Search Agent `138 passed`，Web
-   `339 passed, 1 skipped`，3110 Playwright `16 passed, 2 skipped`；生产
-   小红书受限后的跨渠道补证、链接文字流式增长、无折叠反复与停止/恢复场景
-   通过。详细记录与截图见
+5. **技术证据：已完成**。Search Agent `139 passed`，Web
+   `342 passed, 1 skipped`，3110 Playwright `16 passed, 2 skipped`；生产
+   小红书受限后的跨渠道补证、链接文字与最终回答流式增长、来源数与链接数
+   对账、无折叠反复与停止/恢复场景通过。详细记录与截图见
    `docs/development/2026-07-29-008-streamed-process-effective-sources.md`。
 6. **验收门：仍生效**。用户明确回复“通过”前，不 stage、commit、push、
    关闭 Issue 或开始下一功能。

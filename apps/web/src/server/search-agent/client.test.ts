@@ -62,6 +62,24 @@ describe("Search Agent 服务端 client", () => {
     expect(String(init.body)).not.toMatch(/apiKey|Authorization|reasoning_content/u);
   });
 
+  it("图片只传递不可逆引用，不传 bytes、base64 或附件地址", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ndjsonResponse([{
+      ...sourceEnvelope,
+      type: "run.failed",
+      reasonCode: "SEARCH_UNAVAILABLE",
+      message: "搜索不可用"
+    }]));
+    const imageRequest = {
+      ...request,
+      imageInputs: [{ attachmentId: "att_image_1", mimeType: "image/png" as const, sizeBytes: 24, sha256: "a".repeat(64) }]
+    };
+    for await (const _event of streamSearchAgentRun(imageRequest, new AbortController().signal)) void _event;
+
+    const body = String((fetchMock.mock.calls[0][1] as RequestInit).body);
+    expect(JSON.parse(body).imageInputs).toEqual(imageRequest.imageInputs);
+    expect(body).not.toMatch(/base64|data:image|https:\/\//u);
+  });
+
   it("拒绝非 NDJSON 响应且不读取 Provider body", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("provider secret", { status: 200, headers: { "content-type": "application/json" } }));
     const consume = async () => { for await (const _event of streamSearchAgentRun(request, new AbortController().signal)) void _event; };
