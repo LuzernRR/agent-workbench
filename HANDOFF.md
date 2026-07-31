@@ -1,5 +1,61 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #10 已获用户验收，执行受控收口）
+
+- 当前唯一活动功能是
+  [#10](https://github.com/LuzernRR/agent-workbench/issues/10)“真实流式响应、端到端
+  延迟与小红书正文可靠性”，Issue 状态为 `ready`，`Execution Gate: allowed`。
+  功能代码、测试、生产真实 Provider 验证和部署已经完成。用户已于 2026-08-01
+  明确回复“验收通过，继续完成任务”，授权对本 Issue 的既有变更执行受控 stage、
+  commit、push 和 close。
+- 强制搜索已跳过 Supervisor 模型路由；Planner 确定 query/channel 后直接产生真实
+  唯一 `toolCallId`，不再由 Researcher 调模型复述固定参数。同轮独立搜索并发
+  执行并按原计划顺序确定性归并；共享小红书浏览器访问继续串行。
+- 运行预算收紧为 2 轮、10 次模型、4 次工具、150 秒。Prompt 版本为
+  `2026-08-01.v20-channel-aware-compact-answer`，`ANSWER_MAX_CHARS=760`，Writer
+  token 上限为 2048。Writer 输出按完整句/Markdown 行边界压缩，结构化输出失败时
+  以 `OUTPUT_INVALID / partial` 安全收口。
+- 小红书授权只读 MCP 已连续真实读取正文：`AI 编程工具` 在 6.340 秒得到 5 候选、
+  3 Evidence，`Cursor` 在 4.945 秒得到 5 候选、3 Evidence，来源均为真实
+  `xiaohongshu.com/explore/...`。同 run 首次 MCP 故障后后续请求 circuit-open，
+  不重复进入相同慢路径。
+- CAPTCHA、AUTH、TIMEOUT、RATE_LIMIT、NETWORK、OUTPUT_INVALID 等失败均映射为
+  稳定结构化错误。fallback 成功仍保留 `degraded`、primary/effective provider、
+  `reasonCode`、`retryable`、`nextAction` 和安全 message，BFF、持久账本、Reducer
+  与 UI 可一致重建。
+- 思考摘要、来源说明和最终回答现在共用逐 Unicode grapheme 队列，每个绘制帧只
+  追加一个字素。completed、snapshot 与 reconnect 只能补后缀，不能改写已显示
+  前缀。搜索统计只由真实 completed 事件和 verified URL 产生。
+- 最新主生产运行 `run_2077f589a5a84f06b8acebe1d949196d`：首个公开字
+  1871ms、首工具 1880ms、Agent 终态 65720ms，6 次模型、4 次工具、489 字，
+  小红书首次搜索 5 候选、2 Evidence，最终 `VERIFIED / completed`。
+- 三渠道连续生产运行均通过：Web
+  `run_e6af11ee4e0b4469ba54ec83b2954bc4`（61.854 秒，8/4，VERIFIED）、小红书
+  `run_de207bd0013e41a1a2e1bc24c7be4be2`（49.054 秒，7/4，VERIFIED）、X
+  `run_c6bf7d7cd3e54a10883bff8f811e5ba2`（80.970 秒，8/4，VERIFIED）。
+- 最新门禁：Search Agent `165 passed`，Ruff、compileall 通过；Web
+  `361 passed, 1 skipped`，typecheck、lint、production build 通过；3110
+  deterministic Playwright `16 passed, 3 skipped`；3000 production live E2E
+  `3 passed (5.3m)`，覆盖主链路、停止/恢复和 Web/XHS/X 连续案例。
+- 当前 Go 源码对应镜像 builder 的 `go test ./...` 层已通过并按内容哈希复用；两次
+  额外无缓存复跑都在 `go mod download` 被 `proxy.golang.org` TLS handshake
+  timeout 阻断，属于外部依赖网络问题，不是测试断言失败。
+- Compose project `001-agent-live` 七个服务全部 healthy。`127.0.0.1:3000`、
+  `127.0.0.1:8080`、Milvus 和
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均可用且 HTTP
+  检查返回 200，最近 Web/Search Agent/xiaohongshu-mcp 日志未见 ERROR、
+  Traceback 或 panic。
+- UI 和追踪继续只展示安全公开过程摘要、节点状态、工具结果和 Evidence；不请求、
+  存储或显示私有思维链、`reasoning_content`、Cookie、token、密钥或 Provider 原始
+  响应。
+- 完整中文交付记录：
+  `docs/development/2026-08-01-014-issue-10-streaming-xhs-reliability.md`；桌面和移动
+  证据为 `docs/development/evidence/2026-08-01-issue-10-{desktop,mobile}.png`。
+- Issue #10 完成受控收口后，下一阶段的结构化计划、工具调用记录增强、证据状态、
+  记忆、LangGraph 图级 fan-out/fan-in、检查点、持久化、显式 HarnessRunner、
+  可观测性、LangSmith tracing/eval 和完整评测必须重新选择一个独立 feature，创建
+  唯一 Issue、定义可测试验收条件并设置 `Execution Gate: allowed` 后才能编辑代码。
+
 ## 当前结论（2026-07-31，Issue #9 已获用户验收，待受控收口）
 
 - **当前 Codex 目标（active）**：持续迭代并上线“平台万能搜”：面向学生、女性、

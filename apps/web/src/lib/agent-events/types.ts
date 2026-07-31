@@ -107,10 +107,17 @@ export type ToolItem = {
   toolCallId: string;
   name: string;
   summary: string;
+  settlementSummary?: string;
   status: ToolStatus;
+  outcomeStatus?: "success" | "degraded" | "failed";
   channel?: "web" | "x" | "xiaohongshu";
   query?: string;
   provider?: string;
+  primaryProvider?: string;
+  effectiveProvider?: string;
+  reasonCode?: string;
+  resolutionMessage?: string;
+  nextAction?: "none" | "use_fallback" | "use_alternative_channel" | "reconnect_account" | "retry_later" | "stop";
   resultCount?: number;
   evidenceCount?: number;
   sources?: ToolSource[];

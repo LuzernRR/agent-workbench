@@ -13,6 +13,22 @@ import { useWorkbenchUiStore } from "@/stores/workbench-ui-store";
 
 export type StreamConnection = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
 
+export function reconcileThreadSnapshot(
+  current: AgentThreadState | null,
+  incoming: AgentThreadState,
+  currentCursor: number
+) {
+  const sameThread = current?.threadId === incoming.threadId;
+  const wouldRewind = sameThread && current.lastSeq > incoming.lastSeq;
+  const hasVisibleActiveRun = sameThread
+    && Boolean(current.activeRunId)
+    && ["queued", "running", "waiting", "reconnecting"].includes(current.runStatus);
+  if (wouldRewind || hasVisibleActiveRun) {
+    return { state: current, lastSeq: currentCursor };
+  }
+  return { state: incoming, lastSeq: Math.max(currentCursor, incoming.lastSeq) };
+}
+
 export function useAgentThread(threadId: string | null) {
   const queryClient = useQueryClient();
   const snapshotQuery = useQuery({ queryKey: ["thread", threadId], queryFn: () => workbenchApi.thread(threadId!), enabled: Boolean(threadId), staleTime: 15_000 });
@@ -48,16 +64,15 @@ export function useAgentThread(threadId: string | null) {
     }
     if (!snapshotQuery.data || snapshotQuery.data.thread.id !== threadId) return;
     // The event reducer needs an independent mutable stream snapshot.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState((current) => {
       const incoming = snapshotQuery.data.state;
       // A refetch can start before an approval/stop response and finish after
       // newer SSE events. Never let that older snapshot rewind the visible
       // read model or strand a running tool at an earlier frame.
-      if (current?.threadId === incoming.threadId && current.lastSeq > incoming.lastSeq) return current;
-      return incoming;
+      const reconciled = reconcileThreadSnapshot(current, incoming, lastSeqRef.current);
+      lastSeqRef.current = reconciled.lastSeq;
+      return reconciled.state;
     });
-    lastSeqRef.current = Math.max(lastSeqRef.current, snapshotQuery.data.state.lastSeq);
   }, [snapshotQuery.data, threadId]);
 
   useEffect(() => {
@@ -70,7 +85,6 @@ export function useAgentThread(threadId: string | null) {
       return;
     }
     let source: EventSource | null = null;
-    let instantCatchup = document.visibilityState !== "visible";
     let disposed = false;
     let snapshotRecoveryInFlight = false;
 
@@ -82,12 +96,6 @@ export function useAgentThread(threadId: string | null) {
     };
 
     const renderQueue = createRenderQueue({ apply: applyEvent });
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") return;
-      instantCatchup = true;
-      renderQueue.flush();
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const onEvent = (raw: Event) => {
       try {
@@ -98,12 +106,7 @@ export function useAgentThread(threadId: string | null) {
         // event twice, especially while a hidden page is flushing whole deltas.
         if (event.seq <= lastSeqRef.current) return;
         lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
-        if (instantCatchup || document.visibilityState !== "visible") {
-          renderQueue.flush();
-          applyEvent(event);
-        } else {
-          renderQueue.enqueue(event);
-        }
+        renderQueue.enqueue(event);
       } catch (error) {
         console.error("Invalid AgentEvent", error);
       }
@@ -149,7 +152,6 @@ export function useAgentThread(threadId: string | null) {
     return () => {
       disposed = true;
       clearInterval(snapshotRecoveryTimer);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
       renderQueue.dispose();
       source?.close();
     };
@@ -184,10 +186,13 @@ export function useAgentThread(threadId: string | null) {
       void (async () => {
         const refreshed = await workbenchApi.thread(threadId!);
         queryClient.setQueryData(["thread", threadId], refreshed);
-        lastSeqRef.current = Math.max(lastSeqRef.current, refreshed.state.lastSeq);
-        setState((current) => current?.threadId === refreshed.state.threadId && current.lastSeq > refreshed.state.lastSeq
-          ? current
-          : refreshed.state);
+        setState((current) => {
+          if (current?.threadId === refreshed.state.threadId && current.activeRunId === runId) {
+            return current;
+          }
+          lastSeqRef.current = Math.max(lastSeqRef.current, refreshed.state.lastSeq);
+          return refreshed.state;
+        });
       })();
     }
   });

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -21,11 +22,169 @@ import (
 // XiaohongshuService 小红书业务服务
 type XiaohongshuService struct {
 	logins loginSessions
+
+	// 登录态搜索、详情和主页读取共享同一个受控浏览器进程。上层请求仍按页
+	// 隔离，并由互斥锁串行执行，避免同一 Cookie 会话并发争用。任何读取错误
+	// 都会丢弃该浏览器，下一次请求再以磁盘上的最新 Cookie 干净重建。
+	readMu          sync.Mutex
+	readBrowser     *headless_browser.Browser
+	readCookieStamp cookieStamp
+}
+
+type cookieStamp struct {
+	modTime time.Time
+	size    int64
+	exists  bool
 }
 
 // NewXiaohongshuService 创建小红书服务实例
 func NewXiaohongshuService() *XiaohongshuService {
 	return &XiaohongshuService{}
+}
+
+// Close 关闭可复用的只读浏览器。二维码登录使用自己的短期浏览器会话，仍由
+// waitScanInBackground 负责关闭。
+func (s *XiaohongshuService) Close() {
+	s.readMu.Lock()
+	b := s.readBrowser
+	s.readBrowser = nil
+	s.readCookieStamp = cookieStamp{}
+	s.readMu.Unlock()
+	safeCloseBrowser(b)
+}
+
+func currentCookieStamp() cookieStamp {
+	info, err := os.Stat(cookies.GetCookiesFilePath())
+	if err != nil {
+		return cookieStamp{}
+	}
+	return cookieStamp{
+		modTime: info.ModTime(),
+		size:    info.Size(),
+		exists:  true,
+	}
+}
+
+func sameCookieStamp(left, right cookieStamp) bool {
+	return left.exists == right.exists &&
+		left.size == right.size &&
+		left.modTime.Equal(right.modTime)
+}
+
+func safeCloseBrowser(b *headless_browser.Browser) {
+	if b == nil {
+		return
+	}
+	defer func() {
+		if recover() != nil {
+			logrus.Warn("只读浏览器关闭时发生异常，资源将由容器回收")
+		}
+	}()
+	b.Close()
+}
+
+func safeNewBrowser() (browserInstance *headless_browser.Browser, err error) {
+	defer func() {
+		if recover() != nil {
+			browserInstance = nil
+			err = fmt.Errorf("browser startup failed")
+		}
+	}()
+	return newBrowser(), nil
+}
+
+func safeNewPage(b *headless_browser.Browser) (page *rod.Page, err error) {
+	defer func() {
+		if recover() != nil {
+			page = nil
+			err = fmt.Errorf("browser page creation failed")
+		}
+	}()
+	return b.NewPage(), nil
+}
+
+func safeClosePage(page *rod.Page) {
+	if page == nil {
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- page.Close()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			logrus.Warn("只读浏览器页面关闭失败，浏览器会话将被重建")
+		}
+	case <-time.After(750 * time.Millisecond):
+		logrus.Warn("只读浏览器页面关闭超时，改由浏览器进程回收")
+	}
+}
+
+func (s *XiaohongshuService) resetReadBrowserLocked() {
+	b := s.readBrowser
+	s.readBrowser = nil
+	s.readCookieStamp = cookieStamp{}
+	if b != nil {
+		go safeCloseBrowser(b)
+	}
+}
+
+func (s *XiaohongshuService) resetReadBrowser() {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	s.resetReadBrowserLocked()
+}
+
+func (s *XiaohongshuService) ensureReadBrowserLocked() (*headless_browser.Browser, error) {
+	stamp := currentCookieStamp()
+	if s.readBrowser != nil && !sameCookieStamp(stamp, s.readCookieStamp) {
+		logrus.Info("登录会话已更新，重建只读浏览器")
+		s.resetReadBrowserLocked()
+	}
+	if s.readBrowser == nil {
+		b, err := safeNewBrowser()
+		if err != nil {
+			return nil, err
+		}
+		s.readBrowser = b
+		s.readCookieStamp = stamp
+	}
+	return s.readBrowser, nil
+}
+
+func (s *XiaohongshuService) withReadPage(
+	ctx context.Context,
+	operation func(*rod.Page) error,
+) (err error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b, err := s.ensureReadBrowserLocked()
+	if err != nil {
+		return err
+	}
+	page, err := safeNewPage(b)
+	if err != nil {
+		s.resetReadBrowserLocked()
+		return err
+	}
+	defer safeClosePage(page)
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("browser operation failed")
+			s.resetReadBrowserLocked()
+		}
+	}()
+
+	err = operation(page)
+	if err != nil {
+		s.resetReadBrowserLocked()
+	}
+	return err
 }
 
 // PublishRequest 发布请求
@@ -100,20 +259,34 @@ type UserProfileResponse struct {
 func (s *XiaohongshuService) DeleteCookies(ctx context.Context) error {
 	cookiePath := cookies.GetCookiesFilePath()
 	cookieLoader := cookies.NewLoadCookie(cookiePath)
-	return cookieLoader.DeleteCookies()
+	if err := cookieLoader.DeleteCookies(); err != nil {
+		return err
+	}
+	s.resetReadBrowser()
+	return nil
 }
 
 // CheckLoginStatus 检查登录状态
 func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatusResponse, error) {
-	b := newBrowser()
-	defer b.Close()
-
-	page := b.NewPage()
-	defer page.Close()
-
-	loginAction := xiaohongshu.NewLogin(page)
-
-	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
+	var isLoggedIn bool
+	var currentUser *xiaohongshu.CurrentUser
+	err := s.withReadPage(ctx, func(page *rod.Page) error {
+		loginAction := xiaohongshu.NewLogin(page)
+		loggedIn, err := loginAction.CheckLoginStatus(ctx)
+		if err != nil {
+			return err
+		}
+		isLoggedIn = loggedIn
+		if loggedIn {
+			user, userErr := loginAction.CurrentUser(ctx)
+			if userErr != nil {
+				logrus.Warn("已登录，但当前用户公开信息暂不可读")
+			} else {
+				currentUser = user
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +296,9 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 	}
 
 	// 已登录时从当前页读取真实账号信息；读不到只记 warn，不影响状态返回。
-	if isLoggedIn {
-		if user, err := loginAction.CurrentUser(ctx); err != nil {
-			logrus.Warnf("failed to get current user info: %v", err)
-		} else {
-			response.Username = user.Nickname
-			response.UserID = user.UserID
-		}
+	if currentUser != nil {
+		response.Username = currentUser.Nickname
+		response.UserID = currentUser.UserID
 	}
 
 	return response, nil
@@ -191,9 +360,10 @@ func (s *XiaohongshuService) waitScanInBackground(
 
 		if loginAction.WaitForLogin(ctxTimeout) {
 			if err := saveCookies(page); err != nil {
-				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", seq, err)
+				logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d", seq)
 				return
 			}
+			s.resetReadBrowser()
 			logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", seq)
 			return
 		}
@@ -392,15 +562,13 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
-	b := newBrowser()
-	defer b.Close()
-
-	page := b.NewPage()
-	defer page.Close()
-
-	action := xiaohongshu.NewSearchAction(page)
-
-	feeds, err := action.Search(ctx, keyword, filters...)
+	var feeds []xiaohongshu.Feed
+	err := s.withReadPage(ctx, func(page *rod.Page) error {
+		action := xiaohongshu.NewSearchAction(page)
+		var searchErr error
+		feeds, searchErr = action.Search(ctx, keyword, filters...)
+		return searchErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -418,17 +586,58 @@ func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToke
 	return s.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, xiaohongshu.DefaultCommentLoadConfig())
 }
 
+// GetFeedDetailWithSource 按令牌来源读取详情。搜索结果必须传 pc_search；
+// 其他旧调用保持 pc_feed 默认值，避免改变上游 MCP 的既有契约。
+func (s *XiaohongshuService) GetFeedDetailWithSource(
+	ctx context.Context,
+	feedID, xsecToken string,
+	loadAllComments bool,
+	xsecSource string,
+) (*FeedDetailResponse, error) {
+	return s.GetFeedDetailWithConfigAndSource(
+		ctx,
+		feedID,
+		xsecToken,
+		loadAllComments,
+		xiaohongshu.DefaultCommentLoadConfig(),
+		xsecSource,
+	)
+}
+
 // GetFeedDetailWithConfig 使用配置获取Feed详情
 func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config xiaohongshu.CommentLoadConfig) (*FeedDetailResponse, error) {
-	b := newBrowser()
-	defer b.Close()
+	return s.GetFeedDetailWithConfigAndSource(
+		ctx,
+		feedID,
+		xsecToken,
+		loadAllComments,
+		config,
+		xiaohongshu.FeedDetailSourcePCFeed,
+	)
+}
 
-	page := b.NewPage()
-	defer page.Close()
-
-	action := xiaohongshu.NewFeedDetailAction(page)
-
-	result, err := action.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
+// GetFeedDetailWithConfigAndSource 使用受控浏览器和明确令牌来源读取详情。
+func (s *XiaohongshuService) GetFeedDetailWithConfigAndSource(
+	ctx context.Context,
+	feedID, xsecToken string,
+	loadAllComments bool,
+	config xiaohongshu.CommentLoadConfig,
+	xsecSource string,
+) (*FeedDetailResponse, error) {
+	var result *xiaohongshu.FeedDetailResponse
+	err := s.withReadPage(ctx, func(page *rod.Page) error {
+		action := xiaohongshu.NewFeedDetailAction(page)
+		var detailErr error
+		result, detailErr = action.GetFeedDetailWithConfigAndSource(
+			ctx,
+			feedID,
+			xsecToken,
+			loadAllComments,
+			config,
+			xsecSource,
+		)
+		return detailErr
+	})
 	if err != nil {
 		return nil, err
 	}

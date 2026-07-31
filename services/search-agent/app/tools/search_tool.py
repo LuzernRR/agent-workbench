@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config.agent import AgentConfig
 from app.tools.channels.base import (
     ChannelName,
     ChannelProgressReporter,
+    ChannelResolution,
     SourceProvenance,
+    channel_resolution,
 )
 from app.tools.channels.registry import ChannelRegistry
 
@@ -69,6 +71,18 @@ class SearchExecutionResult(BaseModel):
     evidence: list[SearchEvidence]
     error_code: str | None = None
     error_message: str | None = None
+    resolution: ChannelResolution | None = None
+
+    @model_validator(mode="after")
+    def populate_resolution(self) -> SearchExecutionResult:
+        if self.resolution is None:
+            self.resolution = channel_resolution(
+                status="success" if self.ok else "failed",
+                primary_provider=self.provider,
+                reason_code=self.error_code,
+                message=self.error_message,
+            )
+        return self
 
     def tool_message(self) -> str:
         # 传给模型的也是经过 schema 收口的结果，不含 Provider 原始 body。
@@ -139,6 +153,7 @@ async def execute_search_tool(
             evidence=[],
             error_code=outcome.error_code or "PROVIDER_UNAVAILABLE",
             error_message=outcome.error_message or "搜索失败",
+            resolution=outcome.resolution,
         )
 
     return SearchExecutionResult(
@@ -148,4 +163,7 @@ async def execute_search_tool(
         provider=outcome.provider,
         results=[PublicSearchResult.model_validate(item.model_dump()) for item in outcome.results],
         evidence=[SearchEvidence.model_validate(item.model_dump()) for item in outcome.evidence],
+        error_code=outcome.error_code,
+        error_message=outcome.error_message,
+        resolution=outcome.resolution,
     )

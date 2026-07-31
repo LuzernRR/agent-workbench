@@ -23,9 +23,9 @@ export default defineConfig({
     }
   ],
   webServer: {
-    command: "npx next start -p 3110",
+    command: "node scripts/start-e2e-standalone.mjs",
     url: "http://127.0.0.1:3110",
-    env: { WORKBENCH_LLM_MODE: "mock" },
+    env: { WORKBENCH_LLM_MODE: "mock", PORT: "3110", HOSTNAME: "127.0.0.1" },
     reuseExistingServer: !process.env.CI,
     timeout: 120_000
   }

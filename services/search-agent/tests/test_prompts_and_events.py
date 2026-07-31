@@ -9,6 +9,8 @@ from app.events.runtime import (
     runtime_event,
     safe_public_text,
 )
+from app.graph.schemas import ANSWER_MAX_CHARS, ComposeResult
+from app.llm.deepseek import WRITER_MAX_TOKENS
 from app.prompts.agents import (
     DIRECT_WRITER_PROMPT,
     PLANNER_PROMPT,
@@ -97,11 +99,35 @@ def test_resume_stream_gets_new_stream_id_and_event_ids() -> None:
 
 
 def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> None:
-    assert agent_config().search.force_search is True
+    config = agent_config()
+    assert config.search.force_search is True
+    assert config.graph.max_iterations == 2
+    assert config.graph.max_model_calls == 10
+    assert config.graph.max_tool_calls == 4
+    assert config.graph.max_run_seconds == 150
     assert "need_search 必须为 true" in SUPERVISOR_PROMPT
     assert "不使用固定模板" in SUPERVISOR_PROMPT
     assert "已经通过正文质量检查" in VERIFIER_PROMPT
     assert "不使用 Markdown" in RESEARCHER_PROMPT
+    assert "missingChannels" in WRITER_PROMPT
+    assert "绝不能把 web 或 x" in WRITER_PROMPT
+    assert "补充背景" in REFLECTOR_PROMPT
+
+
+def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> None:
+    generated = ComposeResult(
+        answer_markdown="中" * (ANSWER_MAX_CHARS + 1),
+        summary="已按证据精简回答",
+    )
+
+    # Provider 输出可先完整解析，交付长度由 Verifier 前的确定性边界压缩兜底；
+    # 避免 maxLength 协议漂移把已有真实 Evidence 的运行升级为 run.failed。
+    assert len(generated.answer_markdown) == ANSWER_MAX_CHARS + 1
+    assert ANSWER_MAX_CHARS == 760
+    assert WRITER_MAX_TOKENS == 2048
+    assert "硬上限 760 个 Unicode 字符" in WRITER_PROMPT
+    assert "不能为压缩篇幅删除必要的 [来源N] 引用" in WRITER_PROMPT
+    assert "证据不足的具体部分最多用一句说明" in WRITER_PROMPT
 
 
 def test_public_summary_is_compact_plain_text_without_markdown_artifacts() -> None:

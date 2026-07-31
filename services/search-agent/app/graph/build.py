@@ -10,6 +10,7 @@ import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from difflib import SequenceMatcher
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -27,6 +28,7 @@ from app.graph.nodes import (
     plan_research,
     reflect,
     research,
+    route_after_compose,
     route_after_intent,
     route_after_reflect,
     route_after_verify,
@@ -46,6 +48,27 @@ _AGENT_BY_NODE = {
     "verify": "verifier",
     "finalize": "supervisor",
 }
+
+_PUBLIC_SUMMARY_NODES = frozenset({"plan_research", "reflect", "verify"})
+
+
+def _novel_public_summary(
+    name: str,
+    summary: str | None,
+    prior_steps: list[dict[str, Any]],
+) -> str | None:
+    if name not in _PUBLIC_SUMMARY_NODES or not summary:
+        return None
+    normalized = "".join(summary.split()).casefold()
+    if not normalized:
+        return None
+    for step in reversed(prior_steps[-8:]):
+        prior = "".join(str(step.get("summary") or "").split()).casefold()
+        if not prior:
+            continue
+        if normalized == prior or SequenceMatcher(None, normalized, prior).ratio() >= 0.82:
+            return None
+    return summary
 
 
 def _evented(name: str, function: Node) -> Node:
@@ -75,7 +98,12 @@ def _evented(name: str, function: Node) -> Node:
             ))
             raise
         steps = patch.get("steps") or []
-        public_summary = steps[-1].get("summary") if steps else None
+        raw_summary = steps[-1].get("summary") if steps else None
+        public_summary = _novel_public_summary(
+            name,
+            raw_summary,
+            list(state.get("steps") or []),
+        )
         writer(runtime_event(
             "node.completed",
             node=name,
@@ -129,7 +157,11 @@ def build_graph(checkpointer: object | None = None):
         route_after_reflect,
         {"plan_research": "plan_research", "compose": "compose"},
     )
-    graph.add_edge("compose", "verify")
+    graph.add_conditional_edges(
+        "compose",
+        route_after_compose,
+        {"verify": "verify", "finalize": "finalize"},
+    )
     graph.add_conditional_edges(
         "verify",
         route_after_verify,

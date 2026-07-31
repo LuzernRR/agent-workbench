@@ -1,102 +1,104 @@
 import type { AgentEvent } from "./types";
 
-// Adaptive typewriter queue for durable SSE deltas.
-//
-// A single persisted `text.delta` can carry anywhere from a few characters to
-// a full paragraph. Rendering exactly one grapheme per animation frame keeps
-// the growth smooth for short bursts but adds ~50s of tail latency to a
-// multi-thousand character answer. Instead we drain an adaptive number of
-// characters per frame: small backlogs stay one-at-a-time for a genuine
-// typewriter feel, while large backlogs (or an already-arrived terminal event)
-// accelerate so the visible tail latency stays bounded. We never fall back to
-// publishing a whole delta in one jump.
-//
-// Non-text events (tools, plan, citations, terminal) apply strictly in durable
-// order, only after any characters queued before them have drained. A
-// `message.reset` (quality retry) discards the still-unrendered portion of the
-// previous draft but preserves preceding control/tool events. Background tabs
-// can explicitly flush pending deltas because browsers suspend animation frames
-// when a document is hidden.
+// Durable SSE events may contain a full sentence, but visible public text must
+// grow by exactly one Unicode grapheme and must never be rewritten. Control
+// events keep durable order and wait behind all earlier graphemes.
 
-type QueueItem = { event: AgentEvent; characters: string[] | null; offset: number };
+type QueueItem = {
+  event: AgentEvent;
+  graphemes: string[] | null;
+  offset: number;
+  emittedType?: AgentEvent["type"];
+};
 
 export type RenderQueueOptions = {
   apply: (event: AgentEvent) => void;
   requestFrame?: (callback: () => void) => number;
   cancelFrame?: (handle: number) => void;
-  // Target number of frames to drain the current backlog over. Larger backlogs
-  // therefore draw more characters per frame while staying visibly continuous.
-  targetFrames?: number;
-  // A tighter target once a terminal event is queued, so the run finishes
-  // promptly instead of lingering behind a long draft.
-  terminalFrames?: number;
-  // Hard ceiling so a single frame never dumps a large block.
-  maxCharsPerFrame?: number;
 };
 
-const TEXT_TYPES = new Set<AgentEvent["type"]>(["text.delta", "message.delta", "thinking.delta", "tool.source.delta"]);
-const RESETTABLE_MESSAGE_TEXT_TYPES = new Set<AgentEvent["type"]>(["text.delta", "message.delta"]);
-const TERMINAL_TYPES = new Set<AgentEvent["type"]>(["run.completed", "run.failed", "run.cancelled"]);
+const DELTA_TYPES = new Set<AgentEvent["type"]>([
+  "text.delta",
+  "message.delta",
+  "thinking.delta",
+  "tool.source.delta"
+]);
+
+function graphemes(value: string) {
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return [...segmenter.segment(value)].map((item) => item.segment);
+  }
+  return Array.from(value);
+}
+
+function streamItem(event: AgentEvent): QueueItem {
+  if (DELTA_TYPES.has(event.type)) {
+    return {
+      event,
+      graphemes: graphemes(String(event.payload.delta || "")),
+      offset: 0
+    };
+  }
+  // Legacy mock/snapshot events can still carry a whole public paragraph.
+  // Normalize them to append-only deltas before they reach the reducer.
+  if (event.type === "thinking.paragraph") {
+    return {
+      event,
+      graphemes: graphemes(String(event.payload.text || "")),
+      offset: 0,
+      emittedType: "thinking.delta"
+    };
+  }
+  return { event, graphemes: null, offset: 0 };
+}
+
+function graphemeEvent(item: QueueItem) {
+  const index = item.offset++;
+  const total = item.graphemes?.length || 1;
+  return {
+    ...item.event,
+    type: item.emittedType || item.event.type,
+    // Fractional positions are display-only. The following durable event still
+    // has the next integer sequence, while every grapheme is accepted once.
+    seq: item.event.seq - 1 + (index + 1) / (total + 1),
+    payload: {
+      ...item.event.payload,
+      delta: item.graphemes?.[index] || ""
+    }
+  } satisfies AgentEvent;
+}
 
 export function createRenderQueue(options: RenderQueueOptions) {
   const requestFrame = options.requestFrame ?? ((callback: () => void) => window.requestAnimationFrame(callback));
   const cancelFrame = options.cancelFrame ?? ((handle: number) => window.cancelAnimationFrame(handle));
-  const targetFrames = Math.max(1, options.targetFrames ?? 45);
-  const terminalFrames = Math.max(1, options.terminalFrames ?? 45);
-  const maxCharsPerFrame = Math.max(1, options.maxCharsPerFrame ?? 32);
-
   const queue: QueueItem[] = [];
   let frame = 0;
   let disposed = false;
 
-  const backlog = () => queue.reduce((sum, item) => sum + (item.characters ? item.characters.length - item.offset : 0), 0);
-  const terminalQueued = () => queue.some((item) => TERMINAL_TYPES.has(item.event.type));
-
-  const charsThisFrame = () => {
-    const pending = backlog();
-    if (pending === 0) return 0;
-    const frames = terminalQueued() ? terminalFrames : targetFrames;
-    return Math.max(1, Math.min(maxCharsPerFrame, Math.ceil(pending / frames)));
-  };
-
   const drain = () => {
     frame = 0;
     if (disposed) return;
-    let budget = charsThisFrame();
+
     while (queue.length > 0) {
       const current = queue[0];
-      if (current.characters) {
-        while (current.offset < current.characters.length && budget > 0) {
-          const index = current.offset++;
-          const total = current.characters.length;
-          options.apply({
-            ...current.event,
-            // The reducer enforces monotonic durable sequence numbers. Use a
-            // fractional display-only position inside this one persisted delta
-            // so each grapheme renders exactly once and the next real event
-            // still carries a larger integer sequence.
-            seq: current.event.seq - 1 + (index + 1) / (total + 1),
-            payload: { ...current.event.payload, delta: current.characters[index] }
-          });
-          budget -= 1;
-        }
-        if (current.offset < current.characters.length) {
-          frame = requestFrame(drain);
-          return;
-        }
+      if (!current.graphemes) {
         queue.shift();
-        // Let React paint the final grapheme before applying the following
-        // control event. Without this boundary, a `thinking.completed` or the
-        // end of a source presentation can collapse the row in the same render
-        // batch, so the user never actually sees the last streamed character.
-        if (queue[0] && !queue[0].characters) {
-          frame = requestFrame(drain);
-          return;
-        }
+        options.apply(current.event);
         continue;
       }
-      queue.shift();
-      options.apply(current.event);
+      if (current.offset >= current.graphemes.length) {
+        queue.shift();
+        continue;
+      }
+      options.apply(graphemeEvent(current));
+      if (current.offset >= current.graphemes.length) queue.shift();
+      // Always yield after one visible grapheme so React can paint it before
+      // any later text or terminal event is applied.
+      if (queue.length > 0 || (current.graphemes && current.offset < current.graphemes.length)) {
+        frame = requestFrame(drain);
+      }
+      return;
     }
   };
 
@@ -105,41 +107,30 @@ export function createRenderQueue(options: RenderQueueOptions) {
   };
 
   const enqueue = (event: AgentEvent) => {
-    if (event.type === "message.reset") {
-      // A quality retry invalidates any unrendered portion of the previous
-      // draft. Drop only queued deltas, preserve preceding control/tool
-      // events, then apply the reset in durable order.
-      const retained = queue.filter((item) => !RESETTABLE_MESSAGE_TEXT_TYPES.has(item.event.type));
-      queue.splice(0, queue.length, ...retained, { event, characters: null, offset: 0 });
-      schedule();
-      return;
-    }
-    if (TEXT_TYPES.has(event.type)) {
-      const characters = Array.from(String(event.payload.delta || ""));
-      if (characters.length > 0) queue.push({ event, characters, offset: 0 });
-    } else {
-      queue.push({ event, characters: null, offset: 0 });
-    }
+    const item = streamItem(event);
+    if (item.graphemes && item.graphemes.length === 0) return;
+    queue.push(item);
     schedule();
   };
 
+  // Kept for deterministic tests and controlled teardown. Even an explicit
+  // flush applies one grapheme per reducer mutation; the UI never calls this
+  // while hidden, so browsers cannot batch a whole paragraph into one paint.
   const flush = () => {
     if (disposed) return;
     if (frame) cancelFrame(frame);
     frame = 0;
     while (queue.length > 0) {
-      const current = queue.shift()!;
-      if (!current.characters) {
+      const current = queue[0];
+      if (!current.graphemes) {
+        queue.shift();
         options.apply(current.event);
         continue;
       }
-      const delta = current.characters.slice(current.offset).join("");
-      if (!delta) continue;
-      options.apply({
-        ...current.event,
-        seq: current.event.seq,
-        payload: { ...current.event.payload, delta }
-      });
+      while (current.offset < current.graphemes.length) {
+        options.apply(graphemeEvent(current));
+      }
+      queue.shift();
     }
   };
 

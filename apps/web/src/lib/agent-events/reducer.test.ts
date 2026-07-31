@@ -13,7 +13,12 @@ describe("reduceAgentEvent", () => {
       event(3, "tool.completed", { toolCallId: "search-1", summary: "24 sources", durationMs: 12000 })
     ]);
     expect(state.itemOrder).toEqual(["tool:search-1"]);
-    expect(state.items["tool:search-1"]).toMatchObject({ status: "completed", summary: "24 sources", durationMs: 12000 });
+    expect(state.items["tool:search-1"]).toMatchObject({
+      status: "completed",
+      summary: "Preparing",
+      settlementSummary: "24 sources",
+      durationMs: 12000
+    });
   });
 
   it("从 started/completed 事件时间推导真实工具耗时，不把终态显示为执行中", () => {
@@ -40,7 +45,20 @@ describe("reduceAgentEvent", () => {
       event(4, "message.reset", { messageId: "assistant-1", text: "" }),
       event(5, "text.delta", { messageId: "assistant-1", delta: "已核验答复" })
     ]);
-    expect(state.items["assistant-1"]).toMatchObject({ text: "已核验答复", status: "streaming" });
+    expect(state.items["assistant-1"]).toMatchObject({ text: "未通过门禁的草稿已核验答复", status: "streaming" });
+  });
+
+  it("message.completed cannot replace an already visible streamed prefix", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "message.started", { messageId: "assistant-append-only", role: "assistant" }),
+      event(2, "text.delta", { messageId: "assistant-append-only", delta: "已经显示的前缀" }),
+      event(3, "message.completed", { messageId: "assistant-append-only", text: "另一份终态全文" })
+    ]);
+
+    expect(state.items["assistant-append-only"]).toMatchObject({
+      text: "已经显示的前缀",
+      status: "completed"
+    });
   });
 
   it("只保存模型生成的自然段思考结果并在停止时收口", () => {
@@ -236,7 +254,7 @@ describe("reduceAgentEvent", () => {
       status: "completed",
       sourcePresentationActive: false,
       sources: [
-        { url: "https://example.com/read", verified: true, displayText: "重新润色后的有效说明。" },
+        { url: "https://example.com/read", verified: true, displayText: "这条笔记有实质内容。重新润色后的有效说明。" },
         { url: "https://example.com/candidate", verified: false, displayText: undefined }
       ]
     });

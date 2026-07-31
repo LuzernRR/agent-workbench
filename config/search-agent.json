@@ -7,10 +7,10 @@
   "graph": {
     "defaultDepth": "balanced",
     "recursionLimit": 48,
-    "maxIterations": 3,
-    "maxModelCalls": 20,
-    "maxToolCalls": 6,
-    "maxRunSeconds": 240,
+    "maxIterations": 2,
+    "maxModelCalls": 10,
+    "maxToolCalls": 4,
+    "maxRunSeconds": 150,
     "maxTotalTokens": 120000,
     "maxCostUsd": 0.25,
     "noProgressLimit": 3,
@@ -36,9 +36,9 @@
         "enabled": true,
         "provider": "mcp_preferred",
         "readerOrigin": "https://r.jina.ai",
-        "requestTimeoutMs": 75000,
-        "detailTimeoutMs": 18000,
-        "maxAttempts": 2,
+        "requestTimeoutMs": 30000,
+        "detailTimeoutMs": 16000,
+        "maxAttempts": 1,
         "readPublicDetails": true
       }
     }

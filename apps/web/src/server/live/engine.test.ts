@@ -88,10 +88,10 @@ describe("live Search Agent engine", () => {
 
   it("把真实 Agent 流白名单映射、持久化并原子结算最终回答", async () => {
     searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
-      yield { ...sourceEnvelope, type: "node.started", node: "research", nodeRunId: "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "researcher", iteration: 0 };
+      yield { ...sourceEnvelope, type: "node.started", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 0 };
+      yield { ...sourceEnvelope, type: "node.completed", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 0, durationMs: 20, publicSummary: "将检索官方来源并核对最新信息" };
       yield { ...sourceEnvelope, type: "tool.started", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", cached: false };
       yield { ...sourceEnvelope, type: "tool.completed", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", channel: "web", provider: "tavily", summary: "找到 1 条结果", resultCount: 1, evidenceCount: 1, results: [{ channel: "web", provider: "tavily", query: "最新 LangGraph", title: "官方来源", url: "https://example.com/source", snippet: "不得持久化", verified: true, author: null, published_at: null, metrics: {}, limitation: null, provenance: { discovery_provider: "tavily", detail_provider: "trafilatura", source_kind: "public_page", observed_at: "2026-07-28T00:00:00Z", confidence: "high" } }], cached: false };
-      yield { ...sourceEnvelope, type: "node.completed", node: "research", nodeRunId: "research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "researcher", iteration: 0, durationMs: 20, publicSummary: "已观察搜索结果并整理证据覆盖" };
       yield completedEvent;
     });
     const engine = await freshEngine();
@@ -101,9 +101,9 @@ describe("live Search Agent engine", () => {
     expect(searchAgent.streamSearchAgentRun).toHaveBeenCalledWith(expect.objectContaining({ runId: "run_one", visitorId: "visitor_one", question: "最新 LangGraph 是什么？", resume: false }), expect.any(AbortSignal));
     expect(store.persistLiveEvent.mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining(["run.started", "thinking.started", "thinking.delta", "tool.started", "tool.completed"]));
     const thinkingPayloads = store.persistLiveEvent.mock.calls.filter((call) => String(call[1]).startsWith("thinking.")).map((call) => call[2]);
-    expect(thinkingPayloads.every((payload) => payload.thinkingId === "thinking:run_one:research_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBe(true);
+    expect(thinkingPayloads.every((payload) => payload.thinkingId === "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBe(true);
     expect(thinkingPayloads[0]).toEqual(expect.objectContaining({ activityKind: "thinking" }));
-    expect(thinkingPayloads.find((payload) => payload.delta)?.delta).toBe("已观察搜索结果并整理证据覆盖");
+    expect(thinkingPayloads.find((payload) => payload.delta)?.delta).toBe("将检索官方来源并核对最新信息");
     expect(JSON.stringify(thinkingPayloads)).not.toMatch(/正在|【/u);
     expect(JSON.stringify(store.persistLiveEvent.mock.calls)).not.toContain("不得持久化");
     const completion = store.finalizeLiveRun.mock.calls.at(-1)?.[3] as { events: Array<{ type: string; payload: Record<string, unknown> }> };

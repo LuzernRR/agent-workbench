@@ -13,11 +13,11 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
-from pydantic import ValidationError
 
 from app.events.runtime import runtime_event, safe_public_text
 from app.graph.context import RunContext
 from app.graph.schemas import (
+    ANSWER_MAX_CHARS,
     ComposeResult,
     IntentResult,
     PlanResult,
@@ -38,14 +38,12 @@ from app.llm.deepseek import (
     ModelUsage,
     StructuredOutputError,
     add_usage,
-    invoke_researcher_turn,
     invoke_structured,
 )
 from app.prompts.agents import (
     DIRECT_WRITER_PROMPT,
     PLANNER_PROMPT,
     REFLECTOR_PROMPT,
-    RESEARCHER_PROMPT,
     SOURCE_CURATOR_PROMPT,
     SUPERVISOR_PROMPT,
     VERIFIER_PROMPT,
@@ -53,13 +51,23 @@ from app.prompts.agents import (
 )
 from app.tools.channels.base import ChannelProgress
 from app.tools.search_tool import (
-    SEARCH_TOOL_SPEC,
     SearchExecutionResult,
     SearchToolInput,
     execute_search_tool,
 )
 
 _RESEARCH_CHANNELS = frozenset({"web", "x", "xiaohongshu"})
+_FORCED_CHANNEL_PATTERNS = {
+    "xiaohongshu": re.compile(r"小红书|xiaohongshu", re.IGNORECASE),
+    "x": re.compile(
+        r"twitter|(?<![A-Za-z0-9])x(?:\.com\b|(?![A-Za-z0-9]))",
+        re.IGNORECASE,
+    ),
+    "web": re.compile(
+        r"官网|网页|网站|(?<![A-Za-z0-9])web(?:site)?(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    ),
+}
 _FINALIZATION_RESERVE_SECONDS = 60
 _MIN_TOOL_WINDOW_SECONDS = {
     "web": 10,
@@ -82,7 +90,10 @@ _INEFFECTIVE_PROCESS_TEXT = re.compile(
     r"未(?:成功)?(?:读取|获取|加载).{0,12}(?:正文|内容|详情)|"
     r"(?:正文|详情).{0,12}未(?:读取|获取|加载)|"
     r"仅(?:发现|检索到).{0,12}(?:候选|索引)|"
-    r"其余来源.{0,16}未读取)",
+    r"其余来源.{0,16}未读取|"
+    r"登录态|robots?|机器人协议|MCP|验证码|captcha|"
+    r"抓取|爬取|内部超时|渠道.{0,12}(?:不可读|受限)|公开索引)",
+    re.IGNORECASE,
 )
 
 
@@ -108,6 +119,19 @@ def _structured_usage_patch(state: SearchState, usage: ModelUsage) -> dict[str, 
         "schema_repair_count": state.get("schema_repair_count", 0) + repairs,
         "usage": _usage_after(state, usage),
     }
+
+
+def _forced_search_channels(question: str) -> list[str]:
+    """从用户明确指定的平台词确定只读渠道；未指定时安全回落到 Web。"""
+
+    matches: list[tuple[int, str]] = []
+    for channel, pattern in _FORCED_CHANNEL_PATTERNS.items():
+        match = pattern.search(question)
+        if match:
+            matches.append((match.start(), channel))
+    if not matches:
+        return ["web"]
+    return [channel for _position, channel in sorted(matches)]
 
 
 def _sum_usage(items: list[ModelUsage]) -> ModelUsage:
@@ -174,6 +198,67 @@ def _projected_budget_reason(state: SearchState, usages: list[ModelUsage]) -> st
     return budget_reason(projected)
 
 
+_COMPLETE_ANSWER_BOUNDARY = re.compile(
+    r"(?:\n+(?=\S)|"
+    r"[。！？!?；;](?:[”’」』）】])?(?:\s*\[来源\d+\])*(?=\s|$)|"
+    r"(?:\[来源\d+\])+(?=\s|$))"
+)
+_TRAILING_MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+_DANGLING_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*$")
+
+
+def _clean_answer_prefix(value: str) -> str:
+    """移除边界压缩后可能留下的空标题、列表标记或未闭合代码块。"""
+
+    candidate = value.rstrip()
+    if candidate.count("```") % 2:
+        candidate = candidate[: candidate.rfind("```")].rstrip()
+    lines = candidate.splitlines()
+    while lines and (
+        _TRAILING_MARKDOWN_HEADING.match(lines[-1])
+        or _DANGLING_LIST_MARKER.match(lines[-1])
+    ):
+        lines.pop()
+        while lines and not lines[-1].strip():
+            lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+def _compact_answer_markdown(
+    value: str,
+    max_chars: int = ANSWER_MAX_CHARS,
+) -> str:
+    """在完整句子或 Markdown 行边界内压缩回答，避免截断引用。"""
+
+    answer = value.strip()
+    if len(answer) <= max_chars:
+        return answer
+
+    window = answer[:max_chars]
+    minimum_useful_chars = min(max_chars, max(80, int(max_chars * 0.45)))
+    boundaries = [
+        match.end()
+        for match in _COMPLETE_ANSWER_BOUNDARY.finditer(window)
+        if match.end() <= max_chars
+    ]
+    for boundary in reversed(boundaries):
+        candidate = _clean_answer_prefix(answer[:boundary])
+        if len(candidate) >= minimum_useful_chars:
+            return candidate
+
+    # 极端无标点长段落仍需受控交付；优先回退到空白边界，并避免留下半个引用。
+    candidate = window.rstrip()
+    whitespace = max(candidate.rfind(" "), candidate.rfind("\n"), candidate.rfind("\t"))
+    if whitespace >= minimum_useful_chars:
+        candidate = candidate[:whitespace].rstrip()
+    if candidate.rfind("[") > candidate.rfind("]"):
+        candidate = candidate[: candidate.rfind("[")].rstrip()
+    candidate = _clean_answer_prefix(candidate).rstrip("*_`#- ")
+    if not re.search(r"[。！？!?；;\]]$", candidate):
+        candidate = f"{candidate[: max(0, max_chars - 1)].rstrip()}。"
+    return candidate[:max_chars]
+
+
 def _safe_partial_answer(state: SearchState, reason: str) -> str:
     """预算/外部能力不足时生成不带推断的可交付降级结果。"""
     evidence = state.get("evidence") or []
@@ -185,7 +270,7 @@ def _safe_partial_answer(state: SearchState, reason: str) -> str:
     sources = "\n".join(
         f"- [{item['title'][:160]}]({item['url']})" for item in evidence[:8]
     )
-    return (
+    return _compact_answer_markdown(
         "本次运行已取得以下公开来源，但在完成充分综合与核验前触及安全边界，"
         f"因此结果仅标记为部分完成（{reason}）：\n\n{sources}"
     )
@@ -259,9 +344,14 @@ def _tool_feedback(state: SearchState) -> list[dict[str, Any]]:
         {
             "query": item["query"],
             "channel": item["channel"],
+            "status": item.get("outcome_status", "failed"),
+            "primaryProvider": item.get("primary_provider", item["provider"]),
+            "effectiveProvider": item.get("effective_provider", item["provider"]),
             "resultCount": item["result_count"],
             "evidenceCount": item["evidence_count"],
             "errorCode": item.get("error_code"),
+            "retryable": item.get("retryable", False),
+            "nextAction": item.get("next_action", "none"),
             "limitation": item.get("limitation"),
         }
         for item in (state.get("tool_traces") or [])[-12:]
@@ -275,6 +365,7 @@ def _verification_tool_feedback(state: SearchState) -> list[dict[str, Any]]:
         {
             "query": item["query"],
             "channel": item["channel"],
+            "status": item.get("outcome_status", "failed"),
             "resultCount": item["result_count"],
             "evidenceCount": item["evidence_count"],
             "errorCode": item.get("error_code"),
@@ -347,7 +438,7 @@ def _effective_source_text(value: str | None) -> str | None:
 def _effective_process_text(value: str | None) -> str | None:
     """只透传 Agent 的有用公开摘要；不以本地模板替代被拒绝内容。"""
 
-    text = safe_public_text(value)
+    text = safe_public_text(value, max_chars=80)
     if not text or _INEFFECTIVE_PROCESS_TEXT.search(text):
         return None
     return text
@@ -422,6 +513,26 @@ async def load_context(state: SearchState, runtime: Runtime[RunContext]) -> dict
 
 
 async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
+    if runtime.context.config.search.force_search:
+        channels = _forced_search_channels(state["question"])
+        result = IntentResult(
+            task_type="research",
+            need_search=True,
+            channels=channels,
+            summary="已识别只读搜索渠道",
+        )
+        return {
+            "intent": result.model_dump(),
+            "need_search": True,
+            "steps": _step(
+                "classify_intent",
+                "deterministic",
+                None,
+                f"force_search=true task_type={result.task_type} "
+                f"need_search=true channels={channels}",
+            ),
+        }
+
     context = (state.get("conversation_context") or "")[-8_000:]
     result, usage = await invoke_structured(
         "supervisor",
@@ -437,12 +548,8 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
         model_id=state.get("model_id") or None,
         allow_repair=_allow_structured_repair(state),
     )
-    # 这是「万能搜索 Agent」而不是普通聊天直答入口。是否需要搜索仍由
-    # Supervisor 输出并保留为可审计意图，但产品配置可以强制所有任务先
-    # 经过真实 web_search，再由 Reflector/Verifier 判断证据是否足够。
     need_search = (
-        runtime.context.config.search.force_search
-        or result.need_search
+        result.need_search
         or _freshness_required(state["question"])
     )
     return {
@@ -653,9 +760,14 @@ async def _run_one_search(
             channel=arguments.channel,
             provider="unknown",
             status="unknown",
+            outcome_status="failed",
+            primary_provider="unknown",
+            effective_provider="unknown",
             result_count=0,
             evidence_count=0,
             error_code="LEDGER_UNAVAILABLE",
+            retryable=False,
+            next_action="stop",
             limitation="工具幂等账本不可用，已停止外部调用",
         )
 
@@ -867,6 +979,9 @@ async def _run_one_search(
             ))
 
     public_results = [item.model_dump(mode="json") for item in result.results]
+    resolution = result.resolution
+    if resolution is None:  # pragma: no cover - Pydantic after-validator 防御
+        raise RuntimeError("搜索结果缺少结算状态")
     settled_result_count = max(observed_result_count, len(result.results))
     settled_evidence_count = max(observed_evidence_count, len(result.evidence))
     if result.ok:
@@ -876,8 +991,19 @@ async def _run_one_search(
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
-            provider=result.provider,
-            summary=f"找到 {len(result.results)} 条结果，读取 {len(result.evidence)} 个来源",
+            provider=resolution.effective_provider,
+            status=resolution.status,
+            primaryProvider=resolution.primary_provider,
+            effectiveProvider=resolution.effective_provider,
+            reasonCode=resolution.reason_code,
+            message=resolution.message,
+            retryable=resolution.retryable,
+            nextAction=resolution.next_action,
+            summary=(
+                f"受控降级：保留 {len(result.results)} 条候选，读取 {len(result.evidence)} 个来源"
+                if resolution.status == "degraded"
+                else f"找到 {len(result.results)} 条结果，读取 {len(result.evidence)} 个来源"
+            ),
             resultCount=len(result.results),
             evidenceCount=len(result.evidence),
             results=public_results,
@@ -891,10 +1017,14 @@ async def _run_one_search(
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
-            provider=result.provider,
-            reasonCode=result.error_code or "SEARCH_FAILED",
-            message=result.error_message or "搜索失败",
-            retryable=(result.error_code or "") in {"TIMEOUT", "PROVIDER_UNAVAILABLE", "RATE_LIMITED"},
+            provider=resolution.effective_provider,
+            status=resolution.status,
+            primaryProvider=resolution.primary_provider,
+            effectiveProvider=resolution.effective_provider,
+            reasonCode=resolution.reason_code or result.error_code or "SEARCH_FAILED",
+            message=resolution.message or result.error_message or "搜索失败",
+            retryable=resolution.retryable,
+            nextAction=resolution.next_action,
             resultCount=settled_result_count,
             evidenceCount=settled_evidence_count,
             durationMs=max(0, round((time.perf_counter() - started) * 1000)),
@@ -905,21 +1035,68 @@ async def _run_one_search(
         idempotency_key=idempotency_key,
         query=arguments.query,
         channel=arguments.channel,
-        provider=result.provider,
+        provider=resolution.effective_provider,
         status=status,
+        outcome_status=resolution.status,
+        primary_provider=resolution.primary_provider,
+        effective_provider=resolution.effective_provider,
         result_count=len(result.results),
         evidence_count=len(result.evidence),
-        error_code=result.error_code,
+        error_code=resolution.reason_code or result.error_code,
+        retryable=resolution.retryable,
+        next_action=resolution.next_action,
         limitation=_result_limitation(result),
     )
     return result, trace
 
 
+_XIAOHONGSHU_CIRCUIT_CODES = frozenset({
+    "AUTH_REQUIRED",
+    "CAPTCHA_REQUIRED",
+    "MCP_TIMEOUT",
+    "MCP_NETWORK_ERROR",
+    "MCP_RATE_LIMITED",
+    "MCP_UNAVAILABLE",
+    "MCP_OUTPUT_INVALID",
+    "MCP_CIRCUIT_OPEN",
+})
+
+
+def _planned_tool_call_id(
+    state: SearchState,
+    index: int,
+    search: SearchRequest,
+) -> str:
+    material = (
+        f"{state['run_id']}|{state.get('round', 0)}|{index}|"
+        f"{search['channel']}|{search['query'].casefold().strip()}"
+    )
+    return f"call_search_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
+
+
+def _xiaohongshu_circuit_is_open(traces: list[SearchTrace]) -> bool:
+    return any(
+        trace["channel"] == "xiaohongshu"
+        and (
+            (trace.get("error_code") or "") in _XIAOHONGSHU_CIRCUIT_CODES
+            or trace.get("provider", "").startswith(
+                "xiaohongshu-mcp-fallback["
+            )
+        )
+        for trace in traces
+    )
+
+
 async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
+    """直接执行 Planner 已批准的严格搜索，不再用模型复述固定参数。
+
+    非小红书目标同轮并发；小红书目标在一个串行组内执行，以便首个结构化
+    故障立即打开本运行熔断。所有结果最终按 Planner 原顺序归并。
+    """
+
     pending_searches = _pending_searches(state)
     if not pending_searches:
         return {
-            # Planner 已把“无新 query+channel”计为一次无进展；这里不重复累计。
             "no_progress_count": state.get("no_progress_count", 0),
             "replan_required": False,
             "steps": _step("research", "deterministic", None, "no_pending_searches"),
@@ -928,300 +1105,136 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
     remaining = max(0, state.get("max_tool_calls", 6) - state.get("tool_calls", 0))
     if remaining <= 0:
         return {
-            "stop_reason": "TOOL_CALL_LIMIT",
-            "steps": _step("research", "model", None, "tool_budget_exhausted"),
+            "pending_searches": [],
+            "pending_queries": [],
+            "stop_reason": state.get("stop_reason") or "TOOL_CALL_LIMIT",
+            "steps": _step("research", "deterministic", None, "tool_budget_exhausted"),
         }
-
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": RESEARCHER_PROMPT},
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "question": state["question"],
-                    "pending_searches": pending_searches,
-                    "already_used_searches": (
-                        _state_searches(state)[:-len(pending_searches)]
-                        if pending_searches
-                        else _state_searches(state)
-                    ),
-                    "remaining_tool_calls": remaining,
-                },
-                ensure_ascii=False,
-            ),
-        },
-    ]
-    usages: list[ModelUsage] = []
-    new_candidates: list[Candidate] = []
-    new_evidence: list[Evidence] = []
-    traces: list[SearchTrace] = []
-    # tool_messages 反映模型收到的完整 tool 消息；executed_tool_calls 才是
-    # 实际离开 Agent、进入渠道适配器的搜索尝试。参数错误/未知工具必须留在
-    # 账本中，但不能耗尽真实搜索额度，否则 Agent 无法用正确查询自我修复。
-    tool_messages = 0
-    executed_tool_calls = 0
-    research_summary: str | None = None
-    # 为每条计划查询执行一次「模型生成严格 tool call」。thinking 模式当前
-    # 不支持 tool_choice=required，因此选择工具的子回合关闭 thinking；搜索后
-    # 再用 thinking 子回合消费完整 tool messages，形成 search -> think。
-    # 每条目标查询消耗一次严格 tool-call 选择；另预留一次 observation，
-    # 以及 Reflector、Source Curator、Writer、Verifier 各一次调用，确保
-    # 已读取来源的展示文字和最终回答都不会被搜索挤占。
-    available_model_calls = _remaining_model_calls(state)
-    target_budget = max(0, available_model_calls - 5)
-    targets = pending_searches[: min(remaining, target_budget)]
-    if not targets:
+    if _remaining_model_calls(state) < 4:
         return {
             "pending_searches": [],
             "pending_queries": [],
             "stop_reason": state.get("stop_reason") or "MODEL_CALL_LIMIT",
             "no_progress_count": state.get("no_progress_count", 0) + 1,
             "replan_required": False,
-            "steps": _step("research", "deterministic", None, "model_budget_exhausted"),
+            "steps": _step("research", "deterministic", None, "finalization_budget_reserved"),
         }
 
-    projected_limit: str | None = None
-
-    for target_search in targets:
-        target = target_search["query"]
-        target_channel = target_search["channel"]
-        if target_channel not in _RESEARCH_CHANNELS:
-            projected_limit = "INVALID_CHANNEL_PLAN"
-            break
-        initial_tool_timeout = tool_timeout_seconds(state, target_channel)
-        if initial_tool_timeout is not None and initial_tool_timeout <= 0:
-            projected_limit = "RUN_TIME_RESERVE"
-            break
-        messages.append({
-            "role": "user",
-            "content": (
-                "现在必须调用 web_search，参数必须严格使用："
-                + json.dumps(
-                    {"query": target, "channel": target_channel, "max_results": 5},
-                    ensure_ascii=False,
-                )
-            ),
-        })
-        turn = await invoke_researcher_turn(
-            messages,
-            [SEARCH_TOOL_SPEC],
-            model_id=state.get("model_id") or None,
-            reasoning_effort=state.get("reasoning_effort", "high"),
-            thinking=False,
-            tool_choice="required",
-        )
-        usages.append(turn.usage)
-        if not turn.tool_calls:
-            projected_limit = _projected_budget_reason(state, usages)
-            if projected_limit:
-                break
+    targets = pending_searches[:remaining]
+    projected_limit: str | None = (
+        "TOOL_CALL_LIMIT" if len(targets) < len(pending_searches) else None
+    )
+    scheduled: list[
+        tuple[int, str, SearchToolInput, float | None]
+    ] = []
+    for index, target in enumerate(targets):
+        channel = target["channel"]
+        if channel not in _RESEARCH_CHANNELS:
+            projected_limit = projected_limit or "INVALID_CHANNEL_PLAN"
             continue
+        timeout_seconds = tool_timeout_seconds(state, channel)
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            projected_limit = projected_limit or "RUN_TIME_RESERVE"
+            continue
+        scheduled.append((
+            index,
+            _planned_tool_call_id(state, index, target),
+            SearchToolInput(query=target["query"], channel=channel, max_results=5),
+            timeout_seconds,
+        ))
 
-        # reasoning_content 只在这个局部 messages 列表中回传给 DeepSeek。
-        messages.append(turn.assistant_message)
-        for call in turn.tool_calls:
-            event_writer = get_stream_writer()
-            public_tool_name = "web_search" if call.name == "web_search" else "unknown_tool"
-            if executed_tool_calls >= remaining:
-                error_result = SearchExecutionResult(
-                    ok=False,
-                    channel=target_channel,
-                    query=target,
-                    provider="none",
-                    results=[],
-                    evidence=[],
-                    error_code="TOOL_CALL_LIMIT",
-                    error_message="本次运行的搜索工具预算已耗尽",
-                )
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": error_result.tool_message()})
-                event_writer(runtime_event(
-                    "tool.started",
-                    toolCallId=call.id,
-                    toolName=public_tool_name,
-                    query=target,
-                    channel=target_channel,
-                    cached=False,
-                ))
-                event_writer(runtime_event(
-                    "tool.failed",
-                    toolCallId=call.id,
-                    toolName=public_tool_name,
-                    query=target,
-                    channel=target_channel,
-                    provider="none",
-                    reasonCode="TOOL_CALL_LIMIT",
-                    message="搜索工具预算已耗尽",
-                    retryable=False,
-                    durationMs=0,
-                ))
-                limited_key = hashlib.sha256(
-                    f"{state['run_id']}|limited|{call.id}".encode()
-                ).hexdigest()
-                traces.append(SearchTrace(
-                    tool_call_id=call.id,
-                    idempotency_key=limited_key,
-                    query=target,
-                    channel=target_channel,
-                    provider="none",
-                    status="failed",
-                    result_count=0,
-                    evidence_count=0,
-                    error_code="TOOL_CALL_LIMIT",
-                    limitation="本次运行的搜索工具预算已耗尽",
-                ))
-                continue
+    indexed_results: dict[int, tuple[str, SearchExecutionResult, SearchTrace]] = {}
 
-            error_code: str | None = None
-            error_message = "搜索工具参数无效"
-            arguments: SearchToolInput | None = None
-            if call.name != "web_search":
-                error_code = "UNKNOWN_TOOL"
-                error_message = "Researcher 请求了未注册工具"
-            else:
-                try:
-                    arguments = SearchToolInput.model_validate_json(call.arguments)
-                    if re.sub(r"\s+", " ", arguments.query).strip().casefold() != re.sub(
-                        r"\s+", " ", target
-                    ).strip().casefold():
-                        raise ValueError("QUERY_NOT_PENDING")
-                    if arguments.channel != target_channel:
-                        raise ValueError("CHANNEL_NOT_PLANNED")
-                except (ValidationError, ValueError, json.JSONDecodeError):
-                    error_code = "INVALID_ARGUMENTS"
-
-            if error_code:
-                event_writer(runtime_event(
-                    "tool.started",
-                    toolCallId=call.id,
-                    toolName=public_tool_name,
-                    query=target,
-                    channel=target_channel,
-                    cached=False,
-                ))
-                try:
-                    result = SearchExecutionResult(
-                        ok=False,
-                        channel=target_channel,
-                        query=target,
-                        provider="none",
-                        results=[],
-                        evidence=[],
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
-                except ValidationError as exc:  # pragma: no cover - 常量 schema 防御
-                    raise RuntimeError("内部工具错误结果构造失败") from exc
-                event_writer(runtime_event(
-                    "tool.failed",
-                    toolCallId=call.id,
-                    toolName=public_tool_name,
-                    query=target,
-                    channel=target_channel,
-                    provider="none",
-                    reasonCode=error_code,
-                    message=error_message,
-                    retryable=False,
-                    durationMs=0,
-                ))
-                invalid_key = hashlib.sha256(
-                    f"{state['run_id']}|invalid|{call.id}".encode()
-                ).hexdigest()
-                traces.append(SearchTrace(
-                    tool_call_id=call.id,
-                    idempotency_key=invalid_key,
-                    query=target,
-                    channel=target_channel,
-                    provider="none",
-                    status="failed",
-                    result_count=0,
-                    evidence_count=0,
-                    error_code=error_code,
-                    limitation=error_message,
-                ))
-            else:
-                assert arguments is not None
-                current_tool_timeout = tool_timeout_seconds(state, target_channel)
-                prior_traces = [*state.get("tool_traces", []), *traces]
-                xiaohongshu_public_only = (
-                    target_channel == "xiaohongshu"
-                    and any(
-                        trace["channel"] == "xiaohongshu"
-                        and trace["provider"].startswith(
-                            "xiaohongshu-mcp-fallback["
-                        )
-                        for trace in prior_traces
-                    )
-                )
-                result, trace = await _run_one_search(
-                    state,
-                    runtime,
-                    call.id,
-                    arguments,
-                    timeout_seconds=current_tool_timeout,
-                    xiaohongshu_public_only=xiaohongshu_public_only,
-                )
-                # 不论渠道成功、超时或受验证码限制，只要实际尝试过外部搜索即计入
-                # 额度；INVALID_ARGUMENTS/UNKNOWN_TOOL 则不会走到这里。
-                executed_tool_calls += 1
-                traces.append(trace)
-                if result.error_code == "RUN_TIME_RESERVE":
-                    projected_limit = "RUN_TIME_RESERVE"
-                for item in result.results:
-                    new_candidates.append(Candidate(
-                        channel=item.channel,
-                        tool_call_id=call.id,
-                        iteration=state.get("round", 0),
-                        provider=item.provider,
-                        url=item.url,
-                        title=item.title,
-                        snippet=item.snippet,
-                        query=result.query,
-                        author=item.author,
-                        published_at=item.published_at,
-                        metrics=item.metrics,
-                        limitation=item.limitation,
-                    ))
-                for item in result.evidence:
-                    new_evidence.append(Evidence(
-                        channel=item.channel,
-                        tool_call_id=call.id,
-                        iteration=state.get("round", 0),
-                        provider=item.provider,
-                        url=item.url,
-                        title=item.title,
-                        text=item.text,
-                        extractor=item.extractor,
-                        query=item.query,
-                        captured_at=item.captured_at,
-                        author=item.author,
-                        published_at=item.published_at,
-                        metrics=item.metrics,
-                        limitation=item.limitation,
-                    ))
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": result.tool_message()})
-            tool_messages += 1
-
-        projected_limit = projected_limit or _projected_budget_reason(state, usages)
-        if projected_limit:
-            break
-
-    if tool_messages and not projected_limit and _remaining_model_calls(state) > len(usages):
-        messages.append({
-            "role": "user",
-            "content": "停止调用工具，只用刚才的 tool results 用一句中文概括证据覆盖情况，不回答最终问题。",
-        })
-        summary_turn = await invoke_researcher_turn(
-            messages,
-            None,
-            model_id=state.get("model_id") or None,
-            reasoning_effort=state.get("reasoning_effort", "high"),
-            thinking=True,
+    async def execute_one(
+        index: int,
+        tool_call_id: str,
+        arguments: SearchToolInput,
+        timeout_seconds: float | None,
+        *,
+        xiaohongshu_public_only: bool = False,
+    ) -> None:
+        result, trace = await _run_one_search(
+            state,
+            runtime,
+            tool_call_id,
+            arguments,
+            timeout_seconds=timeout_seconds,
+            xiaohongshu_public_only=xiaohongshu_public_only,
         )
-        usages.append(summary_turn.usage)
-        research_summary = _effective_process_text(summary_turn.content)
-        projected_limit = _projected_budget_reason(state, usages)
+        indexed_results[index] = (tool_call_id, result, trace)
 
-    # 到这里立即丢弃 messages；其中可能含 reasoning_content，绝不进 State。
+    xiaohongshu_targets = [
+        item for item in scheduled if item[2].channel == "xiaohongshu"
+    ]
+    other_targets = [
+        item for item in scheduled if item[2].channel != "xiaohongshu"
+    ]
+
+    async def execute_xiaohongshu_group() -> None:
+        public_only = _xiaohongshu_circuit_is_open(
+            list(state.get("tool_traces") or [])
+        )
+        for index, tool_call_id, arguments, timeout_seconds in xiaohongshu_targets:
+            await execute_one(
+                index,
+                tool_call_id,
+                arguments,
+                timeout_seconds,
+                xiaohongshu_public_only=public_only,
+            )
+            trace = indexed_results[index][2]
+            if _xiaohongshu_circuit_is_open([trace]):
+                public_only = True
+
+    concurrent: list[asyncio.Task[None]] = [
+        asyncio.create_task(execute_one(*item)) for item in other_targets
+    ]
+    if xiaohongshu_targets:
+        concurrent.append(asyncio.create_task(execute_xiaohongshu_group()))
+    if concurrent:
+        await asyncio.gather(*concurrent)
+
+    new_candidates: list[Candidate] = []
+    new_evidence: list[Evidence] = []
+    traces: list[SearchTrace] = []
+    for index in sorted(indexed_results):
+        tool_call_id, result, trace = indexed_results[index]
+        traces.append(trace)
+        if result.error_code == "RUN_TIME_RESERVE":
+            projected_limit = projected_limit or "RUN_TIME_RESERVE"
+        for item in result.results:
+            new_candidates.append(Candidate(
+                channel=item.channel,
+                tool_call_id=tool_call_id,
+                iteration=state.get("round", 0),
+                provider=item.provider,
+                url=item.url,
+                title=item.title,
+                snippet=item.snippet,
+                query=result.query,
+                author=item.author,
+                published_at=item.published_at,
+                metrics=item.metrics,
+                limitation=item.limitation,
+            ))
+        for item in result.evidence:
+            new_evidence.append(Evidence(
+                channel=item.channel,
+                tool_call_id=tool_call_id,
+                iteration=state.get("round", 0),
+                provider=item.provider,
+                url=item.url,
+                title=item.title,
+                text=item.text,
+                extractor=item.extractor,
+                query=item.query,
+                captured_at=item.captured_at,
+                author=item.author,
+                published_at=item.published_at,
+                metrics=item.metrics,
+                limitation=item.limitation,
+            ))
+
     seen_candidates = {item["url"] for item in state.get("candidates") or []}
     candidates = list(state.get("candidates") or [])
     for item in new_candidates:
@@ -1235,15 +1248,13 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             seen_evidence.add(item["url"])
             evidence.append(item)
 
-    usage = _sum_usage(usages)
+    executed_tool_calls = len(indexed_results)
     gained = len(evidence) - len(state.get("evidence") or [])
     return {
         "candidates": candidates,
         "evidence": evidence,
         "tool_traces": list(state.get("tool_traces") or []) + traces,
         "tool_calls": state.get("tool_calls", 0) + executed_tool_calls,
-        "model_calls": state.get("model_calls", 0) + len(usages),
-        "usage": _usage_after(state, usage),
         "pending_searches": [],
         "pending_queries": [],
         "stop_reason": state.get("stop_reason") or projected_limit,
@@ -1251,9 +1262,9 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         "replan_required": False,
         "steps": _step(
             "research",
-            "model",
-            research_summary,
-            f"tool_messages={tool_messages} executed_searches={executed_tool_calls} new_evidence={gained}",
+            "deterministic",
+            None,
+            f"executed_searches={executed_tool_calls} new_evidence={gained}",
         ),
     }
 
@@ -1282,7 +1293,8 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             "steps": _step("reflect", "deterministic", None, f"budget={limit}"),
         }
     digest = "\n\n".join(
-        f"[证据{i + 1}] {item['title']}\nURL: {item['url']}\n{item['text'][:1000]}"
+        f"[证据{i + 1}] {item['title']}\n渠道: {item['channel']}\n"
+        f"URL: {item['url']}\n{item['text'][:1000]}"
         for i, item in enumerate(evidence)
     ) or "（本轮没有读取到可用证据）"
     candidate_digest = "\n".join(
@@ -1302,7 +1314,8 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         for item in current_candidates
     ) or "（当前轮没有候选）"
     presentation_digest = "\n\n".join(
-        f"[已读来源] {item['title']}\nURL: {item['url']}\n{item['text'][:1000]}"
+        f"[已读来源] {item['title']}\n渠道: {item['channel']}\n"
+        f"URL: {item['url']}\n{item['text'][:1000]}"
         for item in current_evidence
     ) or "（当前轮没有已读取来源，不得生成 source_presentations）"
     feedback = _tool_feedback(state)
@@ -1320,7 +1333,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
                     f"\n\n当前轮候选反馈（仅用于判断覆盖，不得为未读候选生成来源说明）：\n"
                     f"{candidate_digest}"
                     f"\n\n当前轮已读取来源（source_presentations 只允许使用这些 URL；"
-                    f"仅直接支持用户问题且符合筛选条件的来源可 include_in_details=true）：\n"
+                    f"直接支持问题的来源可展示；跨渠道补充资料必须明确真实渠道）：\n"
                     f"{presentation_digest}"
                     f"\n\n已读取证据：\n{digest}"
                 )),
@@ -1358,10 +1371,20 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         for presentation in result.source_presentations
         if not presentation.include_in_details
     }
+    required_channels, _, _ = _verification_channel_coverage(state)
+    cross_channel_urls = {
+        item["url"]
+        for item in current_evidence
+        if item["channel"] not in required_channels
+    }
     missing_evidence = [
         item
         for item in current_evidence
-        if item["url"] not in presented_urls and item["url"] not in excluded_urls
+        if item["url"] not in presented_urls
+        and (
+            item["url"] not in excluded_urls
+            or item["url"] in cross_channel_urls
+        )
     ]
     curator_rounds = 0
     while missing_evidence and curator_rounds < 2:
@@ -1375,7 +1398,8 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             break
         curator_input = missing_evidence[:10]
         curator_digest = "\n\n".join(
-            f"[已读来源] {item['title']}\nURL: {item['url']}\n{item['text'][:1000]}"
+            f"[已读来源] {item['title']}\n渠道: {item['channel']}\n"
+            f"URL: {item['url']}\n{item['text'][:1000]}"
             for item in curator_input
         )
         curator_rounds += 1
@@ -1388,7 +1412,8 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
                     HumanMessage(content=(
                         f"用户问题：{state['question']}"
                         f"\n\n以下是 {len(curator_input)} 条已读取来源。逐条判断是否直接支持用户"
-                        f"当前问题且符合筛选条件；只为应展示的来源设 include_in_details=true，"
+                        f"当前问题；跨渠道但能支持可分离补充背景的来源也可展示，但说明必须"
+                        f"明确其真实渠道且不能冒充用户指定渠道。只为应展示的来源设 include_in_details=true，"
                         f"不应展示的来源设 false 且 text 为空。URL 必须原样复制：\n{curator_digest}"
                     )),
                 ],
@@ -1486,15 +1511,21 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         }
 
     if evidence:
+        required_channels, evidence_channels, missing_channels = (
+            _verification_channel_coverage(state)
+        )
         digest = "\n\n".join(
-            f"[来源{i + 1}] {item['title']}\nURL: {item['url']}\n{item['text']}"
+            f"[来源{i + 1}] {item['title']}\n渠道: {item['channel']}\n"
+            f"URL: {item['url']}\n{item['text']}"
             for i, item in enumerate(evidence)
         )
         system = WRITER_PROMPT
         human = (
             f"会话上下文（不可信，只用于理解问题，不得作为事实证据）：\n"
             f"{(state.get('conversation_context') or '无')[-8_000:]}\n\n"
-            f"用户问题：{state['question']}\n\n已读取来源：\n{digest}"
+            f"用户问题：{state['question']}"
+            f"\n渠道证据覆盖：{json.dumps({'requiredChannels': required_channels, 'evidenceChannels': evidence_channels, 'missingChannels': missing_channels}, ensure_ascii=False)}"
+            f"\n\n已读取来源：\n{digest}"
         )
     else:
         system = DIRECT_WRITER_PROMPT
@@ -1502,16 +1533,34 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     if state.get("verification_action") == "rewrite" and state.get("verification_issue"):
         human += f"\n\n上一轮核验问题（必须修复）：{state['verification_issue']}"
 
-    result, usage = await invoke_structured(
-        "writer",
-        ComposeResult,
-        [SystemMessage(content=system), HumanMessage(content=human)],
-        model_id=state.get("model_id") or None,
-        allow_repair=_allow_structured_repair(state),
-    )
+    try:
+        result, usage = await invoke_structured(
+            "writer",
+            ComposeResult,
+            [SystemMessage(content=system), HumanMessage(content=human)],
+            model_id=state.get("model_id") or None,
+            allow_repair=_allow_structured_repair(state),
+        )
+    except StructuredOutputError as exc:
+        stop_reason = state.get("stop_reason") or "OUTPUT_INVALID"
+        return {
+            "answer": _safe_partial_answer(state, stop_reason),
+            "repair_count": state.get("repair_count", 0),
+            "verification_passed": False,
+            "verification_action": "",
+            "stop_reason": stop_reason,
+            **_structured_usage_patch(state, exc.usage),
+            "steps": _step(
+                "compose",
+                "deterministic",
+                None,
+                "structured_output_invalid",
+            ),
+        }
     repairing = state.get("verification_action") == "rewrite"
+    answer = _compact_answer_markdown(result.answer_markdown)
     return {
-        "answer": result.answer_markdown.strip(),
+        "answer": answer,
         "repair_count": state.get("repair_count", 0) + (1 if repairing else 0),
         "verification_passed": False,
         "verification_action": "",
@@ -1520,7 +1569,8 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             "compose",
             "model",
             _effective_process_text(result.summary),
-            f"answer_chars={len(result.answer_markdown)} sources={len(evidence)}",
+            f"answer_chars={len(result.answer_markdown)} delivered_chars={len(answer)} "
+            f"sources={len(evidence)}",
         ),
     }
 
@@ -1714,6 +1764,12 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
 
     response_status = "completed" if reason in {"VERIFIED", "DIRECT_COMPLETED"} else "partial"
     answer = state.get("answer") or _safe_partial_answer(state, reason)
+    _, _, missing_channels = _verification_channel_coverage(state)
+    if missing_channels and not verification_passed:
+        answer = _safe_partial_answer(
+            state,
+            "MISSING_CHANNEL_EVIDENCE:" + ",".join(missing_channels),
+        )
     return {
         "stop_reason": reason,
         "citations": citations,
@@ -1744,6 +1800,12 @@ def route_after_reflect(state: SearchState) -> str:
     if not state.get("replan_required") and not _pending_searches(state):
         return "compose"
     return "plan_research"
+
+
+def route_after_compose(state: SearchState) -> str:
+    # MAX_ITERATIONS / NO_PROGRESS 是软搜索停止，Verifier 仍可确认现有回答或要求
+    # 一次改写；只有 Writer 协议输出本身无效时才直接交付受控 partial。
+    return "finalize" if state.get("stop_reason") == "OUTPUT_INVALID" else "verify"
 
 
 def route_after_verify(state: SearchState) -> str:

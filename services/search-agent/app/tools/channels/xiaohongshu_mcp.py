@@ -30,6 +30,7 @@ from app.tools.channels.base import (
     ChannelProgressReporter,
     ChannelResult,
     SourceProvenance,
+    channel_resolution,
     report_progress,
 )
 from app.tools.channels.xiaohongshu_public import XiaohongshuPublicChannel
@@ -40,6 +41,7 @@ _MCP_PORT = 18060
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_EVIDENCE_CHARS = 2_400
 _MAX_RETRYABLE_ATTEMPT_SECONDS = 3.0
+_MAX_DETAIL_TOTAL_SECONDS = 24.0
 _MIN_SUBSTANTIVE_DESCRIPTION_CHARS = 12
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,96}$")
 _SAFE_TOKEN_RE = re.compile(r"^[^\s]{8,4096}$")
@@ -65,7 +67,11 @@ def _server_failure_code(response: httpx.Response) -> str:
         payload = response.json()
     except ValueError:
         return "MCP_UNAVAILABLE"
-    detail = _safe_text(_dict(payload).get("details"), 500).casefold()
+    raw = _dict(payload)
+    stable_code = _safe_text(raw.get("code"), 80).upper()
+    if stable_code in _FALLBACK_ERROR_CODES:
+        return stable_code
+    detail = _safe_text(raw.get("details"), 500).casefold()
     if any(
         marker in detail
         for marker in (
@@ -351,7 +357,7 @@ class XiaohongshuMcpClient:
                 elapsed = time.monotonic() - attempt_started
                 if (
                     attempt + 1 < attempts
-                    and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
+                    and elapsed < _MAX_RETRYABLE_ATTEMPT_SECONDS
                 ):
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
@@ -363,7 +369,7 @@ class XiaohongshuMcpClient:
                 elapsed = time.monotonic() - attempt_started
                 if (
                     attempt + 1 < attempts
-                    and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
+                    and elapsed < _MAX_RETRYABLE_ATTEMPT_SECONDS
                 ):
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
@@ -385,7 +391,7 @@ class XiaohongshuMcpClient:
                 response.status_code >= 500
                 and server_failure not in {"CAPTCHA_REQUIRED", "MCP_TIMEOUT"}
                 and attempt + 1 < attempts
-                and elapsed <= _MAX_RETRYABLE_ATTEMPT_SECONDS
+                and elapsed < _MAX_RETRYABLE_ATTEMPT_SECONDS
             ):
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
@@ -541,6 +547,7 @@ class XiaohongshuMcpClient:
             body={
                 "feed_id": feed_id,
                 "xsec_token": token,
+                "xsec_source": "pc_search",
                 "load_all_comments": False,
             },
             timeout=self.detail_timeout,
@@ -671,6 +678,13 @@ class XiaohongshuMcpChannel:
                 query=query,
                 error_code=original_error.code,
                 error_message=str(original_error),
+                resolution=channel_resolution(
+                    status="failed",
+                    primary_provider=_MCP_PROVIDER,
+                    effective_provider=outcome.provider,
+                    reason_code=original_error.code,
+                    message=str(original_error),
+                ),
             )
         limitation = (
             f"登录态渠道未就绪（{original_error.code}），已降级为公开索引读取"
@@ -695,6 +709,15 @@ class XiaohongshuMcpChannel:
             )
         outcome.provider = (
             f"{_MCP_PROVIDER}-fallback[{original_error.code}]+{outcome.provider}"
+        )
+        outcome.error_code = original_error.code
+        outcome.error_message = str(original_error)
+        outcome.resolution = channel_resolution(
+            status="degraded",
+            primary_provider=_MCP_PROVIDER,
+            effective_provider=outcome.provider,
+            reason_code=original_error.code,
+            message=str(original_error),
         )
         return outcome
 
@@ -732,14 +755,14 @@ class XiaohongshuMcpChannel:
         progress: ChannelProgressReporter | None = None,
     ) -> ChannelOutcome:
         if self.client is None:
-            return (
-                await self.public_fallback.search(query, max_results)
-                if progress is None
-                else await self.public_fallback.search(
-                    query,
-                    max_results,
-                    progress=progress,
-                )
+            return await self._fallback(
+                query,
+                max_results,
+                XiaohongshuMcpError(
+                    "MCP_UNAVAILABLE",
+                    "小红书登录态服务当前未配置",
+                ),
+                progress,
             )
 
         try:
@@ -760,6 +783,12 @@ class XiaohongshuMcpChannel:
                 query=query,
                 error_code=exc.code,
                 error_message=str(exc),
+                resolution=channel_resolution(
+                    status="failed",
+                    primary_provider=_MCP_PROVIDER,
+                    reason_code=exc.code,
+                    message=str(exc),
+                ),
             )
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -770,6 +799,9 @@ class XiaohongshuMcpChannel:
             self.config.graph.max_pages_per_call,
         )
         visible_candidates = candidates[:max_results]
+        detail_deadline = time.monotonic() + _MAX_DETAIL_TOTAL_SECONDS
+        first_detail_error: XiaohongshuMcpError | None = None
+        detail_circuit_error: XiaohongshuMcpError | None = None
         for result_count in range(1, len(visible_candidates) + 1):
             report_progress(
                 progress,
@@ -780,24 +812,40 @@ class XiaohongshuMcpChannel:
         for index, candidate in enumerate(visible_candidates):
             detail: XiaohongshuFeedDetail | None = None
             detail_error: XiaohongshuMcpError | None = None
-            if index < max_details:
-                try:
-                    detail = await self.client.read_feed_detail(
-                        candidate.feed_id,
-                        candidate.xsec_token,
+            if index < max_details and detail_circuit_error is None:
+                remaining_detail_seconds = detail_deadline - time.monotonic()
+                if remaining_detail_seconds <= 0:
+                    detail_error = XiaohongshuMcpError(
+                        "MCP_TIMEOUT",
+                        "小红书详情读取达到本次预算上限",
                     )
-                except XiaohongshuMcpError as exc:
-                    detail_error = exc
-                    # 同一登录会话下的详情错误通常是平台挑战、浏览器超时或
-                    # 短暂服务故障；继续串行等待其余候选只会耗尽用户可见运行。
-                    # 立即切到受限的公开只读路径，仍然只把真正读到的正文作为证据。
-                    if exc.code in _FALLBACK_ERROR_CODES:
-                        return await self._fallback(
-                            query,
-                            max_results,
-                            exc,
-                            progress,
+                    detail_circuit_error = detail_error
+                    first_detail_error = first_detail_error or detail_error
+                else:
+                    try:
+                        async with asyncio.timeout(remaining_detail_seconds):
+                            detail = await self.client.read_feed_detail(
+                                candidate.feed_id,
+                                candidate.xsec_token,
+                            )
+                    except TimeoutError:
+                        detail_error = XiaohongshuMcpError(
+                            "MCP_TIMEOUT",
+                            "小红书详情读取达到本次预算上限",
                         )
+                    except XiaohongshuMcpError as exc:
+                        detail_error = exc
+                    if detail_error is not None:
+                        first_detail_error = first_detail_error or detail_error
+                        # 认证和安全验证属于会话级结论；其余详情错误可能只影响
+                        # 单篇笔记，保留真实候选并在总预算内尝试下一篇。
+                        if detail_error.code in {
+                            "AUTH_REQUIRED",
+                            "CAPTCHA_REQUIRED",
+                        }:
+                            detail_circuit_error = detail_error
+            elif detail_circuit_error is not None:
+                detail_error = detail_circuit_error
 
             url = f"https://www.xiaohongshu.com/explore/{candidate.feed_id}"
             title = (detail.title if detail and detail.title else candidate.title)[:300]
@@ -879,6 +927,11 @@ class XiaohongshuMcpChannel:
                     evidence_count=len(evidence),
                     source=result,
                 )
+        if first_detail_error is None and results and not evidence:
+            first_detail_error = XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书笔记详情缺少可用于回答的实质正文",
+            )
         return ChannelOutcome(
             ok=True,
             channel="xiaohongshu",
@@ -886,4 +939,20 @@ class XiaohongshuMcpChannel:
             query=query,
             results=results,
             evidence=evidence,
+            error_code=(first_detail_error.code if first_detail_error else None),
+            error_message=(str(first_detail_error) if first_detail_error else None),
+            resolution=(
+                channel_resolution(
+                    status="degraded",
+                    primary_provider=_MCP_PROVIDER,
+                    effective_provider=_MCP_PROVIDER,
+                    reason_code=first_detail_error.code,
+                    message=str(first_detail_error),
+                )
+                if first_detail_error
+                else channel_resolution(
+                    status="success",
+                    primary_provider=_MCP_PROVIDER,
+                )
+            ),
         )

@@ -221,7 +221,7 @@ describe("Search Agent v1 白名单投影", () => {
     const started = mapSearchAgentEvent(source({ type: "tool.started", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", cached: false }));
     const failed = mapSearchAgentEvent(source({ type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false, durationMs: 0 }));
     expect(started.events[0].payload).toMatchObject({ name: "未知工具请求", summary: "正在拦截未注册工具请求" });
-    expect(failed.events[0].payload).toMatchObject({ summary: "未知工具请求已被阻止", error: "UNKNOWN_TOOL", resultCount: 0, evidenceCount: 0 });
+    expect(failed.events[0].payload).toMatchObject({ settlementSummary: "未知工具请求已被阻止", error: "UNKNOWN_TOOL", resultCount: 0, evidenceCount: 0 });
   });
 
   it("失败工具仍结算已经真实观察到的累计数量", () => {

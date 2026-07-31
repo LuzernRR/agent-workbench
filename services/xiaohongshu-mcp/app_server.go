@@ -66,6 +66,7 @@ func (s *AppServer) Start(port string) error {
 	} else {
 		logrus.Infof("服务器已优雅关闭")
 	}
+	s.xiaohongshuService.Close()
 
 	return nil
 }

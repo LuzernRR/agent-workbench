@@ -82,9 +82,12 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
       }}
     >
       <ChevronRight className={cn("size-4 shrink-0 transition-transform duration-150", expanded && "rotate-90")} />
-      <span>{summarizeSearchActivity(items)}</span>
+      <span>搜索记录</span>
     </button>
-    {expanded && sources.size ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
+    {expanded ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
+      {items.filter((item) => !["preparing", "running", "waiting"].includes(item.status)).map((item) => <p key={`settled:${item.toolCallId}`} className="break-words" data-search-settlement>
+        {item.query ? `${item.query}：` : ""}{item.outcomeStatus === "degraded" ? "受控降级，" : ""}{summarizeSearchActivity([item])}
+      </p>)}
       {[...sources.entries()].map(([identity, source], index) => <p key={identity} className="break-words"><a href={source.url} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a></p>)}
     </div> : null}
   </div>;
@@ -99,7 +102,7 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
     ? `${(item.durationMs / 1000).toFixed(item.durationMs >= 10000 ? 0 : 1)} 秒`
     : "";
   const commandTool = /(?:终端|命令|terminal|shell|exec|command)/i.test(item.name);
-  const status = item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status === "unknown" ? "结果待确认" : item.status === "waiting" ? "等待中" : "执行中";
+  const status = item.outcomeStatus === "degraded" ? "受控降级" : item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status === "unknown" ? "结果待确认" : item.status === "waiting" ? "等待中" : "执行中";
   const genericSummary = /^(?:正在准备|准备中|执行中|正在执行|完成|已完成)$/u.test(item.summary.trim());
   const summary = commandTool
     ? item.status === "completed" ? "运行了多个命令" : item.status === "failed" ? "命令执行失败" : "正在运行命令"
@@ -118,8 +121,10 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
       {expanded ? (
         <div className="ml-2 mt-1 grid gap-x-8 gap-y-2 border-l border-line py-1.5 pl-5 text-[15px] leading-6 text-secondary md:grid-cols-2">
           <Detail label="状态">{status}</Detail>
+          {item.settlementSummary ? <Detail label="完成记录">{item.settlementSummary}</Detail> : null}
           {item.query ? <Detail label="搜索查询">{item.query}</Detail> : null}
-          {item.provider ? <Detail label="搜索服务">{item.provider}</Detail> : null}
+          {item.effectiveProvider || item.provider ? <Detail label="搜索服务">{item.effectiveProvider || item.provider}</Detail> : null}
+          {item.primaryProvider && item.primaryProvider !== (item.effectiveProvider || item.provider) ? <Detail label="首选服务">{item.primaryProvider}</Detail> : null}
           {typeof item.resultCount === "number" ? <Detail label="搜索结果"><span className="tabular-nums">{item.resultCount} 条候选，{item.evidenceCount || 0} 条已读取来源</span></Detail> : null}
           {item.progress ? <Detail label="进度"><span className="tabular-nums">{item.progress.current} / {item.progress.total}</span></Detail> : null}
           {duration
@@ -128,6 +133,8 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
               ? <Detail label="执行耗时">执行中</Detail>
               : null}
           {item.error ? <Detail label={item.status === "unknown" ? "状态说明" : "错误信息"} danger={item.status !== "unknown"}>{item.status === "unknown" ? "结果状态未知，系统未自动重试" : commandTool ? "命令未能完成" : getRunFailureMessage(item.error)}</Detail> : null}
+          {item.outcomeStatus === "degraded" && item.resolutionMessage ? <Detail label="降级说明">{item.resolutionMessage}</Detail> : null}
+          {item.nextAction && item.nextAction !== "none" ? <Detail label="后续动作">{nextActionLabel(item.nextAction)}</Detail> : null}
           {item.sources?.length ? <div className="min-w-0 md:col-span-2"><div className="mb-1 text-[15px] font-medium text-tertiary">来源</div><ul className="space-y-1.5">{item.sources.map((source, index) => {
             const href = safeWorkbenchHref(source.url);
             if (!href) return null;
@@ -137,6 +144,17 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
       ) : null}
     </div>
   );
+}
+
+function nextActionLabel(action: NonNullable<ToolItem["nextAction"]>) {
+  return {
+    none: "无需操作",
+    use_fallback: "已使用受控备用渠道",
+    use_alternative_channel: "改用其他只读渠道",
+    reconnect_account: "重新连接小红书账号",
+    retry_later: "稍后重试",
+    stop: "停止自动重试"
+  }[action];
 }
 
 function Detail({ label, children, danger = false }: { label: string; children: React.ReactNode; danger?: boolean }) {

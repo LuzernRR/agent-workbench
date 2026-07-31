@@ -42,8 +42,7 @@ func respondSuccess(c *gin.Context, data any, message string) {
 func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
 	status, err := s.xiaohongshuService.CheckLoginStatus(c.Request.Context())
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
-			"检查登录状态失败", err.Error())
+		respondReadError(c, err)
 		return
 	}
 
@@ -56,8 +55,7 @@ func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
 func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
 	result, err := s.xiaohongshuService.GetLoginQrcode(c.Request.Context())
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
-			"获取登录二维码失败", err.Error())
+		respondReadError(c, err)
 		return
 	}
 
@@ -159,8 +157,7 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 
 	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "SEARCH_FEEDS_FAILED",
-			"搜索Feeds失败", err.Error())
+		respondReadError(c, err)
 		return
 	}
 
@@ -179,6 +176,12 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 
 	var result *FeedDetailResponse
 	var err error
+	xsecSource, sourceErr := xiaohongshu.NormalizeFeedDetailSource(req.XsecSource)
+	if sourceErr != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
+			"详情来源参数无效", nil)
+		return
+	}
 
 	if req.CommentConfig != nil {
 		config := xiaohongshu.CommentLoadConfig{
@@ -187,14 +190,26 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 			MaxCommentItems:     req.CommentConfig.MaxCommentItems,
 			ScrollSpeed:         req.CommentConfig.ScrollSpeed,
 		}
-		result, err = s.xiaohongshuService.GetFeedDetailWithConfig(c.Request.Context(), req.FeedID, req.XsecToken, req.LoadAllComments, config)
+		result, err = s.xiaohongshuService.GetFeedDetailWithConfigAndSource(
+			c.Request.Context(),
+			req.FeedID,
+			req.XsecToken,
+			req.LoadAllComments,
+			config,
+			xsecSource,
+		)
 	} else {
-		result, err = s.xiaohongshuService.GetFeedDetail(c.Request.Context(), req.FeedID, req.XsecToken, req.LoadAllComments)
+		result, err = s.xiaohongshuService.GetFeedDetailWithSource(
+			c.Request.Context(),
+			req.FeedID,
+			req.XsecToken,
+			req.LoadAllComments,
+			xsecSource,
+		)
 	}
 
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "GET_FEED_DETAIL_FAILED",
-			"获取Feed详情失败", err.Error())
+		respondReadError(c, err)
 		return
 	}
 
@@ -213,8 +228,7 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 
 	result, err := s.xiaohongshuService.UserProfile(c.Request.Context(), req.UserID, req.XsecToken)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "GET_USER_PROFILE_FAILED",
-			"获取用户主页失败", err.Error())
+		respondReadError(c, err)
 		return
 	}
 

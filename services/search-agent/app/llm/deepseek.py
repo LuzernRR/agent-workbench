@@ -22,6 +22,7 @@ from app.config.agent import agent_config
 from app.config.runtime import runtime_config
 
 ModelRole = Literal["supervisor", "planner", "reflector", "writer", "verifier"]
+WRITER_MAX_TOKENS = 2048
 
 _ROLE_TEMPERATURE: dict[str, float] = {
     "supervisor": 0.0,
@@ -35,7 +36,7 @@ _ROLE_MAX_TOKENS: dict[str, int] = {
     "supervisor": 1024,
     "planner": 1600,
     "reflector": 1200,
-    "writer": 4096,
+    "writer": WRITER_MAX_TOKENS,
     "verifier": 1400,
 }
 

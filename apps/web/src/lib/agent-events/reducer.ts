@@ -253,9 +253,9 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         iteration: typeof payload.iteration === "number" ? numberValue(payload.iteration) : undefined
       };
       const existing = current.paragraphs.findIndex((candidate) => candidate.id === paragraphId);
-      const paragraphs = existing < 0
-        ? [...current.paragraphs, paragraph]
-        : current.paragraphs.map((candidate, index) => index === existing ? paragraph : candidate);
+      // 完整段落只用于初始化旧事件；同一 paragraphId 后续不得覆盖已显示前缀。
+      if (existing >= 0) return next;
+      const paragraphs = [...current.paragraphs, paragraph];
       return { ...next, items: { ...next.items, [id]: { ...current, paragraphs, status: "streaming" } } };
     }
     case "thinking.delta": {
@@ -319,10 +319,8 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
       const id = stringValue(payload.messageId);
       const current = next.items[id];
       if (!current || current.kind !== "message") return next;
-      return {
-        ...next,
-        items: { ...next.items, [id]: { ...current, text: stringValue(payload.text), status: "streaming" } }
-      };
+      // 重试必须使用新的 messageId；旧消息一旦可见便不可回写。
+      return { ...next, items: { ...next.items, [id]: { ...current, status: "streaming" } } };
     }
     case "message.completed": {
       const id = stringValue(payload.messageId);
@@ -333,7 +331,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         ...next,
         items: {
           ...next.items,
-          [id]: { ...current, text: stringValue(payload.text, current.text), citations, attachments: attachmentsValue(payload.attachments) || current.attachments, status: "completed" }
+          [id]: { ...current, citations, attachments: attachmentsValue(payload.attachments) || current.attachments, status: "completed" }
         }
       };
     }
@@ -387,16 +385,8 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
       const sourcePresentations = new Map(
         sourcePresentationsValue(payload.sourcePresentations).map((item) => [sourceUrlIdentity(item.url), item.text])
       );
-      const sourcePresentationUrls = new Set(
-        Array.isArray(payload.sourcePresentationUrls)
-          ? payload.sourcePresentationUrls.map(sourceUrlIdentity).filter(Boolean)
-          : []
-      );
-      const currentSources = payload.sourcePresentationActive === true && sourcePresentationUrls.size && current.sources
-        ? current.sources.map((source) => source.verified && sourcePresentationUrls.has(sourceUrlIdentity(source.url))
-          ? { ...source, displayText: undefined }
-          : source)
-        : current.sources;
+      // 重连或重复控制事件不能清空已经逐字显示的来源说明。
+      const currentSources = current.sources;
       const nextSources = sourcePresentations.size && currentSources
         ? currentSources.map((source) => ({
             ...source,
@@ -421,10 +411,24 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
           [id]: {
             ...current,
             status: status as ToolItem["status"],
-            summary: stringValue(payload.summary, current.summary),
+            summary: current.summary,
+            settlementSummary: stringValue(
+              payload.settlementSummary ?? payload.summary,
+              current.settlementSummary
+            ) || undefined,
+            outcomeStatus: ["success", "degraded", "failed"].includes(stringValue(payload.outcomeStatus))
+              ? stringValue(payload.outcomeStatus) as ToolItem["outcomeStatus"]
+              : current.outcomeStatus,
             channel: ["web", "x", "xiaohongshu"].includes(stringValue(payload.channel)) ? stringValue(payload.channel) as ToolItem["channel"] : current.channel,
             query: stringValue(payload.query, current.query) || undefined,
             provider: stringValue(payload.provider, current.provider) || undefined,
+            primaryProvider: stringValue(payload.primaryProvider, current.primaryProvider) || undefined,
+            effectiveProvider: stringValue(payload.effectiveProvider, current.effectiveProvider) || undefined,
+            reasonCode: stringValue(payload.reasonCode, current.reasonCode) || undefined,
+            resolutionMessage: stringValue(payload.resolutionMessage, current.resolutionMessage) || undefined,
+            nextAction: ["none", "use_fallback", "use_alternative_channel", "reconnect_account", "retry_later", "stop"].includes(stringValue(payload.nextAction))
+              ? stringValue(payload.nextAction) as ToolItem["nextAction"]
+              : current.nextAction,
             resultCount: nextResultCount,
             evidenceCount: nextEvidenceCount,
             sources: nextSources,

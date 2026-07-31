@@ -77,6 +77,7 @@ async def test_authenticated_search_reads_details_without_exposing_tokens() -> N
             assert body == {
                 "feed_id": "feed_123",
                 "xsec_token": "signed-token-secret-123",
+                "xsec_source": "pc_search",
                 "load_all_comments": False,
             }
             return httpx.Response(
@@ -121,6 +122,8 @@ async def test_authenticated_search_reads_details_without_exposing_tokens() -> N
 
     assert outcome.ok is True
     assert outcome.provider == "xiaohongshu-mcp"
+    assert outcome.resolution is not None
+    assert outcome.resolution.status == "success"
     assert len(outcome.results) == 1
     assert outcome.results[0].verified is True
     assert outcome.results[0].url == "https://www.xiaohongshu.com/explore/feed_123"
@@ -209,6 +212,9 @@ async def test_title_and_topic_tags_do_not_count_as_substantive_evidence() -> No
     assert outcome.results[0].verified is False
     assert outcome.evidence == []
     assert outcome.results[0].limitation == "登录态详情缺少可用于回答的实质正文"
+    assert outcome.error_code == "MCP_OUTPUT_INVALID"
+    assert outcome.resolution is not None
+    assert outcome.resolution.status == "degraded"
     assert [
         (item.result_count, item.evidence_count)
         for item in progress_events
@@ -216,11 +222,14 @@ async def test_title_and_topic_tags_do_not_count_as_substantive_evidence() -> No
 
 
 @pytest.mark.asyncio
-async def test_first_retryable_detail_failure_switches_to_public_path_without_reading_more_notes() -> None:
+async def test_detail_failure_keeps_authenticated_candidates_and_tries_next_note() -> None:
     paths: list[str] = []
+    fallback_calls = 0
 
     class PublicFallback:
         async def search(self, query: str, max_results: int) -> ChannelOutcome:
+            nonlocal fallback_calls
+            fallback_calls += 1
             return ChannelOutcome(
                 ok=True,
                 channel="xiaohongshu",
@@ -272,10 +281,21 @@ async def test_first_retryable_detail_failure_switches_to_public_path_without_re
     outcome = await channel.search("油敏皮通勤防晒", 5)
 
     assert outcome.ok is True
-    assert outcome.provider == "xiaohongshu-mcp-fallback[MCP_UNAVAILABLE]+test-public-index"
+    assert outcome.provider == "xiaohongshu-mcp"
+    assert len(outcome.results) == 2
+    assert outcome.evidence == []
+    assert outcome.error_code == "MCP_UNAVAILABLE"
+    assert outcome.resolution is not None
+    assert outcome.resolution.status == "degraded"
+    assert outcome.resolution.primary_provider == "xiaohongshu-mcp"
+    assert outcome.resolution.effective_provider == "xiaohongshu-mcp"
+    assert outcome.resolution.retryable is True
+    assert outcome.resolution.next_action == "use_fallback"
+    assert fallback_calls == 0
     assert paths == [
         "/api/v1/login/status",
         "/api/v1/feeds/search",
+        "/api/v1/feeds/detail",
         "/api/v1/feeds/detail",
     ]
 
@@ -444,7 +464,7 @@ async def test_slow_server_failure_falls_back_without_expensive_retry(
     monkeypatch.setattr(
         xiaohongshu_mcp_module,
         "_MAX_RETRYABLE_ATTEMPT_SECONDS",
-        0.001,
+        0.0,
     )
     client = XiaohongshuMcpClient(
         ORIGIN,

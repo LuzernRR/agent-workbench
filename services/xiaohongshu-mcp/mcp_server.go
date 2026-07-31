@@ -56,6 +56,7 @@ type FilterOption struct {
 type FeedDetailArgs struct {
 	FeedID           string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
 	XsecToken        string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
+	XsecSource       string `json:"xsec_source,omitempty" jsonschema:"令牌来源，仅支持 pc_feed 或 pc_search；从搜索结果读取详情时传 pc_search"`
 	LoadAllComments  bool   `json:"load_all_comments,omitempty" jsonschema:"是否加载全部评论。false仅返回前10条一级评论（默认），true滚动加载更多评论"`
 	Limit            int    `json:"limit,omitempty" jsonschema:"【仅当load_all_comments为true时生效】限制加载的一级评论数量。例如20表示最多加载20条，默认20"`
 	ClickMoreReplies bool   `json:"click_more_replies,omitempty" jsonschema:"【仅当load_all_comments为true时生效】是否展开二级回复。true展开子评论，false不展开（默认）"`
@@ -206,6 +207,7 @@ func registerReadOnlyTools(server *mcp.Server, appServer *AppServer) {
 			result := appServer.handleGetFeedDetail(ctx, map[string]interface{}{
 				"feed_id":           args.FeedID,
 				"xsec_token":        args.XsecToken,
+				"xsec_source":       args.XsecSource,
 				"load_all_comments": false,
 			})
 			return convertToMCPResult(result), nil, nil
@@ -356,6 +358,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			argsMap := map[string]interface{}{
 				"feed_id":           args.FeedID,
 				"xsec_token":        args.XsecToken,
+				"xsec_source":       args.XsecSource,
 				"load_all_comments": args.LoadAllComments,
 			}
 

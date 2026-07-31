@@ -5,6 +5,7 @@ import { expect, test, type APIResponse, type Page } from "@playwright/test";
 test.skip(process.env.LIVE_SEARCH_E2E !== "1", "真实 Provider 验收需要显式开启");
 
 const forbiddenPublicText = /reasoning_content|authorization|apiKey|systemPrompt|toolArguments/iu;
+const maxLiveAnswerGraphemes = 760;
 
 async function postWithVisitorRetry(page: Page, url: string, data: Record<string, unknown>) {
   let response: APIResponse | null = null;
@@ -35,6 +36,10 @@ function sourceIdentity(value: string) {
   return url.href;
 }
 
+function graphemeCount(value: string) {
+  return [...new Intl.Segmenter("zh-CN", { granularity: "grapheme" }).segment(value)].length;
+}
+
 type TimelineAtom = {
   kind: "thinking" | "verification" | "search";
   id: string;
@@ -61,7 +66,7 @@ function expectedActivitySegments(events: ReturnType<typeof decodeSse>) {
   }, []);
 }
 
-test("真实自适应思考与搜索链路在生产入口正确展示并可恢复", async ({ page }) => {
+test("真实自适应思考与搜索链路在生产入口正确展示并可恢复", async ({ page }, testInfo) => {
   const browserErrors: string[] = [];
   const recoveredSseProtocolErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
@@ -97,7 +102,8 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       __thinkingDisclosureHistory?: Record<string, string[]>;
       __sourceStreamHistory?: Record<string, string[]>;
       __answerLengthHistory?: number[];
-      __thinkingStreamObserver?: MutationObserver;
+      __streamFrameObserver?: number;
+      __recordStreamFrame?: () => void;
     };
     runtime.__thinkingStreamHistory = {};
     runtime.__thinkingLabelHistory = [];
@@ -130,8 +136,10 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       });
       element.querySelectorAll<HTMLAnchorElement>("[data-search-activity-details] a[href]").forEach((link) => {
         const href = link.href;
-        const text = link.textContent?.trim() || "";
-        if (!href || !text) return;
+        // A trailing space is itself the grapheme painted in this frame. Keep
+        // it so the following visible character cannot look like a two-step jump.
+        const text = link.textContent || "";
+        if (!href || !text.trim()) return;
         let history = runtime.__sourceStreamHistory?.[href] || [];
         const previousText = history.at(-1) || "";
         if (Array.from(text).length < Array.from(previousText).length) {
@@ -149,47 +157,59 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
         runtime.__answerLengthHistory?.push(answerLength);
       }
     };
-    runtime.__thinkingStreamObserver = new MutationObserver(record);
-    runtime.__thinkingStreamObserver.observe(element, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["data-activity-status", "aria-expanded", "data-assistant-stream-length"]
-    });
+    // MutationObserver may coalesce adjacent browser commits into one callback.
+    // Sampling every visual frame verifies the actual painted append-only prefix.
+    const sampleFrame = () => {
+      record();
+      runtime.__streamFrameObserver = requestAnimationFrame(sampleFrame);
+    };
+    runtime.__recordStreamFrame = record;
     record();
+    runtime.__streamFrameObserver = requestAnimationFrame(sampleFrame);
   });
 
   const question = "请搜索小红书上关于 LangGraph 的笔记，概括大家如何区分 LangChain、LangGraph 和 LangSmith，并引用已读取来源。";
   const runResponsePromise = page.waitForResponse((response) => response.request().method() === "POST"
     && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
   await page.getByLabel("任务输入").fill(question);
+  const runStartedAt = Date.now();
   await page.getByRole("button", { name: "发送", exact: true }).click();
   const runResponse = await runResponsePromise;
   expect(runResponse.ok()).toBe(true);
   const { runId } = await runResponse.json() as { runId: string };
+  const terminalEventsPromise = page.request.get(`/api/v1/runs/${runId}/events?after=0`);
 
-  await expect(page.locator("[data-thinking-id]").first()).toBeVisible({ timeout: 90_000 });
+  const firstPublicText = page.locator("[data-thinking-id] p").first();
+  await expect(firstPublicText).not.toHaveText("", { timeout: Math.max(1, 5_000 - (Date.now() - runStartedAt)) });
+  const firstPublicTextMs = Date.now() - runStartedAt;
   const searchSummaries = page.locator("[data-search-activity-summary]");
-  await expect(searchSummaries.first()).toBeVisible({ timeout: 180_000 });
+  await expect(searchSummaries.first()).toBeVisible({ timeout: Math.max(1, 10_000 - (Date.now() - runStartedAt)) });
+  const firstToolMs = Date.now() - runStartedAt;
   await searchSummaries.first().evaluate((element) => {
-    const runtime = window as typeof window & { __searchCountHistory?: string[]; __searchCountObserver?: MutationObserver };
+    const runtime = window as typeof window & { __searchSettlementHistory?: string[][]; __searchCountObserver?: MutationObserver };
     const record = () => {
-      const text = element.querySelector("button span")?.textContent?.trim() || "";
-      if (text && runtime.__searchCountHistory?.at(-1) !== text) runtime.__searchCountHistory?.push(text);
+      const settlements = [...element.querySelectorAll<HTMLElement>("[data-search-settlement]")]
+        .map((row) => row.textContent?.trim() || "")
+        .filter(Boolean);
+      if (!settlements.length) return;
+      const previous = runtime.__searchSettlementHistory?.at(-1) || [];
+      if (JSON.stringify(previous) !== JSON.stringify(settlements)) {
+        runtime.__searchSettlementHistory?.push(settlements);
+      }
     };
-    runtime.__searchCountHistory = [];
+    runtime.__searchSettlementHistory = [];
     record();
     runtime.__searchCountObserver = new MutationObserver(record);
     runtime.__searchCountObserver.observe(element, { childList: true, subtree: true, characterData: true });
   });
   const completedReply = page.getByRole("button", { name: "复制完整回复" });
   const failedReply = page.getByText("Search Agent 运行失败", { exact: true });
-  await expect(completedReply.or(failedReply)).toBeVisible({ timeout: 300_000 });
+  await expect(completedReply.or(failedReply)).toBeVisible({ timeout: Math.max(1, 90_000 - (Date.now() - runStartedAt)) });
   await expect(completedReply).toBeVisible();
   const conversation = page.getByTestId("conversation-viewport");
 
-  const eventResponse = await page.request.get(`/api/v1/runs/${runId}/events?after=0`);
+  const eventResponse = await terminalEventsPromise;
+  const terminalMs = Date.now() - runStartedAt;
   expect(eventResponse.ok()).toBe(true);
   const rawEvents = await eventResponse.text();
   expect(rawEvents).not.toMatch(forbiddenPublicText);
@@ -205,6 +225,24 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect(types).toContain("message.delta");
   expect(types).toContain("message.completed");
   expect(types).toContain("run.completed");
+  const terminalEvent = [...events].reverse().find((event) => event.type === "run.completed");
+  expect(terminalEvent).toBeDefined();
+  const performanceMetrics = {
+    firstPublicTextMs,
+    firstToolMs,
+    terminalMs,
+    modelCalls: Number(terminalEvent?.payload.modelCalls || 0),
+    toolCalls: Number(terminalEvent?.payload.toolCalls || 0)
+  };
+  expect(performanceMetrics.firstPublicTextMs).toBeLessThanOrEqual(5_000);
+  expect(performanceMetrics.firstToolMs).toBeLessThanOrEqual(10_000);
+  expect(performanceMetrics.terminalMs).toBeLessThanOrEqual(90_000);
+  expect(performanceMetrics.modelCalls).toBeLessThanOrEqual(10);
+  expect(performanceMetrics.toolCalls).toBeLessThanOrEqual(4);
+  await testInfo.attach("issue-10-performance.json", {
+    body: Buffer.from(JSON.stringify(performanceMetrics, null, 2)),
+    contentType: "application/json"
+  });
   const completedTools = events.filter((event) => event.type === "tool.completed");
   const settledTools = events.filter((event) =>
     event.type === "tool.completed" || event.type === "tool.failed");
@@ -212,17 +250,22 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   const completedTool = completedTools.find((event) =>
     (event.payload.sources as unknown[]).length > 0);
   expect(completedTool).toBeDefined();
-  const xiaohongshuTools = completedTools.filter((event) => event.payload.channel === "xiaohongshu");
+  const xiaohongshuTools = settledTools.filter((event) => event.payload.channel === "xiaohongshu");
   expect(xiaohongshuTools.length).toBeGreaterThan(0);
   expect(xiaohongshuTools.some((event) => Number(event.payload.resultCount || 0) > 0)).toBe(true);
   const xiaohongshuHasEvidence = xiaohongshuTools.some(
     (event) => Number(event.payload.evidenceCount || 0) > 0
   );
   const xiaohongshuUsedControlledFallback = xiaohongshuTools.some((event) =>
-    /xiaohongshu-mcp-fallback\[(?:CAPTCHA_REQUIRED|MCP_[A-Z_]+)\]/u.test(
-      String(event.payload.provider || "")
-    ));
+    event.payload.outcomeStatus === "degraded"
+    && event.payload.primaryProvider === "xiaohongshu-mcp"
+    && typeof event.payload.effectiveProvider === "string"
+    && typeof event.payload.reasonCode === "string"
+    && typeof event.payload.retryable === "boolean"
+    && typeof event.payload.nextAction === "string");
   expect(xiaohongshuHasEvidence || xiaohongshuUsedControlledFallback).toBe(true);
+  const xiaohongshuQueryKeys = xiaohongshuTools.map((event) => String(event.payload.query || ""));
+  expect(new Set(xiaohongshuQueryKeys).size).toBe(xiaohongshuQueryKeys.length);
   const progressByToolCallId = new Map<string, Array<[number, number]>>();
   for (const event of events.filter((candidate) => candidate.type === "tool.progress")) {
     const toolCallId = String(event.payload.toolCallId);
@@ -276,7 +319,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect([...presentedByToolCallId.values()].some((urls) => urls.size > 0)).toBe(true);
   const searchSegments = activitySegments.filter((segment) => segment[0].kind === "search");
   await expect(searchSummaries).toHaveCount(searchSegments.length);
-  const searchStats: Array<{ results: number; verified: number; details: number }> = [];
+  const searchStats: Array<{ results: number; verified: number; details: number; settlements: string[] }> = [];
   for (const [index, segment] of searchSegments.entries()) {
     const toolCallIds = segment.map((atom) => atom.id);
     const segmentSettlements = toolCallIds.flatMap((id) => {
@@ -292,35 +335,49 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     // 已读来源只表示正文通过读取；详情还必须由 LangGraph Agent 判定为直接支持
     // 当前问题且符合用户筛选条件。详情绝不能引入未读或无关 URL。
     expect([...detailSources].every((url) => verifiedSources.has(url))).toBe(true);
-    searchStats.push({ results, verified: verifiedSources.size, details: detailSources.size });
+    const settlementTexts = segmentSettlements.map((event) => {
+      const eventSources = (event.payload.sources as Array<{ url?: string; verified?: boolean }> || []);
+      const verifiedCount = new Set(eventSources
+        .filter((source) => source.verified && source.url)
+        .map((source) => sourceIdentity(source.url!))).size;
+      const resultCount = Number(event.payload.resultCount || 0);
+      const evidenceCount = verifiedCount || Number(event.payload.evidenceCount || 0);
+      const resultSummary = resultCount || evidenceCount
+        ? `找到 ${resultCount} 条结果，读取 ${evidenceCount} 个来源`
+        : event.type === "tool.failed" ? "搜索未完成" : "未找到相关结果，读取 0 个来源";
+      const query = typeof event.payload.query === "string" && event.payload.query
+        ? `${event.payload.query}：`
+        : "";
+      const degraded = event.payload.outcomeStatus === "degraded" ? "受控降级，" : "";
+      return `${query}${degraded}${resultSummary}`;
+    });
+    searchStats.push({ results, verified: verifiedSources.size, details: detailSources.size, settlements: settlementTexts });
     const summary = searchSummaries.nth(index);
-    await expect(summary).toContainText(`找到 ${results} 条结果，读取 ${verifiedSources.size} 个来源`);
+    await expect(summary.locator("button span")).toHaveText("搜索记录");
     await expect(summary).toHaveAttribute("data-tool-call-count", String(toolCallIds.length));
     await expect(summary).toHaveAttribute("data-tool-call-ids", toolCallIds.join(","));
-    if (detailSources.size) {
-      await summary.getByRole("button", { name: "展开搜索详情" }).click();
-      const details = summary.locator("[data-search-activity-details]");
-      await expect(details.locator("a")).toHaveCount(detailSources.size);
-      if (segmentSettlements.some((event) => event.payload.channel === "xiaohongshu")) {
-        await expect(details).toContainText("小红书");
-      }
-      await expect(details).not.toContainText(/(?:状态|搜索服务|执行耗时|检索查询|检索计划|检索进展|证据评估|核验结论)\s*[：:]/u);
-      await expect(details).not.toContainText(/未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|未.{0,6}(?:展开|涉及|提及).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|无.{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明)/u);
-    } else {
-      await expect(summary.locator("[data-search-activity-details]")).toHaveCount(0);
+    await summary.getByRole("button", { name: "展开搜索详情" }).click();
+    const details = summary.locator("[data-search-activity-details]");
+    const settlementRows = details.locator("[data-search-settlement]");
+    await expect(settlementRows).toHaveCount(settlementTexts.length);
+    for (const [settlementIndex, text] of settlementTexts.entries()) {
+      await expect(settlementRows.nth(settlementIndex)).toHaveText(text);
     }
+    await expect(details.locator("a")).toHaveCount(detailSources.size);
+    await expect(details).not.toContainText(/(?:状态|搜索服务|执行耗时|检索查询|检索计划|检索进展|证据评估|核验结论)\s*[：:]/u);
+    await expect(details).not.toContainText(/未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|未.{0,6}(?:展开|涉及|提及).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|无.{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明)/u);
     expect(await summary.locator("table").count()).toBe(0);
   }
 
   const thinkingUpdates = events.filter((event) => event.type === "thinking.delta");
   const thinkingIds = new Set(thinkingUpdates.map((event) => String(event.payload.thinkingId)));
   expect(thinkingIds.size).toBeGreaterThan(0);
-  expect(thinkingUpdates.every((event) => Array.from(String(event.payload.delta)).length <= 160)).toBe(true);
+  expect(thinkingUpdates.every((event) => Array.from(String(event.payload.delta)).length <= 80)).toBe(true);
   expect(thinkingUpdates.map((event) => String(event.payload.delta)).join("\n")).not.toMatch(/\*\*|__|```|^\s*(?:#{1,6}|[-*+]\s)/mu);
   expect(thinkingUpdates.some((event) => event.payload.agent === "planner")).toBe(true);
-  expect(thinkingUpdates.some((event) => event.payload.agent === "researcher")).toBe(true);
   expect(thinkingUpdates.some((event) => event.payload.agent === "reflector")).toBe(true);
   expect(thinkingUpdates.some((event) => event.payload.agent === "verifier")).toBe(true);
+  expect(thinkingUpdates.some((event) => ["supervisor", "researcher", "writer"].includes(String(event.payload.agent)))).toBe(false);
   expect(thinkingUpdates.some((event) => event.seq > (completedTool?.seq || 0))).toBe(true);
   const thinkingTextById = new Map<string, string>();
   for (const event of thinkingUpdates) {
@@ -335,7 +392,11 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
       __thinkingDisclosureHistory?: Record<string, string[]>;
       __sourceStreamHistory?: Record<string, string[]>;
       __answerLengthHistory?: number[];
+      __streamFrameObserver?: number;
+      __recordStreamFrame?: () => void;
     };
+    runtime.__recordStreamFrame?.();
+    if (runtime.__streamFrameObserver) cancelAnimationFrame(runtime.__streamFrameObserver);
     return {
       histories: runtime.__thinkingStreamHistory || {},
       labels: runtime.__thinkingLabelHistory || [],
@@ -352,7 +413,10 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     expect(history.length).toBeGreaterThan(1);
     expect(history.at(-1)).toBe(text);
     for (let index = 1; index < history.length; index += 1) {
-      expect(Array.from(history[index]).length).toBeGreaterThan(Array.from(history[index - 1]).length);
+      const previous = history[index - 1].replace(/\n/gu, "");
+      const current = history[index].replace(/\n/gu, "");
+      expect(current.startsWith(previous)).toBe(true);
+      expect(graphemeCount(current) - graphemeCount(previous)).toBe(1);
     }
     const disclosure = streamObservation.disclosures[segment[0].id] || [];
     const firstCollapsed = disclosure.findIndex((frame) => frame.endsWith("|false"));
@@ -367,7 +431,8 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     expect(history.length).toBeGreaterThan(1);
     expect(history.some((frame) => frame.includes(text))).toBe(true);
     for (let index = 1; index < history.length; index += 1) {
-      expect(Array.from(history[index]).length).toBeGreaterThanOrEqual(Array.from(history[index - 1]).length);
+      expect(history[index].startsWith(history[index - 1])).toBe(true);
+      expect(graphemeCount(history[index]) - graphemeCount(history[index - 1])).toBe(1);
     }
   }
   const answerDelta = events
@@ -378,10 +443,11 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     .reverse()
     .find((event) => event.type === "message.completed" && typeof event.payload.text === "string");
   expect(answerDelta).toBe(String(completedAnswer?.payload.text || ""));
+  expect(graphemeCount(answerDelta)).toBeLessThanOrEqual(maxLiveAnswerGraphemes);
   expect(streamObservation.answerLengths.length).toBeGreaterThan(1);
   expect(streamObservation.answerLengths.at(-1)).toBe(Array.from(answerDelta).length);
   for (let index = 1; index < streamObservation.answerLengths.length; index += 1) {
-    expect(streamObservation.answerLengths[index]).toBeGreaterThan(streamObservation.answerLengths[index - 1]);
+    expect(streamObservation.answerLengths[index] - streamObservation.answerLengths[index - 1]).toBe(1);
   }
   const thinkingBlocks = page.locator("[data-thinking-id]");
   await expect(thinkingBlocks).toHaveCount(thinkingSegments.length);
@@ -419,34 +485,36 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect(conversationText).not.toMatch(forbiddenPublicText);
   await expect(conversation.locator('a[href^="http"]').first()).toBeVisible();
 
-  const countHistory = await page.evaluate(() => (window as typeof window & { __searchCountHistory?: string[] }).__searchCountHistory || []);
-  const increments = countHistory.flatMap((text) => {
-    const match = text.match(/找到 (\d+) 条结果，读取 (\d+) 个来源/u);
-    return match ? [[Number(match[1]), Number(match[2])]] : [];
-  });
-  expect(increments.at(-1)).toEqual([searchStats[0].results, searchStats[0].verified]);
-  for (let index = 1; index < increments.length; index += 1) {
-    expect(increments[index][0]).toBeGreaterThanOrEqual(increments[index - 1][0]);
-    expect(increments[index][1]).toBeGreaterThanOrEqual(increments[index - 1][1]);
+  const settlementHistory = await page.evaluate(() =>
+    (window as typeof window & { __searchSettlementHistory?: string[][] }).__searchSettlementHistory || []);
+  expect(settlementHistory.at(-1)).toEqual(searchStats[0].settlements);
+  for (let index = 1; index < settlementHistory.length; index += 1) {
+    const previous = settlementHistory[index - 1];
+    const current = settlementHistory[index];
+    expect(current.slice(0, previous.length)).toEqual(previous);
+    expect(current.length).toBeGreaterThan(previous.length);
   }
-  if (searchSegments[0].length > 1) expect(increments.length).toBeGreaterThan(1);
+  if (searchSegments[0].length > 1) expect(settlementHistory.length).toBeGreaterThan(1);
 
   const evidenceDirectory = path.resolve(process.cwd(), "..", "..", "docs", "development", "evidence");
   await mkdir(evidenceDirectory, { recursive: true });
   await thinkingBlocks.first().scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-29-issue-9-desktop.png"), fullPage: true });
+  await page.screenshot({ path: path.join(evidenceDirectory, "2026-08-01-issue-10-desktop.png"), fullPage: true });
 
   await page.reload();
   const restoredSearchSummaries = page.locator("[data-search-activity-summary]");
   await expect(restoredSearchSummaries).toHaveCount(searchSegments.length);
   for (const [index, stats] of searchStats.entries()) {
     const restoredSummary = restoredSearchSummaries.nth(index);
-    await expect(restoredSummary).toContainText(`找到 ${stats.results} 条结果，读取 ${stats.verified} 个来源`);
-    if (stats.verified) {
-      await restoredSummary.getByRole("button", { name: "展开搜索详情" }).click();
-      await expect(restoredSummary.locator("[data-search-activity-details] a")).toHaveCount(stats.verified);
-      await restoredSummary.getByRole("button", { name: "收起搜索详情" }).click();
+    await expect(restoredSummary.locator("button span")).toHaveText("搜索记录");
+    await restoredSummary.getByRole("button", { name: "展开搜索详情" }).click();
+    const restoredSettlements = restoredSummary.locator("[data-search-settlement]");
+    await expect(restoredSettlements).toHaveCount(stats.settlements.length);
+    for (const [settlementIndex, text] of stats.settlements.entries()) {
+      await expect(restoredSettlements.nth(settlementIndex)).toHaveText(text);
     }
+    await expect(restoredSummary.locator("[data-search-activity-details] a")).toHaveCount(stats.details);
+    await restoredSummary.getByRole("button", { name: "收起搜索详情" }).click();
   }
   const restoredRows = page.getByTestId("conversation-viewport").locator("[data-thinking-id], [data-search-activity-summary]");
   await expect(restoredRows).toHaveCount(activitySegments.length);
@@ -466,7 +534,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   const overflow = await page.locator("body").evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   await thinkingBlocks.first().scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(evidenceDirectory, "2026-07-29-issue-9-mobile.png"), fullPage: true });
+  await page.screenshot({ path: path.join(evidenceDirectory, "2026-08-01-issue-10-mobile.png"), fullPage: true });
   expect(recoveredSseProtocolErrors.length).toBeLessThanOrEqual(4);
   expect(browserErrors).toEqual([]);
 });

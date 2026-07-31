@@ -21,6 +21,8 @@ type SearchResult struct {
 	} `json:"search"`
 }
 
+const searchReadTimeout = 12 * time.Second
+
 // FilterOption 筛选选项结构体
 type FilterOption struct {
 	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
@@ -98,10 +100,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		return nil, err
 	}
 
-	page := s.page.Context(ctx)
+	searchCtx, cancel := context.WithTimeout(ctx, searchReadTimeout)
+	defer cancel()
+	page := s.page.Context(searchCtx)
 
 	searchURL := makeSearchURL(keyword)
-	if err := page.Timeout(10 * time.Second).Navigate(searchURL); err != nil {
+	if err := page.Timeout(8 * time.Second).Navigate(searchURL); err != nil {
 		return nil, fmt.Errorf("打开搜索页失败: %w", err)
 	}
 	// 搜索页有持续的埋点和推荐请求，等待整个页面进入 network-idle 会把
@@ -109,21 +113,30 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	// 状态；若平台跳转到安全验证则立即返回，让 LangGraph 切换公开/Web
 	// 策略，而不是在验证码页面空等 30 秒。
 	if err := rod.Try(func() {
-		page.Timeout(30 * time.Second).MustWait(`() => {
+		page.Timeout(10 * time.Second).MustWait(`() => {
 			if (window.location.pathname.startsWith("/website-login/captcha")) {
 				return true;
 			}
 			const feeds = window.__INITIAL_STATE__?.search?.feeds;
 			if (!feeds) return false;
-			const value = feeds.value !== undefined ? feeds.value : feeds._value;
+			const value = feeds.value !== undefined
+				? feeds.value
+				: (feeds._value !== undefined ? feeds._value : feeds);
 			// 搜索页会先创建一个空的响应式数组，再异步写入结果。只判断字段
 			// 存在会在空数组阶段立即返回，令调用方误报“搜索成功但 0 条”。
 			return Array.isArray(value) && value.length > 0;
 		}`)
 	}); err != nil {
+		if searchCtx.Err() != nil {
+			return nil, searchCtx.Err()
+		}
 		return nil, fmt.Errorf("等待搜索结果超时: %w", err)
 	}
-	if page.MustEval(`() => window.location.pathname.startsWith("/website-login/captcha")`).Bool() {
+	captcha, err := page.Eval(`() => window.location.pathname.startsWith("/website-login/captcha")`)
+	if err != nil {
+		return nil, fmt.Errorf("读取搜索页状态失败: %w", err)
+	}
+	if captcha.Value.Bool() {
 		return nil, fmt.Errorf("小红书要求安全验证")
 	}
 
@@ -154,21 +167,27 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 
-		waitFeedsChanged(page, before, 15*time.Second)
+		waitFeedsChanged(searchCtx, page, before, 8*time.Second)
 	}
 
-	result := page.MustEval(`() => {
+	evaluated, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
 		    window.__INITIAL_STATE__.search.feeds) {
 			const feeds = window.__INITIAL_STATE__.search.feeds;
-			const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
+			const feedsData = feeds.value !== undefined
+				? feeds.value
+				: (feeds._value !== undefined ? feeds._value : feeds);
 			if (feedsData) {
 				return JSON.stringify(feedsData);
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("读取搜索结果失败: %w", err)
+	}
+	result := evaluated.Value.String()
 
 	if result == "" {
 		return nil, errors.ErrNoFeeds
@@ -185,7 +204,9 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。
 const feedIDsJS = `() => {
 	const f = window.__INITIAL_STATE__?.search?.feeds;
-	const v = f ? (f.value !== undefined ? f.value : f._value) : null;
+	const v = f
+		? (f.value !== undefined ? f.value : (f._value !== undefined ? f._value : f))
+		: null;
 	return v ? v.map(x => x.id).join(",") : "";
 }`
 
@@ -205,13 +226,20 @@ func readFeedIDs(page *rod.Page) string {
 // 立即返回，等于没等——多个筛选项一起用时表现为只有一部分生效。
 //
 // 超时不报错：筛选已经点上了，宁可返回可能偏旧的数据，也不要整个搜索失败。
-func waitFeedsChanged(page *rod.Page, before string, timeout time.Duration) {
+func waitFeedsChanged(ctx context.Context, page *rod.Page, before string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
 		if now := readFeedIDs(page); now != "" && now != before {
 			return
 		}
-		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
 	logrus.Warnf("筛选后等待结果刷新超时（%s），返回的可能是筛选前的数据", timeout)
 }

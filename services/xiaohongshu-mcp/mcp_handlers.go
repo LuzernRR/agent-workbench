@@ -317,13 +317,7 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 	result, err := s.xiaohongshuService.SearchFeeds(ctx, args.Keyword, filter)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "搜索Feeds失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
+		return mcpReadErrorResult(err)
 	}
 
 	jsonData, err := json.MarshalIndent(result, "", "  ")
@@ -384,6 +378,20 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 			loadAll = v != 0
 		}
 	}
+	xsecSource := xiaohongshu.FeedDetailSourcePCFeed
+	if raw, ok := args["xsec_source"].(string); ok && raw != "" {
+		normalized, sourceErr := xiaohongshu.NormalizeFeedDetailSource(raw)
+		if sourceErr != nil {
+			return &MCPToolResult{
+				Content: []MCPContent{{
+					Type: "text",
+					Text: "获取Feed详情失败: 详情来源参数无效",
+				}},
+				IsError: true,
+			}
+		}
+		xsecSource = normalized
+	}
 
 	// 解析评论配置参数，如果未提供则使用默认值
 	config := xiaohongshu.DefaultCommentLoadConfig()
@@ -431,15 +439,16 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 	logrus.Infof("MCP: 获取Feed详情 - Feed ID: %s, loadAllComments=%v, config=%+v", feedID, loadAll, config)
 
-	result, err := s.xiaohongshuService.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAll, config)
+	result, err := s.xiaohongshuService.GetFeedDetailWithConfigAndSource(
+		ctx,
+		feedID,
+		xsecToken,
+		loadAll,
+		config,
+		xsecSource,
+	)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取Feed详情失败: " + err.Error(),
-			}},
-			IsError: true,
-		}
+		return mcpReadErrorResult(err)
 	}
 
 	jsonData, err := json.MarshalIndent(result, "", "  ")

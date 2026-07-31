@@ -116,8 +116,7 @@ describe("createRenderQueue", () => {
     const queue = createRenderQueue({
       apply: (e) => applied.push(String(e.payload.delta ?? "")),
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 1
+      cancelFrame: frames.cancelFrame
     });
     // A multi-code-unit emoji must not be split across frames.
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "🚀火箭" }));
@@ -126,7 +125,31 @@ describe("createRenderQueue", () => {
     expect(applied[0]).toBe("🚀");
   });
 
-  it("bounds tail latency for a large backlog instead of one-per-frame", () => {
+  it.each(["text.delta", "thinking.delta", "tool.source.delta"] as const)(
+    "streams each %s payload as one extended grapheme per frame",
+    (type) => {
+      const frames = manualFrames();
+      const applied: string[] = [];
+      const queue = createRenderQueue({
+        apply: (e) => applied.push(String(e.payload.delta ?? "")),
+        requestFrame: frames.requestFrame,
+        cancelFrame: frames.cancelFrame
+      });
+      queue.enqueue(event(1, type, {
+        messageId: "m1",
+        thinkingId: "thinking-one",
+        paragraphId: "paragraph-one",
+        toolCallId: "search-one",
+        url: "https://example.com/source",
+        delta: "👨‍👩‍👧‍👦好"
+      }));
+
+      expect(frames.flush()).toBe(2);
+      expect(applied).toEqual(["👨‍👩‍👧‍👦", "好"]);
+    }
+  );
+
+  it("never accelerates a large backlog beyond one grapheme per frame", () => {
     const frames = manualFrames();
     let count = 0;
     const queue = createRenderQueue({
@@ -134,22 +157,16 @@ describe("createRenderQueue", () => {
         count += 1;
       },
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 45,
-      maxCharsPerFrame: 120
+      cancelFrame: frames.cancelFrame
     });
     const big = "字".repeat(3000);
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: big }));
     const drawn = frames.flush();
     expect(count).toBe(3000);
-    // A one-char-per-frame loop would need 3000 frames (~50s @60fps). Adaptive
-    // draining must clear it in an order of magnitude fewer frames (~250 ≈ 4s)
-    // while staying continuous, never dumping the whole delta at once.
-    expect(drawn).toBeLessThan(250);
-    expect(drawn).toBeGreaterThan(30);
+    expect(drawn).toBe(3000);
   });
 
-  it("drains faster once a terminal event is queued behind the draft", () => {
+  it("does not let a terminal event accelerate or overtake answer text", () => {
     const frames = manualFrames();
     let chars = 0;
     const queue = createRenderQueue({
@@ -157,18 +174,13 @@ describe("createRenderQueue", () => {
         if (e.type === "text.delta") chars += 1;
       },
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 200,
-      terminalFrames: 5,
-      maxCharsPerFrame: 500
+      cancelFrame: frames.cancelFrame
     });
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "字".repeat(1000) }));
     queue.enqueue(event(2, "run.completed", {}));
     const drawn = frames.flush();
     expect(chars).toBe(1000);
-    // terminalFrames (5) drains the 1000-char backlog far faster than the loose
-    // targetFrames (200) would.
-    expect(drawn).toBeLessThan(30);
+    expect(drawn).toBe(1001);
   });
 
   it("applies a queued terminal only after the preceding text has drained", () => {
@@ -177,8 +189,7 @@ describe("createRenderQueue", () => {
     const queue = createRenderQueue({
       apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : e.type),
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 10
+      cancelFrame: frames.cancelFrame
     });
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "abcdef" }));
     queue.enqueue(event(2, "run.completed", {}));
@@ -208,8 +219,8 @@ describe("createRenderQueue", () => {
     const drawn = frames.flush();
 
     expect(visible).toBe(answer);
-    expect(snapshots.length).toBeGreaterThan(20);
-    expect(drawn).toBeGreaterThan(20);
+    expect(snapshots.length).toBe(Array.from(answer).length);
+    expect(drawn).toBeGreaterThanOrEqual(snapshots.length);
   });
 
   it("preserves non-text ordering: tool events apply after earlier text drains", () => {
@@ -218,8 +229,7 @@ describe("createRenderQueue", () => {
     const queue = createRenderQueue({
       apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : e.type),
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 10
+      cancelFrame: frames.cancelFrame
     });
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "abc" }));
     queue.enqueue(event(2, "tool.started", { toolCallId: "t1" }));
@@ -228,27 +238,25 @@ describe("createRenderQueue", () => {
     expect(order).toEqual(["a", "b", "c", "tool.started", "d", "e"]);
   });
 
-  it("drops the unrendered tail of a draft on message.reset but keeps prior control events", () => {
+  it("keeps the existing draft immutable when a legacy message.reset arrives", () => {
     const frames = manualFrames();
     const order: string[] = [];
     const queue = createRenderQueue({
       apply: (e) => order.push(e.type === "text.delta" ? String(e.payload.delta) : `[${e.type}]`),
       requestFrame: frames.requestFrame,
-      cancelFrame: frames.cancelFrame,
-      targetFrames: 10
+      cancelFrame: frames.cancelFrame
     });
-    // Queue a large draft plus a preceding tool event, then reset before draining.
+    // The reset is ordered after the already-durable draft and cannot erase it.
     queue.enqueue(event(1, "tool.completed", { toolCallId: "t1" }));
     queue.enqueue(event(2, "text.delta", { messageId: "m1", delta: "废弃的草稿内容" }));
     queue.enqueue(event(3, "message.reset", { messageId: "m1", text: "" }));
     frames.flush();
-    // The discarded draft characters never render; the tool event and the reset do.
-    expect(order.some((entry) => entry.length === 1 && "废弃的草稿内容".includes(entry))).toBe(false);
+    expect(order.filter((entry) => entry.length === 1).join("")).toBe("废弃的草稿内容");
     expect(order).toContain("[tool.completed]");
     expect(order).toContain("[message.reset]");
   });
 
-  it("flushes hidden-page backlog without waiting for animation frames", () => {
+  it("flush still applies one grapheme per reducer mutation", () => {
     const frames = manualFrames();
     const applied: AgentEvent[] = [];
     const queue = createRenderQueue({
@@ -261,10 +269,30 @@ describe("createRenderQueue", () => {
 
     queue.flush();
 
-    expect(applied.map((value) => value.type)).toEqual(["text.delta", "run.completed"]);
-    expect(applied[0].payload.delta).toBe("后台继续生成");
-    expect(applied[0].seq).toBe(1);
+    expect(applied.map((value) => value.type)).toEqual([
+      "text.delta", "text.delta", "text.delta", "text.delta", "text.delta", "text.delta", "run.completed"
+    ]);
+    expect(applied.slice(0, -1).map((value) => value.payload.delta).join("")).toBe("后台继续生成");
+    expect(applied.slice(0, -1).every((value) => Array.from(String(value.payload.delta)).length === 1)).toBe(true);
     expect(frames.flush()).toBe(0);
+  });
+
+  it("normalizes a legacy whole thinking paragraph into append-only deltas", () => {
+    const frames = manualFrames();
+    const applied: AgentEvent[] = [];
+    const queue = createRenderQueue({
+      apply: (value) => applied.push(value),
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+    queue.enqueue(event(1, "thinking.paragraph", {
+      thinkingId: "thinking-one",
+      paragraphId: "paragraph-one",
+      text: "新增证据"
+    }));
+    frames.flush();
+    expect(applied.every((value) => value.type === "thinking.delta")).toBe(true);
+    expect(applied.map((value) => value.payload.delta).join("")).toBe("新增证据");
   });
 
   it("stops applying events after dispose", () => {

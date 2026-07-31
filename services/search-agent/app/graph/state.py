@@ -88,9 +88,14 @@ class SearchTrace(TypedDict):
     channel: ChannelName
     provider: str
     status: Literal["completed", "failed", "unknown", "cached"]
+    outcome_status: Literal["success", "degraded", "failed"]
+    primary_provider: str
+    effective_provider: str
     result_count: int
     evidence_count: int
     error_code: str | None
+    retryable: bool
+    next_action: str
     limitation: str | None
 
 

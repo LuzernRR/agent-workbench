@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
+import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
+import type { AgentEvent } from "@/lib/agent-events/types";
+import { parseSearchAgentEvent } from "@/server/search-agent/events";
+import { mapSearchAgentEvent } from "@/server/search-agent/mapper";
 import { ActivityRow, isPlaceholderTool, SearchActivitySummary, summarizeSearchActivity } from "./ActivityRow";
 
 describe("isPlaceholderTool", () => {
@@ -126,17 +130,18 @@ describe("SearchActivitySummary", () => {
     const view = render(createElement(SearchActivitySummary, { items: [running] }));
 
     expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
-    expect(view.container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(view.container).toHaveTextContent("搜索记录");
     expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源给出了当前检索所需的有效信息。");
 
     view.rerender(createElement(SearchActivitySummary, {
       items: [{ ...running, status: "completed" as const }]
     }));
     expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
-    expect(view.container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(view.container).toHaveTextContent("搜索记录");
     expect(view.container.querySelector("[data-search-activity-details]")).toBeNull();
 
     fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    expect(view.container.querySelector("[data-search-settlement]")).toHaveTextContent("找到 2 条结果，读取 1 个来源");
     expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源给出了当前检索所需的有效信息。");
 
     const nextRunning = {
@@ -150,7 +155,8 @@ describe("SearchActivitySummary", () => {
       items: [{ ...running, status: "completed" as const }, nextRunning]
     }));
     expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
-    expect(view.container).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+    expect(view.container.querySelectorAll("[data-search-settlement]")).toHaveLength(1);
+    expect(view.container.querySelector("[data-search-settlement]")).toHaveTextContent("找到 2 条结果，读取 1 个来源");
     expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("下一轮读取了另一条有效来源。");
 
     view.rerender(createElement(SearchActivitySummary, {
@@ -160,7 +166,11 @@ describe("SearchActivitySummary", () => {
       ]
     }));
     expect(within(view.container).getByRole("button", { name: "展开搜索详情" })).toHaveAttribute("aria-expanded", "false");
-    expect(view.container).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    const settlements = view.container.querySelectorAll("[data-search-settlement]");
+    expect(settlements).toHaveLength(2);
+    expect(settlements[0]).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(settlements[1]).toHaveTextContent("找到 3 条结果，读取 1 个来源");
   });
 
   it("来源文字仍在流式展示时重新展开，展示完成后自动折叠", () => {
@@ -235,20 +245,24 @@ describe("SearchActivitySummary", () => {
     const { container } = render(createElement(SearchActivitySummary, { items }));
 
     const line = container.querySelector("[data-search-activity-summary]");
-    expect(line).toHaveTextContent("找到 10 条结果，读取 2 个来源");
+    expect(line).toHaveTextContent("搜索记录");
     expect(line).toHaveAttribute("data-tool-call-count", "2");
     expect(line).toHaveAttribute("data-tool-call-ids", "search-1,search-2");
     const toggle = container.querySelector('button[aria-label="展开搜索详情"]');
     expect(toggle).not.toBeNull();
     fireEvent.click(toggle!);
     const detailPanel = container.querySelector("[data-search-activity-details]");
+    const settlements = detailPanel?.querySelectorAll("[data-search-settlement]");
+    expect(settlements).toHaveLength(2);
+    expect(settlements?.[0]).toHaveTextContent("找到 5 条结果，读取 1 个来源");
+    expect(settlements?.[1]).toHaveTextContent("找到 5 条结果，读取 2 个来源");
     expect(detailPanel).toHaveTextContent("网页 · 后一轮对同一来源给出了更新说明。");
     expect(detailPanel).not.toHaveTextContent("这条帖子介绍了状态图的公开实践。");
     expect(detailPanel).toHaveTextContent("另一来源补充了状态持久化的实现细节。");
     expect(detailPanel).not.toHaveTextContent("来源二");
     expect(detailPanel).not.toHaveTextContent(/搜索服务|执行耗时|检索查询|检索计划|核验结论/u);
     expect(within(detailPanel as HTMLElement).queryByText("状态")).not.toBeInTheDocument();
-    expect(detailPanel?.querySelectorAll("p")).toHaveLength(2);
+    expect(detailPanel?.querySelectorAll("p")).toHaveLength(4);
     expect(detailPanel?.querySelectorAll("a")).toHaveLength(2);
     expect(container.querySelector("table")).toBeNull();
   });
@@ -290,13 +304,14 @@ describe("SearchActivitySummary", () => {
     ];
     const { container } = render(createElement(SearchActivitySummary, { items }));
 
-    expect(container).toHaveTextContent("找到 2 条结果，读取 1 个来源");
+    expect(container).toHaveTextContent("搜索记录");
     fireEvent.click(within(container).getByRole("button", { name: "展开搜索详情" }));
+    expect(container.querySelectorAll("[data-search-settlement]")).toHaveLength(2);
     expect(container.querySelectorAll("[data-search-activity-details] a")).toHaveLength(1);
     expect(container.querySelector("[data-search-activity-details]")).toHaveTextContent("该来源的说明已由 Agent 润色。");
   });
 
-  it("同一摘要行随真实完成事件逐次累加计数", () => {
+  it("每个真实完成事件新增一条不可改写的完成记录", () => {
     const first = {
       kind: "tool" as const,
       id: "tool:search-1",
@@ -331,15 +346,125 @@ describe("SearchActivitySummary", () => {
       ]
     };
     const view = render(createElement(SearchActivitySummary, { items: [first] }));
-    expect(view.container).toHaveTextContent("找到 5 条结果，读取 1 个来源");
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    expect(view.container.querySelectorAll("[data-search-settlement]")).toHaveLength(1);
+    expect(view.container.querySelector("[data-search-settlement]")).toHaveTextContent("找到 5 条结果，读取 1 个来源");
     view.rerender(createElement(SearchActivitySummary, { items: [first, second] }));
-    expect(view.container).toHaveTextContent("找到 10 条结果，读取 3 个来源");
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    let settlements = view.container.querySelectorAll("[data-search-settlement]");
+    expect(settlements).toHaveLength(2);
+    expect(settlements[0]).toHaveTextContent("找到 5 条结果，读取 1 个来源");
+    expect(settlements[1]).toHaveTextContent("找到 5 条结果，读取 2 个来源");
     view.rerender(createElement(SearchActivitySummary, { items: [first, second, third] }));
-    expect(view.container).toHaveTextContent("找到 15 条结果，读取 4 个来源");
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开搜索详情" }));
+    settlements = view.container.querySelectorAll("[data-search-settlement]");
+    expect(settlements).toHaveLength(3);
+    expect(settlements[0]).toHaveTextContent("找到 5 条结果，读取 1 个来源");
+    expect(settlements[1]).toHaveTextContent("找到 5 条结果，读取 2 个来源");
+    expect(settlements[2]).toHaveTextContent("找到 5 条结果，读取 2 个来源");
   });
 });
 
 describe("ActivityRow activity disclosure", () => {
+  it("完整保留受控降级事件并在刷新重建后显示首选与实际服务", () => {
+    const eventBase = {
+      version: 1 as const,
+      streamId: "stream_degraded",
+      createdAt: "2026-08-01T00:00:00.000Z"
+    };
+    const started = parseSearchAgentEvent({
+      ...eventBase,
+      eventId: "event_degraded_1",
+      streamSeq: 1,
+      seq: 1,
+      type: "tool.started",
+      toolCallId: "call_degraded",
+      toolName: "web_search",
+      query: "AI 编程工具",
+      channel: "xiaohongshu",
+      cached: false
+    });
+    const completed = parseSearchAgentEvent({
+      ...eventBase,
+      eventId: "event_degraded_2",
+      streamSeq: 2,
+      seq: 2,
+      type: "tool.completed",
+      toolCallId: "call_degraded",
+      toolName: "web_search",
+      query: "AI 编程工具",
+      channel: "xiaohongshu",
+      provider: "xiaohongshu-mcp",
+      status: "degraded",
+      primaryProvider: "xiaohongshu-mcp",
+      effectiveProvider: "tavily",
+      reasonCode: "MCP_TIMEOUT",
+      message: "小红书读取超时，已使用受控备用渠道",
+      retryable: true,
+      nextAction: "use_fallback",
+      summary: "已使用备用公开搜索读取 1 个来源",
+      resultCount: 3,
+      evidenceCount: 1,
+      results: [{
+        channel: "web",
+        provider: "tavily",
+        query: "AI 编程工具",
+        title: "公开来源",
+        url: "https://example.com/evidence",
+        snippet: "可核验正文",
+        verified: true,
+        author: null,
+        published_at: null,
+        metrics: {},
+        limitation: null,
+        provenance: {
+          discovery_provider: "tavily",
+          detail_provider: "trafilatura",
+          source_kind: "public_page",
+          observed_at: "2026-08-01T00:00:00.000Z",
+          confidence: "high"
+        }
+      }],
+      cached: false,
+      durationMs: 4200
+    });
+    const persisted = [started, completed].flatMap((sourceEvent) =>
+      mapSearchAgentEvent(sourceEvent, "run-degraded").events
+    ).map((projected, index) => ({
+      id: `persisted-${index + 1}`,
+      projectId: "project",
+      threadId: "thread",
+      runId: "run-degraded",
+      seq: index + 1,
+      type: projected.type,
+      payload: projected.payload,
+      createdAt: "2026-08-01T00:00:00.000Z"
+    } satisfies AgentEvent));
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), persisted);
+    const rebuilt = reduceAgentEvents(createEmptyThreadState("project", "thread"), persisted);
+    expect(rebuilt).toEqual(state);
+
+    const item = state.items["tool:call_degraded"];
+    expect(item).toMatchObject({
+      kind: "tool",
+      outcomeStatus: "degraded",
+      primaryProvider: "xiaohongshu-mcp",
+      effectiveProvider: "tavily",
+      reasonCode: "MCP_TIMEOUT",
+      retryable: true,
+      nextAction: "use_fallback"
+    });
+    if (!item || item.kind !== "tool") throw new Error("缺少受控降级工具项");
+    const view = render(createElement(ActivityRow, { item }));
+    fireEvent.click(within(view.container).getByRole("button", { name: "展开工具调用：小红书搜索" }));
+    expect(view.container).toHaveTextContent("受控降级");
+    expect(view.container).toHaveTextContent("小红书读取超时，已使用受控备用渠道");
+    expect(view.container).toHaveTextContent("搜索服务tavily");
+    expect(view.container).toHaveTextContent("首选服务xiaohongshu-mcp");
+    expect(view.container).toHaveTextContent("已使用受控备用渠道");
+    expect(within(view.container).getByRole("link", { name: "公开来源" })).toHaveAttribute("href", "https://example.com/evidence");
+  });
+
   it("普通工具进行中自动展开，完成后折叠且允许手动查看", () => {
     const running = {
       kind: "tool" as const,

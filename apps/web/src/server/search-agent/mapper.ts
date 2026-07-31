@@ -58,7 +58,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
   if (event.type === "node.completed") {
     // verify 由 verification.completed 单独投影，避免混入“思考”。其余节点
     // 在完成时创建独立活动原子；前端只合并时间上相邻的同类原子。
-    if (!event.publicSummary || event.node === "verify") return { events: [] };
+    if (!event.publicSummary || !["plan_research", "reflect"].includes(event.node)) return { events: [] };
     const id = activityId("thinking", runId, event.nodeRunId);
     return { events: [
       { type: "thinking.started", payload: { thinkingId: id, activityKind: "thinking" } },
@@ -111,7 +111,25 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     const sources = event.results
       .map((result) => verifiedSource(result))
       .filter((result): result is NonNullable<typeof result> => Boolean(result));
-    return { events: [{ type: "tool.completed", payload: { toolCallId: event.toolCallId, summary: oneLine(event.summary), channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), resultCount: event.resultCount, evidenceCount: event.evidenceCount, sources, cached: event.cached, durationMs: event.durationMs } }] };
+    return { events: [{ type: "tool.completed", payload: {
+      toolCallId: event.toolCallId,
+      settlementSummary: oneLine(event.summary),
+      channel: event.channel,
+      query: oneLine(event.query, 300),
+      provider: oneLine(event.effectiveProvider || event.provider, 80),
+      outcomeStatus: event.status || "success",
+      primaryProvider: oneLine(event.primaryProvider || event.provider, 80),
+      effectiveProvider: oneLine(event.effectiveProvider || event.provider, 80),
+      reasonCode: event.reasonCode || undefined,
+      resolutionMessage: event.message ? oneLine(event.message) : undefined,
+      retryable: event.retryable || false,
+      nextAction: event.nextAction || "none",
+      resultCount: event.resultCount,
+      evidenceCount: event.evidenceCount,
+      sources,
+      cached: event.cached,
+      durationMs: event.durationMs
+    } }] };
   }
   if (event.type === "tool.presented") {
     const sourcePresentations = event.sources.map((source) => ({
@@ -146,7 +164,24 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
       : { events: [] };
   }
   if (event.type === "tool.failed") {
-    return { events: [{ type: "tool.failed", payload: { toolCallId: event.toolCallId, summary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成", channel: event.channel, query: oneLine(event.query, 300), provider: oneLine(event.provider, 80), error: event.reasonCode, retryable: event.retryable, resultCount: event.resultCount ?? 0, evidenceCount: event.evidenceCount ?? 0, durationMs: event.durationMs } }] };
+    return { events: [{ type: "tool.failed", payload: {
+      toolCallId: event.toolCallId,
+      settlementSummary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成",
+      channel: event.channel,
+      query: oneLine(event.query, 300),
+      provider: oneLine(event.effectiveProvider || event.provider, 80),
+      outcomeStatus: event.status || "failed",
+      primaryProvider: oneLine(event.primaryProvider || event.provider, 80),
+      effectiveProvider: oneLine(event.effectiveProvider || event.provider, 80),
+      error: event.reasonCode,
+      reasonCode: event.reasonCode,
+      resolutionMessage: oneLine(event.message),
+      retryable: event.retryable,
+      nextAction: event.nextAction || "stop",
+      resultCount: event.resultCount ?? 0,
+      evidenceCount: event.evidenceCount ?? 0,
+      durationMs: event.durationMs
+    } }] };
   }
   if (event.type === "tool.unknown") {
     return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", channel: event.channel, query: oneLine(event.query, 300), error: event.reasonCode } }] };

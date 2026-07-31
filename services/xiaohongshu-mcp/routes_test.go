@@ -148,3 +148,26 @@ func TestRecoveryReturnsStable500WithoutSerializingOrLoggingSecrets(t *testing.T
 	assert.NotContains(t, logs.String(), secret)
 	assert.Contains(t, logs.String(), "type=main.sensitivePanic")
 }
+
+func TestFeedDetailRejectsUnknownXsecSourceBeforeBrowserAccess(t *testing.T) {
+	router := setupRoutes(NewAppServer(NewXiaohongshuService()))
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/feeds/detail",
+		strings.NewReader(`{
+			"feed_id":"feed123",
+			"xsec_token":"token123456",
+			"xsec_source":"pc_note"
+		}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+	assert.JSONEq(t, `{
+		"error":"详情来源参数无效",
+		"code":"INVALID_REQUEST"
+	}`, response.Body.String())
+}

@@ -293,7 +293,7 @@ test("流式输出尊重用户向上滚动并由用户决定恢复跟随", async
   await expect(page.getByRole("button", { name: "复制完整回复" })).toHaveCount(5);
 });
 
-test("后台页面冻结动画帧时仍持续接收并完成输出", async ({ page }) => {
+test("后台页面冻结动画帧时接收耐久事件，恢复后继续逐字输出", async ({ page }) => {
   await openWorkbench(page);
   const thread = await createThread(page, `后台输出验收-${Date.now()}`);
   await page.goto(`/workbench/t/${thread.id}`);
@@ -302,31 +302,50 @@ test("后台页面冻结动画帧时仍持续接收并完成输出", async ({ pa
     const host = window as typeof window & {
       __nativeRequestAnimationFrame?: typeof window.requestAnimationFrame;
       __nativeCancelAnimationFrame?: typeof window.cancelAnimationFrame;
+      __pendingAnimationFrames?: FrameRequestCallback[];
     };
     host.__nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
     host.__nativeCancelAnimationFrame = window.cancelAnimationFrame.bind(window);
+    host.__pendingAnimationFrames = [];
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
-    window.requestAnimationFrame = (() => 1) as typeof window.requestAnimationFrame;
-    window.cancelAnimationFrame = (() => undefined) as typeof window.cancelAnimationFrame;
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      host.__pendingAnimationFrames?.push(callback);
+      return host.__pendingAnimationFrames?.length || 1;
+    }) as typeof window.requestAnimationFrame;
+    window.cancelAnimationFrame = ((handle: number) => {
+      if (host.__pendingAnimationFrames) host.__pendingAnimationFrames[handle - 1] = () => undefined;
+    }) as typeof window.cancelAnimationFrame;
     document.dispatchEvent(new Event("visibilitychange"));
   });
 
+  const runResponsePromise = page.waitForResponse((response) => response.request().method() === "POST"
+    && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
   await page.getByLabel("任务输入").fill("验证后台页面持续输出");
   await page.getByRole("button", { name: "发送", exact: true }).click();
+  const { runId } = await (await runResponsePromise).json() as { runId: string };
   await expect(page.getByRole("button", { name: "停止执行" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "复制完整回复" })).toHaveCount(1);
+  await expect.poll(async () => {
+    const response = await page.request.get(`/api/v1/runs/${runId}/events?after=0`);
+    return response.ok() && (await response.text()).includes("event: run.completed");
+  }).toBe(true);
+  await expect(page.getByRole("button", { name: "停止执行" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "复制完整回复" })).toHaveCount(0);
 
   await page.evaluate(() => {
     const host = window as typeof window & {
       __nativeRequestAnimationFrame?: typeof window.requestAnimationFrame;
       __nativeCancelAnimationFrame?: typeof window.cancelAnimationFrame;
+      __pendingAnimationFrames?: FrameRequestCallback[];
     };
+    const pending = [...(host.__pendingAnimationFrames || [])];
     if (host.__nativeRequestAnimationFrame) window.requestAnimationFrame = host.__nativeRequestAnimationFrame;
     if (host.__nativeCancelAnimationFrame) window.cancelAnimationFrame = host.__nativeCancelAnimationFrame;
     Reflect.deleteProperty(document, "visibilityState");
     document.dispatchEvent(new Event("visibilitychange"));
+    pending.forEach((callback) => callback(performance.now()));
   });
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "复制完整回复" })).toHaveCount(1);
 });
 
 test("模型选择把真实模型 ID 发送到运行接口", async ({ page }) => {

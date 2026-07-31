@@ -32,7 +32,26 @@ const (
 	maxSearchScrolls  = 25               // 最多下滚轮数
 	maxExpandRounds   = 5                // 最多连续展开而不下滚的轮数
 	maxSearchDuration = 90 * time.Second // 单次查找的墙钟上限
+	detailReadTimeout = 14 * time.Second
 )
+
+const (
+	FeedDetailSourcePCFeed   = "pc_feed"
+	FeedDetailSourcePCSearch = "pc_search"
+)
+
+// NormalizeFeedDetailSource 只允许平台已知的只读详情来源，避免调用方把任意
+// 查询参数拼进带签名的详情地址。
+func NormalizeFeedDetailSource(source string) (string, error) {
+	switch strings.TrimSpace(source) {
+	case "", FeedDetailSourcePCFeed:
+		return FeedDetailSourcePCFeed, nil
+	case FeedDetailSourcePCSearch:
+		return FeedDetailSourcePCSearch, nil
+	default:
+		return "", fmt.Errorf("不支持的详情来源")
+	}
+}
 
 // ========== 数据结构 ==========
 
@@ -92,51 +111,86 @@ func NewFeedDetailAction(page *rod.Page) *FeedDetailAction {
 // ========== 主要业务逻辑 ==========
 
 func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
-	return f.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAllComments, config)
+	return f.GetFeedDetailWithConfigAndSource(
+		ctx,
+		feedID,
+		xsecToken,
+		loadAllComments,
+		config,
+		FeedDetailSourcePCFeed,
+	)
 }
 
 func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
-	config = config.normalize()
+	return f.GetFeedDetailWithConfigAndSource(
+		ctx,
+		feedID,
+		xsecToken,
+		loadAllComments,
+		config,
+		FeedDetailSourcePCFeed,
+	)
+}
 
-	page := f.page.Context(ctx).Timeout(10 * time.Minute)
-	url := makeFeedDetailURL(feedID, xsecToken)
+func (f *FeedDetailAction) GetFeedDetailWithConfigAndSource(
+	ctx context.Context,
+	feedID, xsecToken string,
+	loadAllComments bool,
+	config CommentLoadConfig,
+	xsecSource string,
+) (*FeedDetailResponse, error) {
+	config = config.normalize()
+	source, err := NormalizeFeedDetailSource(xsecSource)
+	if err != nil {
+		return nil, err
+	}
+
+	detailCtx, cancel := context.WithTimeout(ctx, detailReadTimeout)
+	defer cancel()
+	page := f.page.Context(detailCtx)
+	url := makeFeedDetailURLWithSource(feedID, xsecToken, source)
 
 	logrus.Info("打开 feed 详情页")
 	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
 		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
 
-	// 使用retry-go处理页面导航和DOM稳定等待
-	err := retry.Do(
-		func() error {
-			page.MustNavigate(url)
-			page.MustWaitDOMStable()
-			return nil
-		},
-		retry.Attempts(3),
-		retry.Delay(500*time.Millisecond),
-		retry.MaxJitter(1000*time.Millisecond),
-		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("页面导航重试 #%d: %v", n, err)
-		}),
-	)
-	if err != nil {
-		logrus.Errorf("页面导航失败: %v", err)
-		return nil, err
+	if err := page.Timeout(8 * time.Second).Navigate(url); err != nil {
+		return nil, fmt.Errorf("打开详情页失败: %w", err)
 	}
-	humanize.Delay(ctx, humanize.AfterNavigate)
-
+	const detailReady = `() => {
+		if (window.location.pathname.startsWith("/website-login/captcha")) return true;
+		const raw = window.__INITIAL_STATE__?.note?.noteDetailMap;
+		const notes = raw?.value !== undefined ? raw.value : (raw?._value !== undefined ? raw._value : raw);
+		if (notes && Object.keys(notes).length > 0) return true;
+		return Boolean(document.querySelector(
+			'.access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper'
+		));
+	}`
+	if err := rod.Try(func() {
+		page.Timeout(10 * time.Second).MustWait(detailReady)
+	}); err != nil {
+		if detailCtx.Err() != nil {
+			return nil, detailCtx.Err()
+		}
+		return nil, fmt.Errorf("等待详情正文超时: %w", err)
+	}
+	if captcha, err := page.Eval(`() => window.location.pathname.startsWith("/website-login/captcha")`); err != nil {
+		return nil, fmt.Errorf("读取详情页状态失败: %w", err)
+	} else if captcha.Value.Bool() {
+		return nil, fmt.Errorf("小红书要求安全验证")
+	}
 	if err := checkPageAccessible(page); err != nil {
 		return nil, err
 	}
 
 	if loadAllComments {
-		if err := f.loadAllCommentsWithConfig(ctx, page, config); err != nil {
-			logrus.Warnf("加载全部评论失败: %v", err)
+		if err := f.loadAllCommentsWithConfig(detailCtx, page, config); err != nil {
+			logrus.Warn("加载全部评论失败，返回已读取的正文")
 		}
 	}
 
 	// ctx 已取消时直接返回，避免在已取消的 page 上执行 MustEval 触发 panic
-	if err := ctx.Err(); err != nil {
+	if err := detailCtx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -891,22 +945,16 @@ func checkEndContainer(page *rod.Page) bool {
 // ========== 页面检查 ==========
 
 func checkPageAccessible(page *rod.Page) error {
-	// 等错误提示 UI 渲染出来再检查
-	time.Sleep(500 * time.Millisecond)
-
-	// 查找错误提示容器
-	wrapperEl, err := page.Timeout(2 * time.Second).Element(".access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper")
+	result, err := page.Eval(`() => {
+		const wrapper = document.querySelector(
+			'.access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper'
+		);
+		return wrapper ? (wrapper.textContent || "") : "";
+	}`)
 	if err != nil {
-		// 未找到错误容器，说明页面可访问
-		return nil
+		return fmt.Errorf("读取详情页可访问状态失败: %w", err)
 	}
-
-	// 获取文本内容
-	text, err := wrapperEl.Text()
-	if err != nil {
-		// 无法获取文本，假设页面可访问
-		return nil
-	}
+	text := result.Value.String()
 
 	// 检查关键词
 	keywords := []string{
@@ -947,18 +995,22 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			evalResult := page.MustEval(`() => {
-				if (window.__INITIAL_STATE__ &&
-					window.__INITIAL_STATE__.note &&
-					window.__INITIAL_STATE__.note.noteDetailMap) {
-					const noteDetailMap = window.__INITIAL_STATE__.note.noteDetailMap;
+			evalResult, evalErr := page.Eval(`() => {
+				const raw = window.__INITIAL_STATE__?.note?.noteDetailMap;
+				if (raw) {
+					const noteDetailMap = raw.value !== undefined
+						? raw.value
+						: (raw._value !== undefined ? raw._value : raw);
 					return JSON.stringify(noteDetailMap);
 				}
 				return "";
-			}`).String()
+			}`)
+			if evalErr != nil {
+				return evalErr
+			}
 
-			if evalResult != "" {
-				result = evalResult
+			if evalResult.Value.String() != "" {
+				result = evalResult.Value.String()
 				return nil
 			}
 			return fmt.Errorf("无法获取初始状态数据")
@@ -967,12 +1019,12 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 		retry.Delay(200*time.Millisecond),
 		retry.MaxJitter(300*time.Millisecond),
 		retry.OnRetry(func(n uint, err error) {
-			logrus.Debugf("提取Feed详情重试 #%d: %v", n, err)
+			logrus.Debugf("提取Feed详情重试 #%d", n)
 		}),
 	)
 
 	if err != nil {
-		logrus.Errorf("提取Feed详情失败: %v", err)
+		logrus.Error("提取Feed详情失败")
 		return nil, fmt.Errorf("提取Feed详情失败: %w", err)
 	}
 
@@ -991,7 +1043,16 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 
 	noteDetail, exists := noteDetailMap[feedID]
 	if !exists {
-		return nil, fmt.Errorf("feed %s not found in noteDetailMap", feedID)
+		for _, candidate := range noteDetailMap {
+			if candidate.Note.NoteID == feedID {
+				noteDetail = candidate
+				exists = true
+				break
+			}
+		}
+	}
+	if !exists {
+		return nil, fmt.Errorf("feed not found in noteDetailMap")
 	}
 
 	return &FeedDetailResponse{
@@ -1001,5 +1062,14 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 }
 
 func makeFeedDetailURL(feedID, xsecToken string) string {
-	return fmt.Sprintf("https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=pc_feed", feedID, xsecToken)
+	return makeFeedDetailURLWithSource(feedID, xsecToken, FeedDetailSourcePCFeed)
+}
+
+func makeFeedDetailURLWithSource(feedID, xsecToken, xsecSource string) string {
+	return fmt.Sprintf(
+		"https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=%s",
+		feedID,
+		xsecToken,
+		xsecSource,
+	)
 }

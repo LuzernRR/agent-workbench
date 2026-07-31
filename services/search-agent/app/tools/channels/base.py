@@ -10,9 +10,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ChannelName = Literal["web", "x", "xiaohongshu"]
+OutcomeStatus = Literal["success", "degraded", "failed"]
+NextAction = Literal[
+    "none",
+    "use_fallback",
+    "use_alternative_channel",
+    "reconnect_account",
+    "retry_later",
+    "stop",
+]
 
 
 class StrictChannelModel(BaseModel):
@@ -63,6 +72,74 @@ class ChannelEvidence(StrictChannelModel):
     provenance: SourceProvenance
 
 
+class ChannelResolution(StrictChannelModel):
+    """渠道的稳定结算语义；不含 Provider 原始异常或认证材料。"""
+
+    status: OutcomeStatus
+    primary_provider: str
+    effective_provider: str
+    reason_code: str | None = None
+    message: str | None = None
+    retryable: bool = False
+    next_action: NextAction = "none"
+
+
+def next_action_for_reason(reason_code: str | None) -> NextAction:
+    code = (reason_code or "").upper()
+    if code == "AUTH_REQUIRED":
+        return "reconnect_account"
+    if code in {"CAPTCHA_REQUIRED", "MCP_OUTPUT_INVALID", "ROBOTS_DENIED"}:
+        return "use_alternative_channel"
+    if code in {
+        "MCP_TIMEOUT",
+        "MCP_NETWORK_ERROR",
+        "MCP_RATE_LIMITED",
+        "MCP_UNAVAILABLE",
+        "PROVIDER_UNAVAILABLE",
+        "TIMEOUT",
+        "RATE_LIMITED",
+    }:
+        return "retry_later"
+    if code in {
+        "TOOL_CALL_LIMIT",
+        "MODEL_CALL_LIMIT",
+        "RUN_TIME_RESERVE",
+        "RUN_TIMEOUT",
+        "LEDGER_UNAVAILABLE",
+        "LEDGER_SETTLEMENT_UNKNOWN",
+        "OUTCOME_UNKNOWN",
+    }:
+        return "stop"
+    return "use_alternative_channel" if code else "none"
+
+
+def channel_resolution(
+    *,
+    status: OutcomeStatus,
+    primary_provider: str,
+    effective_provider: str | None = None,
+    reason_code: str | None = None,
+    message: str | None = None,
+    retryable: bool | None = None,
+    next_action: NextAction | None = None,
+) -> ChannelResolution:
+    inferred_action = next_action_for_reason(reason_code)
+    inferred_retryable = inferred_action == "retry_later"
+    return ChannelResolution(
+        status=status,
+        primary_provider=primary_provider,
+        effective_provider=effective_provider or primary_provider,
+        reason_code=reason_code,
+        message=message,
+        retryable=inferred_retryable if retryable is None else retryable,
+        next_action=(
+            "use_fallback"
+            if status == "degraded" and next_action is None
+            else next_action or inferred_action
+        ),
+    )
+
+
 class ChannelOutcome(StrictChannelModel):
     ok: bool
     channel: ChannelName
@@ -72,6 +149,18 @@ class ChannelOutcome(StrictChannelModel):
     evidence: list[ChannelEvidence] = Field(default_factory=list)
     error_code: str | None = None
     error_message: str | None = None
+    resolution: ChannelResolution | None = None
+
+    @model_validator(mode="after")
+    def populate_resolution(self) -> ChannelOutcome:
+        if self.resolution is None:
+            self.resolution = channel_resolution(
+                status="success" if self.ok else "failed",
+                primary_provider=self.provider,
+                reason_code=self.error_code,
+                message=self.error_message,
+            )
+        return self
 
     def public_payload(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

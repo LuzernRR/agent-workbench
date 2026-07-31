@@ -6,9 +6,11 @@ import "github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 
 // ErrorResponse 错误响应
 type ErrorResponse struct {
-	Error   string `json:"error"`
-	Code    string `json:"code"`
-	Details any    `json:"details,omitempty"`
+	Error      string `json:"error"`
+	Code       string `json:"code"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	NextAction string `json:"nextAction,omitempty"`
+	Details    any    `json:"details,omitempty"`
 }
 
 // SuccessResponse 成功响应
@@ -50,6 +52,7 @@ type CommentLoadConfig struct {
 type FeedDetailRequest struct {
 	FeedID          string             `json:"feed_id" binding:"required"`
 	XsecToken       string             `json:"xsec_token" binding:"required"`
+	XsecSource      string             `json:"xsec_source,omitempty"`
 	LoadAllComments bool               `json:"load_all_comments,omitempty"`
 	CommentConfig   *CommentLoadConfig `json:"comment_config,omitempty"`
 }
