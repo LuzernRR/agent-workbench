@@ -10,13 +10,8 @@ from fastapi import HTTPException
 
 from app.api.schemas import SearchRunRequest, validate_run_id
 from app.config.agent import agent_config
-from app.main import (
-    ResumeScopeError,
-    _authorize,
-    _resolve_graph_input,
-    _run_stream,
-    stop_run,
-)
+from app.harness.runner import HarnessDependencies, HarnessRunner
+from app.main import _authorize, _run_stream, stop_run
 from app.run_control import RunRegistry
 
 
@@ -26,6 +21,15 @@ class RecordingLedger:
 
     async def unknown_for_run(self, run_id: str, error_code: str) -> None:
         self.unknown_runs.append((run_id, error_code))
+
+
+class NoopGraph:
+    async def aget_state(self, config: dict[str, Any]) -> Any:
+        return SimpleNamespace(values={})
+
+    async def astream(self, *args: Any, **kwargs: Any):
+        if False:
+            yield None
 
 
 def payload(*, run_id: str = "run_1", resume: bool = False) -> SearchRunRequest:
@@ -95,8 +99,15 @@ async def test_stop_endpoint_marks_started_ledger_unknown(
     ledger = RecordingLedger()
     task = asyncio.create_task(asyncio.Event().wait())
     await registry.register("run_1", task)
+    runner = HarnessRunner(HarnessDependencies(
+        config=agent_config(),
+        graph=NoopGraph(),
+        ledger=ledger,
+        milvus=None,
+        run_registry=registry,
+    ))
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(run_registry=registry, ledger=ledger))
+        app=SimpleNamespace(state=SimpleNamespace(runner=runner))
     )
 
     first = await stop_run("run_1", request, None)
@@ -112,127 +123,24 @@ async def test_stop_endpoint_marks_started_ledger_unknown(
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_existing_checkpoint_without_new_input() -> None:
-    class Graph:
-        async def aget_state(self, graph_config: dict[str, Any]) -> Any:
-            return SimpleNamespace(values={
-                "run_id": "run_1",
-                "tenant_id": "tenant_1",
-                "visitor_id": "visitor_1",
-                "project_id": "project_1",
-                "thread_id": "thread_1",
-                "model_id": "deepseek-v4-flash",
-                "answer": "checkpoint",
-            })
-
-    result = await _resolve_graph_input(
-        Graph(),
-        payload(resume=True),
-        agent_config(),
-        {"configurable": {"thread_id": "run:run_1"}},
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_resume_rejects_checkpoint_from_another_scope() -> None:
-    class Graph:
-        async def aget_state(self, graph_config: dict[str, Any]) -> Any:
-            return SimpleNamespace(values={
-                "run_id": "run_1",
-                "tenant_id": "other_tenant",
-                "visitor_id": "visitor_1",
-                "project_id": "project_1",
-                "thread_id": "thread_1",
-                "model_id": "deepseek-v4-flash",
-            })
-
-    with pytest.raises(ResumeScopeError):
-        await _resolve_graph_input(
-            Graph(),
-            payload(resume=True),
-            agent_config(),
-            {"configurable": {"thread_id": "run:run_1"}},
-        )
-
-
-@pytest.mark.asyncio
-async def test_cancelled_stream_emits_partial_stop_and_marks_unknown() -> None:
-    entered = asyncio.Event()
-
-    class Graph:
-        async def astream(self, *args: Any, **kwargs: Any):
-            entered.set()
-            await asyncio.Event().wait()
-            yield {"type": "values", "data": {}}
-
-    registry = RunRegistry()
-    ledger = RecordingLedger()
-    state = SimpleNamespace(
-        agent_config=agent_config(),
-        graph=Graph(),
-        ledger=ledger,
-        milvus=None,
-        run_registry=registry,
-    )
+async def test_http_stream_adapter_only_encodes_runner_events() -> None:
+    class Runner:
+        async def stream(self, request_payload: SearchRunRequest, **kwargs: Any):
+            assert request_payload.run_id == "run_1"
+            assert callable(kwargs["is_disconnected"])
+            yield {
+                "version": 1,
+                "eventId": "event_1",
+                "streamId": "stream_1",
+                "streamSeq": 1,
+                "seq": 1,
+                "type": "run.completed",
+                "createdAt": "2026-08-01T00:00:00Z",
+                "answerMarkdown": "checkpoint answer",
+            }
 
     class Request:
-        app = SimpleNamespace(state=state)
-
-        async def is_disconnected(self) -> bool:
-            return False
-
-    stream = _run_stream(Request(), payload())
-    next_line = asyncio.create_task(anext(stream))
-    await entered.wait()
-    decision = await registry.stop("run_1")
-    assert decision.status == "stopping"
-    event = json.loads((await next_line).decode("utf-8"))
-
-    assert event["type"] == "run.stopped"
-    assert event["responseStatus"] == "partial"
-    assert ledger.unknown_runs == [("run_1", "CANCELLED_OUTCOME_UNKNOWN")]
-    await stream.aclose()
-
-
-@pytest.mark.asyncio
-async def test_resume_replays_terminal_event_from_completed_checkpoint() -> None:
-    completed = {
-        "run_id": "run_1",
-        "tenant_id": "tenant_1",
-        "visitor_id": "visitor_1",
-        "project_id": "project_1",
-        "thread_id": "thread_1",
-        "model_id": "deepseek-v4-flash",
-        "answer": "checkpoint answer",
-        "response_status": "completed",
-        "citations": [],
-        "verification_passed": True,
-        "stop_reason": "VERIFIED",
-        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "cost_usd": 0.0},
-        "model_calls": 1,
-        "tool_calls": 1,
-        "evidence": [],
-    }
-
-    class Graph:
-        async def aget_state(self, graph_config: dict[str, Any]) -> Any:
-            return SimpleNamespace(values=completed)
-
-        async def astream(self, *args: Any, **kwargs: Any):
-            if False:
-                yield None
-
-    state = SimpleNamespace(
-        agent_config=agent_config(),
-        graph=Graph(),
-        ledger=RecordingLedger(),
-        milvus=None,
-        run_registry=RunRegistry(),
-    )
-
-    class Request:
-        app = SimpleNamespace(state=state)
+        app = SimpleNamespace(state=SimpleNamespace(runner=Runner()))
 
         async def is_disconnected(self) -> bool:
             return False
@@ -241,7 +149,6 @@ async def test_resume_replays_terminal_event_from_completed_checkpoint() -> None
     event = json.loads((await anext(stream)).decode())
     assert event["type"] == "run.completed"
     assert event["answerMarkdown"] == "checkpoint answer"
-    assert event["responseStatus"] == "completed"
     await stream.aclose()
 
 

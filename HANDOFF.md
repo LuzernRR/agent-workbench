@@ -1,13 +1,60 @@
 # 项目交接
 
-## 当前结论（2026-08-01，Issue #10 已获用户验收，执行受控收口）
+## 当前结论（2026-08-01，Issue #11 已获用户验收，执行受控收口）
+
+- 当前唯一活动功能是
+  [#11](https://github.com/LuzernRR/agent-workbench/issues/11)“统一 HarnessRunner 执行
+  边界”，状态为 `ready`，`Execution Gate: allowed`。实现、测试、真实生产 smoke
+  和部署已完成；用户已于 2026-08-01 明确回复“验收通过 Issue #11”，授权对本
+  Issue 的既有变更执行受控 stage、commit、push 和 close。
+- 新增 `services/search-agent/app/harness/runner.py`。`HarnessRunner.stream()` 现在
+  统一处理初始 State、resume scope、Postgres checkpoint、compiled graph stream、
+  duplicate、timeout、recursion、stop、client disconnect、tool outcome unknown 和
+  唯一 terminal；`HarnessRunner.stop()` 统一 RunRegistry 与工具账本停止语义。
+- `HarnessDependencies` 显式注入 AgentConfig、compiled graph、ToolOperationLedger、
+  Milvus 和 RunRegistry；event clock、stream ID factory 与 timeout factory 可在构造
+  runner 时替换。生产使用真实 UTC/UUID/asyncio timeout，离线测试使用固定实现。
+- FastAPI lifespan 只装配一次 runner；`main.py` 已无 `graph.astream`、
+  `graph.aget_state`、`initial_state` 或 `runtime_event` 调用。HTTP endpoint 只负责
+  认证、NDJSON 编码和 `request.is_disconnected` 适配，生产和未来离线 eval 不再有
+  两套运行循环。
+- EventScope 支持注入 clock 与 stream ID，graph 节点和 terminal 继续共享同一个
+  ContextVar scope。固定 fake graph/clock/stream ID 的两次无 HTTP 执行产生完全相同
+  的公开事件，sequence 为 1、2。
+- 定向 Harness/HTTP tests `20 passed`；Search Agent 全量 `170 passed in 4.50s`，
+  Ruff 与 compileall 通过。Web 和共享合同未改动，因此未重复运行 Web 全量门禁；
+  真实生产 Playwright 主链路先后通过 `1 passed (1.3m)` 与最终镜像
+  `1 passed (57.7s)`。
+- 统一 runner 的 VERIFIED 生产运行 `run_e909a6756aa7457ca8eba9e801e347f3`：
+  59.864 秒、6 次模型、4 次工具、7 条 Evidence、唯一 `VERIFIED / completed`。
+  最终源码镜像运行 `run_45d53f0533164aacb5f5f92f022f5e25`：46.811 秒、6/4、
+  2 Evidence；小红书外部 MCP 超时后正确 circuit-open，并因指定渠道证据不足以
+  `MAX_ITERATIONS / partial` 诚实收口。两次运行的工具与唯一 terminal 都完整持久化。
+- 新 Search Agent 镜像已部署，Compose project `001-agent-live` 七个服务全部
+  healthy；`127.0.0.1:3000`、`127.0.0.1:8080` 和
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均返回 200。最近
+  Search Agent/Web/xiaohongshu-mcp 日志无 ERROR、Traceback 或 panic。
+- 重建前 Search Agent 镜像已保留为
+  `agent-workbench/search-agent:pre-issue-11-5e29e74`。回滚只替换 Search Agent，
+  不删除 PostgreSQL checkpoint、tool ledger、Milvus、session volume、镜像或用户
+  数据。
+- UI 与追踪仍只展示安全公开过程摘要、节点状态、工具结果和 Evidence；Harness 不
+  请求、保存或显示私有思维链、`reasoning_content`、完整 Prompt、Provider body、
+  Cookie、token 或密钥。
+- 本 Issue 不包含 LangGraph 图级 `Send` fan-out/fan-in、state reducer、通用
+  ToolGateway、记忆重构、LangSmith tracing/eval 或 Gold dataset。完整记录见
+  `docs/development/2026-08-01-015-issue-11-harness-runner.md`，桌面/移动证据见
+  `docs/development/evidence/2026-08-01-issue-11-{desktop,mobile}.png`。完成本 Issue
+  受控收口后，下一 feature 必须重新创建唯一 Issue 和执行门。
+
+## 当前结论（2026-08-01，Issue #10 已验收并完成收口）
 
 - 当前唯一活动功能是
   [#10](https://github.com/LuzernRR/agent-workbench/issues/10)“真实流式响应、端到端
   延迟与小红书正文可靠性”，Issue 状态为 `ready`，`Execution Gate: allowed`。
-  功能代码、测试、生产真实 Provider 验证和部署已经完成。用户已于 2026-08-01
-  明确回复“验收通过，继续完成任务”，授权对本 Issue 的既有变更执行受控 stage、
-  commit、push 和 close。
+  功能代码、测试、生产真实 Provider 验证和部署已经完成。用户于 2026-08-01
+  明确回复“验收通过，继续完成任务”，受控提交 `5e29e74` 已推送到 `main`，Issue
+  已关闭。
 - 强制搜索已跳过 Supervisor 模型路由；Planner 确定 query/channel 后直接产生真实
   唯一 `toolCallId`，不再由 Researcher 调模型复述固定参数。同轮独立搜索并发
   执行并按原计划顺序确定性归并；共享小红书浏览器访问继续串行。

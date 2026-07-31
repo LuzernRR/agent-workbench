@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,10 +26,18 @@ _FORBIDDEN_KEYS = {
     "providerbody",
 }
 
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+EventClock = Callable[[], str]
+
+
 @dataclass
 class EventScope:
     run_id: str
     stream_id: str
+    clock: EventClock = utc_now
     sequence: int = 0
 
 
@@ -37,19 +46,24 @@ _EVENT_SCOPE: ContextVar[EventScope | None] = ContextVar(
 )
 
 
-def begin_event_scope(run_id: str) -> EventScope | None:
-    """为一次 HTTP 流建立唯一 streamId 与流内严格递增序号。"""
+def begin_event_scope(
+    run_id: str,
+    *,
+    stream_id: str | None = None,
+    clock: EventClock = utc_now,
+) -> EventScope | None:
+    """为一次 Harness 流建立唯一 streamId 与流内严格递增序号。"""
     previous = _EVENT_SCOPE.get()
-    _EVENT_SCOPE.set(EventScope(run_id=run_id, stream_id=f"stream_{uuid.uuid4().hex}"))
+    _EVENT_SCOPE.set(EventScope(
+        run_id=run_id,
+        stream_id=stream_id or f"stream_{uuid.uuid4().hex}",
+        clock=clock,
+    ))
     return previous
 
 
 def end_event_scope(previous: EventScope | None) -> None:
     _EVENT_SCOPE.set(previous)
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def safe_public_text(value: str | None, *, max_chars: int = 160) -> str | None:
@@ -96,7 +110,7 @@ def runtime_event(event_type: str, **payload: Any) -> dict[str, Any]:
         "streamSeq": sequence,
         "seq": sequence,
         "type": event_type,
-        "createdAt": utc_now(),
+        "createdAt": scope.clock() if scope is not None else utc_now(),
         **payload,
     }
     _assert_public(event)

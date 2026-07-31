@@ -12,6 +12,7 @@ from app.api.schemas import SearchRunRequest
 from app.config.agent import agent_config
 from app.graph.nodes import budget_reason, route_after_reflect
 from app.graph.state import initial_state
+from app.harness.runner import HarnessDependencies, HarnessRunner
 from app.main import _run_stream
 from app.run_control import RunRegistry
 
@@ -64,13 +65,14 @@ def payload(run_id: str) -> SearchRunRequest:
 
 class Request:
     def __init__(self, graph: Any, ledger: RecordingLedger) -> None:
-        self.app = SimpleNamespace(state=SimpleNamespace(
-            agent_config=agent_config(),
+        runner = HarnessRunner(HarnessDependencies(
+            config=agent_config(),
             graph=graph,
             ledger=ledger,
             milvus=None,
             run_registry=RunRegistry(),
         ))
+        self.app = SimpleNamespace(state=SimpleNamespace(runner=runner))
 
     async def is_disconnected(self) -> bool:
         return False
