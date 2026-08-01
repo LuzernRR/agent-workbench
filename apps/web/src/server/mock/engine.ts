@@ -214,11 +214,27 @@ async function executeScript(run: MockRun, thread: MockThread, script: ScriptSte
         logStep(run, step.level, step.actor, step.content);
         break;
       case "memory":
-        // 长期记忆的召回与抽取在真实实现里是独立管线，这里通过日志暴露给用户可见。
-        step.recalled.forEach((item) => logStep(run, "info", "记忆读取", item));
-        step.extracted.forEach((item) => logStep(run, "info", "记忆提取", item));
-        if (step.recalled.length || step.extracted.length) {
-          emit(run, "memory.updated", { recalled: step.recalled, extracted: step.extracted });
+        if (step.recalled.length) {
+          emit(run, "memory.updated", {
+            operation: "recall",
+            status: "completed",
+            count: step.recalled.length,
+            memoryRefs: step.recalled.map((_, index) => `memory_mock_recall_${index + 1}`),
+            evidenceIds: step.recalled.map((_, index) => `evidence_mock_recall_${index + 1}`),
+            embeddingVersion: "mock-v1",
+            summary: `召回 ${step.recalled.length} 条历史证据线索`
+          });
+        }
+        if (step.extracted.length) {
+          emit(run, "memory.updated", {
+            operation: "store",
+            status: "completed",
+            count: step.extracted.length,
+            memoryRefs: step.extracted.map((_, index) => `memory_mock_store_${index + 1}`),
+            evidenceIds: step.extracted.map((_, index) => `evidence_mock_store_${index + 1}`),
+            embeddingVersion: "mock-v1",
+            summary: `保存 ${step.extracted.length} 条已引用证据`
+          });
         }
         break;
       case "tool":

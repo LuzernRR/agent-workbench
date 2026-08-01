@@ -68,6 +68,11 @@ function sha256Value(value: unknown, fallback?: string) {
   return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : fallback;
 }
 
+function opaqueIdsValue(value: unknown, max = 10) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => opaqueIdValue(item)).filter((item): item is string => Boolean(item)))].slice(0, max);
+}
+
 function toolUsageValue(value: unknown, fallback?: ToolUsage): ToolUsage | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
   const candidate = value as Partial<ToolUsage>;
@@ -685,13 +690,44 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
     }
     case "memory.updated": {
       const status = stringValue(payload.status);
+      const operation = ["recall", "store"].includes(stringValue(payload.operation))
+        ? stringValue(payload.operation) as "recall" | "store"
+        : null;
+      if (!operation || !["completed", "degraded"].includes(status)) return next;
+      const id = `memory:${event.runId}:${operation}`;
+      const previous = next.items[id];
+      const previousMemory = previous?.kind === "status" ? previous : undefined;
+      const priorCompleted = previousMemory?.tone === "neutral";
+      const incomingCompleted = status === "completed";
+      const keepPrevious = priorCompleted && !incomingCompleted;
+      const memoryRefs = keepPrevious
+        ? previousMemory?.memoryRefs || []
+        : opaqueIdsValue(payload.memoryRefs);
+      const evidenceIds = keepPrevious
+        ? previousMemory?.evidenceIds || []
+        : opaqueIdsValue(payload.evidenceIds);
+      const count = keepPrevious
+        ? previousMemory?.memoryCount || 0
+        : Math.min(10, Math.max(0, numberValue(payload.count)));
       const item: StatusItem = {
         kind: "status",
-        id: `memory:${event.runId}:${stringValue(payload.memoryId, status || event.id)}`,
+        id,
         runId: event.runId,
-        label: stringValue(payload.summary, status === "degraded" ? "长期证据记忆当前不可用，主搜索继续运行" : "证据记忆已更新"),
-        tone: status === "degraded" ? "warning" : "neutral",
-        createdAt: event.createdAt
+        label: keepPrevious
+          ? previousMemory?.label || "证据记忆已更新"
+          : stringValue(payload.summary, status === "degraded" ? "历史证据记忆当前不可用，主搜索继续运行" : "证据记忆已更新"),
+        tone: keepPrevious ? "neutral" : status === "degraded" ? "warning" : "neutral",
+        createdAt: keepPrevious ? previousMemory?.createdAt || event.createdAt : event.createdAt,
+        memoryOperation: operation,
+        memoryCount: count,
+        memoryRefs,
+        evidenceIds,
+        embeddingVersion: keepPrevious
+          ? previousMemory?.embeddingVersion
+          : stringValue(payload.embeddingVersion).slice(0, 120) || undefined,
+        reasonCode: keepPrevious
+          ? previousMemory?.reasonCode
+          : stringValue(payload.reasonCode).slice(0, 80) || undefined
       };
       return { ...next, ...appendItem(next, item) };
     }

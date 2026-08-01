@@ -144,7 +144,7 @@ const searchAgentEventUnion = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("evidence.updated"), evidenceId: identifier, sourceId: identifier, contentHash: sha256, toolCallId: identifier, url: httpUrl, title: compactText(300), channel: searchChannel, status: evidenceStatus, reasonCode, updatedAt: createdAt }).strict(),
   z.object({ ...base, type: z.literal("tool.failed"), toolCallId: identifier, planStepId: identifier.optional(), ...toolLedgerTerminal, toolName: publicToolName, query: unicodeText(300), channel: searchChannel, provider: compactText(80), status: outcomeStatus.optional(), primaryProvider: compactText(80).optional(), effectiveProvider: compactText(80).optional(), reasonCode, message: compactText(500), retryable: z.boolean(), nextAction: nextAction.optional(), resultCount: z.number().int().nonnegative().max(50).optional(), evidenceCount: z.number().int().nonnegative().max(50).optional(), durationMs: z.number().int().nonnegative() }).strict(),
   z.object({ ...base, type: z.literal("tool.unknown"), toolCallId: identifier, planStepId: identifier.optional(), ...toolLedgerTerminal, toolName: publicToolName, query: compactText(300), channel: searchChannel, provider: compactText(80).optional(), reasonCode, nextAction: z.literal("check_operation").optional(), durationMs: z.number().int().nonnegative().optional() }).strict(),
-  z.object({ ...base, type: z.literal("memory.status"), status: z.enum(["available", "stored", "degraded"]), recalledCount: z.number().int().nonnegative().max(100).optional(), storedCount: z.number().int().nonnegative().max(100).optional(), embeddingVersion: compactText(120).optional(), reasonCode: reasonCode.optional() }).strict(),
+  z.object({ ...base, type: z.literal("memory.updated"), operation: z.enum(["recall", "store"]), status: z.enum(["completed", "degraded"]), count: z.number().int().nonnegative().max(10), memoryRefs: z.array(identifier).max(10), evidenceIds: z.array(identifier).max(10), embeddingVersion: compactText(120), reasonCode: reasonCode.optional() }).strict(),
   z.object({ ...base, type: z.literal("verification.completed"), nodeRunId: identifier, passed: z.boolean(), action: z.enum(["pass", "rewrite", "research_more"]), publicSummary: optionalSummary, publicSummarySource: z.literal("model").nullable() }).strict(),
   z.object({ ...base, type: z.literal("run.completed"), answerMarkdown: unicodeText(100_000, 1), answerSource: z.literal("model"), answerModelCalls: z.number().int().positive().max(100), promptVersion: compactText(120), responseStatus: z.enum(["completed", "partial"]), citations: z.array(z.object({ label: compactText(300), url: httpUrl }).strict()).max(60), verificationPassed: z.boolean(), stopReason: reasonCode, usage: usageSchema, modelCalls: z.number().int().positive().max(100), toolCalls: z.number().int().nonnegative().max(100), evidenceCount: z.number().int().nonnegative().max(1_000) }).strict(),
   z.object({ ...base, type: z.literal("run.stopped"), runId: identifier, responseStatus: z.literal("partial"), reasonCode }).strict(),
@@ -192,6 +192,29 @@ export const searchAgentEventSchema = searchAgentEventUnion.superRefine((event, 
         code: "custom",
         path: ["publicSummarySource"],
         message: "公开摘要与模型来源标记必须同时存在或同时为空"
+      });
+    }
+  }
+  if (event.type === "memory.updated") {
+    const uniqueMemories = new Set(event.memoryRefs);
+    const uniqueEvidence = new Set(event.evidenceIds);
+    if (
+      event.memoryRefs.length !== event.count
+      || event.evidenceIds.length !== event.count
+      || uniqueMemories.size !== event.count
+      || uniqueEvidence.size !== event.count
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["count"],
+        message: "记忆计数必须与唯一 memoryRef/evidenceId 一致"
+      });
+    }
+    if ((event.status === "degraded") !== Boolean(event.reasonCode)) {
+      context.addIssue({
+        code: "custom",
+        path: ["reasonCode"],
+        message: "记忆降级必须且只能携带 reasonCode"
       });
     }
   }

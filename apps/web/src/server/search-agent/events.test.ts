@@ -402,21 +402,33 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     })).toThrow();
   });
 
-  it("成功记忆省略 reasonCode，并按 Unicode 码点校验 URL", () => {
-    expect(parseSearchAgentEvent({
+  it("严格校验可审计记忆事件，并按 Unicode 码点校验 URL", () => {
+    const memory = {
       ...sourceEnvelope,
-      type: "memory.status",
-      status: "stored",
-      storedCount: 1,
+      type: "memory.updated",
+      operation: "store",
+      status: "completed",
+      count: 1,
+      memoryRefs: ["memory_one"],
+      evidenceIds: ["evidence_one"],
       embeddingVersion: "hashing-v1"
-    }).type).toBe("memory.status");
+    };
+    expect(parseSearchAgentEvent(memory).type).toBe("memory.updated");
     expect(() => parseSearchAgentEvent({
-      ...sourceEnvelope,
-      type: "memory.status",
-      status: "stored",
-      storedCount: 1,
-      reasonCode: null
+      ...memory,
+      reasonCode: "MEMORY_UNAVAILABLE"
     })).toThrow();
+    expect(parseSearchAgentEvent({
+      ...memory,
+      operation: "recall",
+      status: "degraded",
+      count: 0,
+      memoryRefs: [],
+      evidenceIds: [],
+      reasonCode: "MEMORY_UNAVAILABLE"
+    }).type).toBe("memory.updated");
+    expect(() => parseSearchAgentEvent({ ...memory, count: 2 })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...memory, text: "禁止公开记忆正文" })).toThrow();
 
     const prefix = "https://example.com/";
     const url = `${prefix}${"a".repeat(2_048 - Array.from(prefix).length - 1)}🔗`;

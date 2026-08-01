@@ -21,6 +21,56 @@ describe("reduceAgentEvent", () => {
     });
   });
 
+  it("按 operation 重放记忆状态并保留稳定 provenance", () => {
+    const events = [
+      event(1, "memory.updated", {
+        operation: "recall",
+        status: "completed",
+        count: 1,
+        memoryRefs: ["memory_recalled"],
+        evidenceIds: ["evidence_recalled"],
+        embeddingVersion: "hashing-v1",
+        summary: "召回 1 条历史证据线索"
+      }),
+      event(2, "memory.updated", {
+        operation: "store",
+        status: "completed",
+        count: 1,
+        memoryRefs: ["memory_stored"],
+        evidenceIds: ["evidence_stored"],
+        embeddingVersion: "hashing-v1",
+        summary: "保存 1 条已引用证据"
+      }),
+      event(3, "memory.updated", {
+        operation: "recall",
+        status: "degraded",
+        count: 0,
+        memoryRefs: [],
+        evidenceIds: [],
+        embeddingVersion: "hashing-v1",
+        reasonCode: "MEMORY_UNAVAILABLE",
+        summary: "历史证据记忆当前不可用，主搜索继续运行"
+      })
+    ];
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), events);
+
+    expect(state.items["memory:run:recall"]).toMatchObject({
+      label: "召回 1 条历史证据线索",
+      tone: "neutral",
+      memoryOperation: "recall",
+      memoryCount: 1,
+      memoryRefs: ["memory_recalled"],
+      evidenceIds: ["evidence_recalled"],
+      embeddingVersion: "hashing-v1"
+    });
+    expect(state.items["memory:run:store"]).toMatchObject({
+      label: "保存 1 条已引用证据",
+      memoryOperation: "store",
+      memoryRefs: ["memory_stored"]
+    });
+    expect(reduceAgentEvents(createEmptyThreadState("project", "thread"), events)).toEqual(state);
+  });
+
   it("保留完整安全工具账本字段并把 unknown 作为唯一工具行终态", () => {
     const usage = {
       toolId: "web_search",

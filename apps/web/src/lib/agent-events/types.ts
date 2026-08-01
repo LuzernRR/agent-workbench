@@ -192,6 +192,12 @@ export type StatusItem = {
   label: string;
   tone: "neutral" | "warning" | "danger";
   createdAt: string;
+  memoryOperation?: "recall" | "store";
+  memoryCount?: number;
+  memoryRefs?: string[];
+  evidenceIds?: string[];
+  embeddingVersion?: string;
+  reasonCode?: string;
 };
 
 export type TimelineItem = MessageItem | ThinkingItem | ToolItem | ApprovalItem | StatusItem;

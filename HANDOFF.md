@@ -1,5 +1,36 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #21 已核验证据长期记忆已贯通）
+
+- 本轮唯一功能为
+  [#21](https://github.com/LuzernRR/agent-workbench/issues/21)“完善可审计的已核验证据长期记忆”，
+  `Execution Gate: allowed`。只有最终 `VERIFIED` 且答案实际引用的 `cited Evidence` 能进入
+  Milvus；`partial/direct/read/accepted/rejected`、停止、取消和失败运行均不写入。
+- `memoryRef` 由服务端依据 tenant、visitor、project、`evidenceId`、`contentHash` 与
+  `embeddingVersion` 生成稳定 SHA-256 身份；记录同时保存 `sourceId/sourceRunId/source URL/title/
+  capturedAt` 和严格作用域。召回强制过滤 visitor、project、类型、active 状态与 embedding 版本，
+  缺失 provenance 的旧记录不会被采用。
+- 证据记忆不再在 `load_context` 阶段拼入会话历史。只有已经判定需要搜索的 Planner 才收到有界、
+  明确标注可能过期的 `memory_candidates`，用于形成新的检索；它们不进入当前 Evidence、Citation、
+  Writer 或 Verifier。公开 `memory.updated` 只含 operation/status/count、稳定引用 ID、embedding 版本、
+  时间元数据与受控 reasonCode，不含正文、Prompt、Provider body、Cookie、token、私有 CoT 或
+  `reasoning_content`。
+- BFF 严格校验并持久化 recall/store 生命周期；Reducer 以 `runId + operation` 幂等归并，已完成状态
+  不会被后续降级事件倒退。Workbench 仅显示“召回 N 条历史证据线索 / 保存 N 条已引用证据”或受控
+  降级状态；mock 运行器也已改用同一公开合同，不再发旧版正文数组。
+- 生产项目 A 首轮 `run_755ff83b07a44f7987eb79a6be62d64c` 真实调用两次小红书工具，以
+  `VERIFIED / completed` 保存 3 条已引用证据；同项目第二轮
+  `run_3c531b601202468b94cdbe4048bd0fdf` 召回完全相同的 3 个 `memoryRef/evidenceId`，随后仍完成
+  4 次真实工具调用。项目 B 的相近请求 `run_7060f03b133041a88449d86f75f6300f` 召回 0 条并完成
+  2 次真实工具调用，证明项目隔离；记忆引用在非 memory 事件中的持久出现数为 0。
+- 门禁：Search Agent `262 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `387 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。已保留
+  `agent-workbench/{search-agent,web}:pre-issue-21-9ca2ee2` 并滚动部署 Search Agent 与 Web；
+  Compose 七服务 healthy，3000、8080 与
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。完整记录见
+  `docs/development/2026-08-01-027-issue-21-auditable-evidence-memory.md`。
+
 ## 当前结论（2026-08-01，Issue #19 Evidence 生命周期已贯通）
 
 - 本轮唯一功能为

@@ -14,11 +14,32 @@ import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
+from urllib.parse import urlsplit
 
 from app.config.agent import MilvusConfig
 
 _SCOPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+
+
+class MemoryReference(TypedDict):
+    memory_id: str
+    evidence_id: str
+
+
+class RecalledEvidenceMemory(TypedDict):
+    memory_id: str
+    evidence_id: str
+    source_id: str
+    content_hash: str
+    source_run_id: str
+    url: str
+    title: str
+    text: str
+    captured_at: str
+    score: float
+    embedding_version: str
 
 
 @dataclass(frozen=True)
@@ -32,6 +53,43 @@ def _scope(value: str, field: str) -> str:
     if not _SCOPE.fullmatch(value):
         raise ValueError(f"{field} 不是安全作用域 ID")
     return value
+
+
+def _hash(value: str, field: str) -> str:
+    if not _SHA256.fullmatch(value):
+        raise ValueError(f"{field} 不是 SHA-256")
+    return value
+
+
+def _public_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("source_url 不是安全 HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("source_url 不得包含凭据")
+    return value[:2048]
+
+
+def memory_identity(
+    tenant_id: str,
+    visitor_id: str,
+    project_id: str,
+    evidence_id: str,
+    content_hash: str,
+    embedding_version: str,
+) -> str:
+    """依据完整作用域和 Evidence provenance 生成稳定 memoryRef。"""
+
+    parts = (
+        _scope(tenant_id, "tenant_id"),
+        _scope(visitor_id, "visitor_id"),
+        _scope(project_id, "project_id"),
+        _scope(evidence_id, "evidence_id"),
+        _hash(content_hash, "content_hash"),
+        _scope(embedding_version, "embedding_version"),
+    )
+    digest = hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+    return f"memory_{digest[:40]}"
 
 
 def hashing_embedding(text: str, dimension: int) -> list[float]:
@@ -115,44 +173,72 @@ class MilvusEvidenceStore:
         tenant_id: str,
         visitor_id: str,
         project_id: str,
+        source_run_id: str,
         evidence: Iterable[dict[str, Any]],
-    ) -> int:
+    ) -> list[MemoryReference]:
         if not self._health.available or not self._client:
-            return 0
+            return []
         tenant = _scope(tenant_id, "tenant_id")
         visitor = _scope(visitor_id, "visitor_id")
         project = _scope(project_id, "project_id")
+        source_run = _scope(source_run_id, "source_run_id")
         records = []
+        references: list[MemoryReference] = []
         for item in evidence:
+            if item.get("status") != "cited":
+                continue
             text = str(item.get("text") or "")[:8000]
-            url = str(item.get("url") or "")[:2048]
+            url = _public_url(str(item.get("url") or ""))
             if not text or not url:
                 continue
-            primary = hashlib.sha256(
-                f"{tenant}|{visitor}|{project}|{url}|{self.config.embedding_model_version}".encode()
-            ).hexdigest()[:64]
+            evidence_id = _scope(str(item.get("evidence_id") or ""), "evidence_id")
+            source_id = _scope(str(item.get("source_id") or ""), "source_id")
+            content_hash = _hash(
+                str(item.get("content_hash") or ""), "content_hash"
+            )
+            captured_at = str(item.get("captured_at") or "")[:80]
+            if not captured_at:
+                raise ValueError("captured_at 不能为空")
+            primary = memory_identity(
+                tenant,
+                visitor,
+                project,
+                evidence_id,
+                content_hash,
+                self.config.embedding_model_version,
+            )
             records.append(
                 {
                     "id": primary,
+                    "memory_id": primary,
                     "vector": hashing_embedding(text, self.config.embedding_dimension),
                     "tenant_id": tenant,
                     "visitor_id": visitor,
                     "project_id": project,
                     "acl_scope": "visitor_project",
                     "memory_type": "verified_evidence",
+                    "status": "active",
                     "embedding_version": self.config.embedding_model_version,
                     "created_at": int(time.time()),
+                    "source_run_id": source_run,
+                    "evidence_id": evidence_id,
+                    "source_id": source_id,
+                    "content_hash": content_hash,
+                    "captured_at": captured_at,
                     "source_url": url,
                     "title": str(item.get("title") or url)[:500],
                     "text": text,
                 }
             )
+            references.append(
+                MemoryReference(memory_id=primary, evidence_id=evidence_id)
+            )
         if not records:
-            return 0
+            return []
         await asyncio.to_thread(
             self._client.upsert, collection_name=self.config.collection, data=records
         )
-        return len(records)
+        return references
 
     async def recall(
         self,
@@ -161,7 +247,7 @@ class MilvusEvidenceStore:
         visitor_id: str,
         project_id: str,
         query: str,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RecalledEvidenceMemory]:
         if not self._health.available or not self._client:
             return []
         tenant = _scope(tenant_id, "tenant_id")
@@ -171,6 +257,7 @@ class MilvusEvidenceStore:
             f'tenant_id == "{tenant}" and visitor_id == "{visitor}" '
             f'and project_id == "{project}" and acl_scope == "visitor_project" '
             f'and memory_type == "verified_evidence" '
+            f'and status == "active" '
             f'and embedding_version == "{self.config.embedding_model_version}"'
         )
         rows = await asyncio.to_thread(
@@ -179,19 +266,58 @@ class MilvusEvidenceStore:
             data=[hashing_embedding(query, self.config.embedding_dimension)],
             filter=expression,
             limit=self.config.recall_limit,
-            output_fields=["source_url", "title", "text", "created_at", "embedding_version"],
+            output_fields=[
+                "memory_id",
+                "evidence_id",
+                "source_id",
+                "content_hash",
+                "source_run_id",
+                "source_url",
+                "title",
+                "text",
+                "captured_at",
+                "embedding_version",
+            ],
         )
-        output: list[dict[str, Any]] = []
+        output: list[RecalledEvidenceMemory] = []
         for hit in rows[0] if rows else []:
             entity = hit.get("entity") or {}
-            output.append(
-                {
-                    "url": entity.get("source_url"),
-                    "title": entity.get("title"),
-                    "text": str(entity.get("text") or "")[:1600],
-                    "score": float(hit.get("distance") or 0),
-                    "created_at": entity.get("created_at"),
-                    "embedding_version": entity.get("embedding_version"),
-                }
-            )
+            try:
+                memory_id = _scope(str(entity.get("memory_id") or ""), "memory_id")
+                evidence_id = _scope(
+                    str(entity.get("evidence_id") or ""), "evidence_id"
+                )
+                source_id = _scope(str(entity.get("source_id") or ""), "source_id")
+                content_hash = _hash(
+                    str(entity.get("content_hash") or ""), "content_hash"
+                )
+                source_run_id = _scope(
+                    str(entity.get("source_run_id") or ""), "source_run_id"
+                )
+                url = _public_url(str(entity.get("source_url") or ""))
+                captured_at = str(entity.get("captured_at") or "")[:80]
+                title = str(entity.get("title") or url)[:500]
+                text = str(entity.get("text") or "")[:1600]
+                embedding_version = _scope(
+                    str(entity.get("embedding_version") or ""),
+                    "embedding_version",
+                )
+                if not captured_at or not text:
+                    continue
+            except ValueError:
+                # 升级前或损坏的记录没有完整 provenance，不能作为记忆线索。
+                continue
+            output.append(RecalledEvidenceMemory(
+                memory_id=memory_id,
+                evidence_id=evidence_id,
+                source_id=source_id,
+                content_hash=content_hash,
+                source_run_id=source_run_id,
+                url=url,
+                title=title,
+                text=text,
+                captured_at=captured_at,
+                score=float(hit.get("distance") or 0),
+                embedding_version=embedding_version,
+            ))
         return output

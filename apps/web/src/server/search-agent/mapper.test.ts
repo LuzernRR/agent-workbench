@@ -333,6 +333,52 @@ describe("Search Agent v1 白名单投影", () => {
     }));
   });
 
+  it("把记忆 store/recall 投影为可重放的公开结构化状态", () => {
+    const stored = mapSearchAgentEvent(source({
+      type: "memory.updated",
+      operation: "store",
+      status: "completed",
+      count: 1,
+      memoryRefs: ["memory_one"],
+      evidenceIds: ["evidence_one"],
+      embeddingVersion: "hashing-v1"
+    }), "run_one");
+    expect(stored.events).toEqual([{
+      type: "memory.updated",
+      payload: {
+        operation: "store",
+        status: "completed",
+        count: 1,
+        memoryRefs: ["memory_one"],
+        evidenceIds: ["evidence_one"],
+        embeddingVersion: "hashing-v1",
+        reasonCode: undefined,
+        summary: "保存 1 条已引用证据",
+        sourceStreamId: "stream_test",
+        sourceStreamSeq: 1,
+        sourceEventId: "stream_test_000001",
+        sourceSeq: 1
+      }
+    }]);
+
+    const degraded = mapSearchAgentEvent(source({
+      type: "memory.updated",
+      operation: "recall",
+      status: "degraded",
+      count: 0,
+      memoryRefs: [],
+      evidenceIds: [],
+      embeddingVersion: "hashing-v1",
+      reasonCode: "MEMORY_UNAVAILABLE"
+    }), "run_one");
+    expect(degraded.events[0].payload).toMatchObject({
+      operation: "recall",
+      status: "degraded",
+      count: 0,
+      summary: "历史证据记忆当前不可用，主搜索继续运行"
+    });
+  });
+
   it("verification.completed 创建独立核验活动，不混入思考", () => {
     const projection = mapSearchAgentEvent(source({ type: "verification.completed", nodeRunId: "verify_cccccccccccccccccccccccccccccccc", passed: false, action: "rewrite", publicSummary: "引用格式需要修正", publicSummarySource: "model" }));
     expect(projection.events).toHaveLength(3);

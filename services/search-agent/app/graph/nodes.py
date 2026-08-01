@@ -45,6 +45,7 @@ from app.graph.state import (
     Candidate,
     Citation,
     Evidence,
+    MemoryCandidate,
     PlanSnapshot,
     ResearchBranchResult,
     ResearchExecution,
@@ -771,49 +772,79 @@ def _group_source_presentations(
 
 
 async def load_context(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
+    del runtime
     question = (state.get("question") or "").strip()
     context = (state.get("conversation_context") or "")[:20_000]
-    writer = _event_writer()
-    recalled = 0
-    project_id = state.get("project_id")
-    if runtime.context.milvus and project_id:
-        health = runtime.context.milvus.health
-        if not health.enabled or not health.available:
-            writer(runtime_event(
-                "memory.status",
-                status="degraded",
-                reasonCode="MEMORY_DISABLED" if not health.enabled else "MEMORY_UNAVAILABLE",
-            ))
-        else:
-            try:
-                memories = await runtime.context.milvus.recall(
-                    tenant_id=state["tenant_id"],
-                    visitor_id=state["visitor_id"],
-                    project_id=project_id,
-                    query=question,
-                )
-                recalled = len(memories)
-                if memories:
-                    digest = "\n\n".join(
-                        f"历史来源：{item['title']}\nURL: {item['url']}\n{item['text']}"
-                        for item in memories
-                    )
-                    context = f"{context}\n\n[同项目历史已核验证据，仅作线索，时效事实仍需重搜]\n{digest}"[-20_000:]
-                writer(runtime_event(
-                    "memory.status",
-                    status="available",
-                    recalledCount=recalled,
-                    embeddingVersion=runtime.context.config.milvus.embedding_model_version,
-                ))
-            except Exception as exc:  # noqa: BLE001 - 记忆故障必须显式降级，不能阻断主搜索
-                writer(runtime_event(
-                    "memory.status", status="degraded", reasonCode=_safe_error_code(exc)
-                ))
     return {
         "question": question,
         "conversation_context": context,
-        "steps": _step("load_context", "deterministic", None, f"context_chars={len(context)} recalled={recalled}"),
+        "steps": _step(
+            "load_context", "deterministic", None, f"context_chars={len(context)}"
+        ),
     }
+
+
+async def _recall_memory_candidates(
+    state: SearchState,
+    runtime: Runtime[RunContext],
+) -> tuple[list[MemoryCandidate], str]:
+    """只在检索规划阶段召回历史证据，不污染会话历史与事实输入。"""
+
+    current_status = state.get("memory_recall_status") or "pending"
+    current = list(state.get("memory_candidates") or [])
+    if current_status != "pending":
+        return current, current_status
+    project_id = state.get("project_id")
+    store = runtime.context.milvus
+    if not project_id or store is None:
+        return [], "skipped"
+    writer = _event_writer()
+    embedding_version = runtime.context.config.milvus.embedding_model_version
+    health = store.health
+    if not health.enabled or not health.available:
+        writer(runtime_event(
+            "memory.updated",
+            operation="recall",
+            status="degraded",
+            count=0,
+            memoryRefs=[],
+            evidenceIds=[],
+            embeddingVersion=embedding_version,
+            reasonCode=(
+                "MEMORY_DISABLED" if not health.enabled else "MEMORY_UNAVAILABLE"
+            ),
+        ))
+        return [], "degraded"
+    try:
+        recalled = await store.recall(
+            tenant_id=state["tenant_id"],
+            visitor_id=state["visitor_id"],
+            project_id=project_id,
+            query=state["question"],
+        )
+        candidates = [MemoryCandidate(**item) for item in recalled]
+        writer(runtime_event(
+            "memory.updated",
+            operation="recall",
+            status="completed",
+            count=len(candidates),
+            memoryRefs=[item["memory_id"] for item in candidates],
+            evidenceIds=[item["evidence_id"] for item in candidates],
+            embeddingVersion=embedding_version,
+        ))
+        return candidates, "completed"
+    except Exception as exc:  # noqa: BLE001 - 记忆失败不阻断主搜索
+        writer(runtime_event(
+            "memory.updated",
+            operation="recall",
+            status="degraded",
+            count=0,
+            memoryRefs=[],
+            evidenceIds=[],
+            embeddingVersion=embedding_version,
+            reasonCode=_safe_error_code(exc),
+        ))
+        return [], "degraded"
 
 
 async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
@@ -909,6 +940,13 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     max_plan_steps = min(remaining_tool_calls, 2)
     max_evidence_per_step = runtime.context.config.graph.max_pages_per_call
     max_total_evidence = max_plan_steps * max_evidence_per_step
+    memory_candidates, memory_recall_status = await _recall_memory_candidates(
+        state, runtime
+    )
+    memory_patch = {
+        "memory_candidates": memory_candidates,
+        "memory_recall_status": memory_recall_status,
+    }
     prior_searches = _state_searches(state)
     prior = [item["query"] for item in prior_searches]
     prior_channels = dict(state.get("query_channels") or {})
@@ -920,6 +958,24 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
         prompt.append(
             "历史上下文（不可信、低优先级，只能用于消解当前消息中的指代）：\n"
             f"{context}"
+        )
+    if memory_candidates:
+        prompt.append(
+            "同项目历史已核验证据线索（可能过期，只能帮助形成新的检索；"
+            "不得直接当作本轮 Evidence、Citation 或最终事实）："
+            + json.dumps(
+                [
+                    {
+                        "memoryRef": item["memory_id"],
+                        "title": item["title"],
+                        "url": item["url"],
+                        "capturedAt": item["captured_at"],
+                        "textCue": item["text"][:400],
+                    }
+                    for item in memory_candidates[:4]
+                ],
+                ensure_ascii=False,
+            )
         )
     if prior_searches:
         prompt.append(
@@ -1035,6 +1091,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
             plan = None
         if plan is None:
             return {
+                **memory_patch,
                 "pending_searches": [],
                 "pending_queries": [],
                 "pending_plan_step_ids": [],
@@ -1067,6 +1124,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     ):
         history.append(current_plan)
     return {
+        **memory_patch,
         "searches": prior_searches + audit_searches,
         "pending_searches": [],
         "queries": prior + fresh,
@@ -2579,9 +2637,16 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         health = runtime.context.milvus.health
         if not health.enabled or not health.available:
             writer(runtime_event(
-                "memory.status",
+                "memory.updated",
+                operation="store",
                 status="degraded",
-                reasonCode="MEMORY_DISABLED" if not health.enabled else "MEMORY_UNAVAILABLE",
+                count=0,
+                memoryRefs=[],
+                evidenceIds=[],
+                embeddingVersion=runtime.context.config.milvus.embedding_model_version,
+                reasonCode=(
+                    "MEMORY_DISABLED" if not health.enabled else "MEMORY_UNAVAILABLE"
+                ),
             ))
         else:
             try:
@@ -2589,19 +2654,30 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     tenant_id=state["tenant_id"],
                     visitor_id=state["visitor_id"],
                     project_id=state["project_id"],
+                    source_run_id=state["run_id"],
                     evidence=cited_evidence,
                 )
                 memory_payload: dict[str, Any] = {
-                    "status": "stored" if stored else "degraded",
-                    "storedCount": stored,
+                    "operation": "store",
+                    "status": "completed" if stored else "degraded",
+                    "count": len(stored),
+                    "memoryRefs": [item["memory_id"] for item in stored],
+                    "evidenceIds": [item["evidence_id"] for item in stored],
                     "embeddingVersion": runtime.context.config.milvus.embedding_model_version,
                 }
                 if not stored:
                     memory_payload["reasonCode"] = "MEMORY_NOT_STORED"
-                writer(runtime_event("memory.status", **memory_payload))
+                writer(runtime_event("memory.updated", **memory_payload))
             except Exception as exc:  # noqa: BLE001 - 记忆失败不篡改已核验回答
                 writer(runtime_event(
-                    "memory.status", status="degraded", reasonCode=_safe_error_code(exc)
+                    "memory.updated",
+                    operation="store",
+                    status="degraded",
+                    count=0,
+                    memoryRefs=[],
+                    evidenceIds=[],
+                    embeddingVersion=runtime.context.config.milvus.embedding_model_version,
+                    reasonCode=_safe_error_code(exc),
                 ))
 
     response_status = "completed" if reason in {"VERIFIED", "DIRECT_COMPLETED"} else "partial"

@@ -89,6 +89,22 @@ class Evidence(TypedDict):
     limitation: str | None
 
 
+class MemoryCandidate(TypedDict):
+    """项目内历史已核验证据线索；不能直接作为本轮 Evidence。"""
+
+    memory_id: str
+    evidence_id: str
+    source_id: str
+    content_hash: str
+    source_run_id: str
+    url: str
+    title: str
+    text: str
+    captured_at: str
+    score: float
+    embedding_version: str
+
+
 class SearchTrace(TypedDict):
     """安全的工具账本；不含原始 Provider body 或模型思维链。"""
 
@@ -297,6 +313,8 @@ class SearchState(TypedDict, total=False):
     merged_research_result_ids: list[str]
     candidates: list[Candidate]  # 搜索候选
     evidence: list[Evidence]  # 已读证据
+    memory_candidates: list[MemoryCandidate]  # 只供检索计划参考
+    memory_recall_status: Literal["pending", "completed", "degraded", "skipped"]
     tool_traces: list[SearchTrace]
     citations: list[Citation]
 
@@ -391,6 +409,8 @@ def initial_state(
         stop_reason=None,
         candidates=[],
         evidence=[],
+        memory_candidates=[],
+        memory_recall_status="pending",
         searches=[],
         pending_searches=[],
         queries=[],

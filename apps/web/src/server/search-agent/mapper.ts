@@ -322,13 +322,22 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
       durationMs: event.durationMs || 0
     } }] };
   }
-  if (event.type === "memory.status") {
-    const summary = event.status === "available"
-      ? `已召回 ${event.recalledCount || 0} 条同项目证据线索`
-      : event.status === "stored"
-        ? `已保存 ${event.storedCount || 0} 条核验证据`
-        : "长期证据记忆当前不可用，主搜索继续运行";
-    return { events: [{ type: "memory.updated", payload: { memoryId: `memory:${event.status}`, status: event.status, summary, recalledCount: event.recalledCount, storedCount: event.storedCount, embeddingVersion: event.embeddingVersion, reasonCode: event.reasonCode } }] };
+  if (event.type === "memory.updated") {
+    const summary = event.status === "degraded"
+      ? "历史证据记忆当前不可用，主搜索继续运行"
+      : event.operation === "recall"
+        ? `召回 ${event.count} 条历史证据线索`
+        : `保存 ${event.count} 条已引用证据`;
+    return { events: [{ type: "memory.updated", payload: {
+      operation: event.operation,
+      status: event.status,
+      count: event.count,
+      memoryRefs: event.memoryRefs,
+      evidenceIds: event.evidenceIds,
+      embeddingVersion: event.embeddingVersion,
+      reasonCode: event.reasonCode,
+      summary
+    } }] };
   }
   if (event.type === "verification.completed") {
     if (!event.publicSummary) return { events: [] };
