@@ -20,8 +20,8 @@
 - 真实小红书运行 `run_32747c65d748476d99e723007adf8a14` 用时 31.493 秒，两次工具调用均
   success、各 5 个候选与 3 条正文；6 个稳定 Evidence 均经历 read/accepted，其中答案实际引用
   的 3 个进入 cited，另 3 个保持 accepted，助手消息恰有 3 个 Citation，最终
-  `VERIFIED / completed`。持久公开事件敏感字段扫描为 0。身份回归
-  `run_fef1d68859c449bf9da107c77ed3e57c` 在已有其他主题消息的同一线程中用时 3.825 秒，由模型
+  `VERIFIED / completed`。持久公开事件敏感字段扫描为 0。UTF-8 身份回归
+  `run_f1b18b5a46184e3c92251fac67cce5a5` 在已有其他主题消息的同一线程中用时 2.945 秒，由模型
   一次调用直接回答“你是谁”，0 plan、0 tool、0 Evidence。
 - 门禁：Search Agent `258 passed`、Ruff、compileall；共享合同 `6 passed`；Web
   `385 passed, 1 skipped`、typecheck、lint、production build；Playwright
@@ -29,10 +29,9 @@
   `agent-workbench/{search-agent,web}:pre-issue-19-244a553` 并滚动部署 Search Agent 与 Web；
   Compose 七服务 healthy，3000、8080 与
   [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。完整记录见
-  `docs/development/2026-08-01-026-issue-19-evidence-lifecycle.md`。
-- 额外真实探针 `run_4586b7638e894c138c21498b8ca8edae` 暴露出 Supervisor 偶发把明确“请搜索”
-  请求判为直接回答；该问题不通过固定关键词或本 Issue 偷改处理，下一独立路由 Issue 应以真实
-  structured intent 约束修复并保留“你是谁”短路路径。
+  `docs/development/2026-08-01-026-issue-19-evidence-lifecycle.md`。早先一次 PowerShell 探针未显式
+  使用 UTF-8，持久输入已被核对为 `???`，不作为产品路由证据；修正编码后的搜索与身份回归均
+  按真实意图执行。
 
 ## 当前结论（2026-08-01，Issue #20 模型 Markdown 字段输出已优化）
 

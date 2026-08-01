@@ -94,16 +94,19 @@ Workbench Reducer 按规范 URL 归并来源，只有身份完全一致且迁移
 - `wb_agent_events` 对 reasoning_content、Provider body、Prompt、Cookie、authorization 与 API key
   的扫描计数为 0。
 
-同一线程带旧主题后发送“你是谁”的运行 `run_fef1d68859c449bf9da107c77ed3e57c`：
+同一线程先发送英国奖学金主题，再以显式 UTF-8 发送“你是谁”的运行
+`run_f1b18b5a46184e3c92251fac67cce5a5`：
 
-- 3.825 秒；
+- 2.945 秒；
 - `answerSource=model`、`answerModelCalls=1`；
 - 0 plan、0 tool、0 Evidence；
 - 唯一 `run.completed`，没有把旧主题带入回答。
 
-一个额外显式搜索探针 `run_4586b7638e894c138c21498b8ca8edae` 被 Supervisor 偶发误判为
-direct。它没有用于 Evidence 验收，也没有被隐藏或伪报；后续应以独立 Issue 修复 structured
-intent 的显式搜索约束，同时继续保留真实模型身份回答，不能用前端固定模板或固定答案绕过。
+早先一次 PowerShell 探针没有显式以 UTF-8 编码请求体；复核 `wb_agent_events` 后确认服务端实际
+收到的是 `??? LangGraph ...`，而不是原中文“请搜索”请求，因此该运行不作为路由缺陷或验收
+证据。改用 `application/json; charset=utf-8` 和 UTF-8 bytes 后，小红书请求正常产生结构化计划、
+两次真实工具调用和 Evidence 生命周期；身份问题正常走 direct。此处没有为探针编码错误创建
+产品 Issue，也没有增加关键词固定路由。
 
 ## 部署与回滚
 
