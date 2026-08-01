@@ -8,7 +8,7 @@
     "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
     "revision": 1,
     "steps": [
-      { "id": "step_one", "facet": "来源", "objective": "查找来源", "queries": ["A"], "preferredTools": ["web_search"], "dependsOn": ["step_unknown"], "evidenceNeeded": 1, "status": "todo" }
+      { "id": "step_one", "facet": "来源", "objective": "查找来源", "queries": ["A"], "preferredTools": ["web_search"], "dependsOn": ["step_unknown"], "priority": 90, "evidenceNeeded": 1, "canParallelize": true, "status": "todo" }
     ],
     "stopConditions": ["获得证据"],
     "reasonCodes": ["search_required"],

@@ -16,6 +16,14 @@ from langgraph.runtime import Runtime
 
 from app.events.runtime import runtime_event, safe_public_text
 from app.graph.context import RunContext
+from app.graph.plan import (
+    PlanValidationError,
+    build_plan_snapshot,
+    has_todo_steps,
+    requests_for_steps,
+    settle_running_steps,
+    start_ready_steps,
+)
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     ComposeResult,
@@ -484,7 +492,11 @@ def _state_searches(state: SearchState) -> list[SearchRequest]:
         query = _normalize_query(str(item.get("query") or ""))
         channel = str(item.get("channel") or "")
         if query and channel in _RESEARCH_CHANNELS:
-            searches.append(SearchRequest(query=query, channel=channel))
+            request = SearchRequest(query=query, channel=channel)
+            step_id = str(item.get("step_id") or "")
+            if step_id:
+                request["step_id"] = step_id
+            searches.append(request)
     if searches:
         return searches
 
@@ -504,7 +516,11 @@ def _pending_searches(state: SearchState) -> list[SearchRequest]:
         query = _normalize_query(str(item.get("query") or ""))
         channel = str(item.get("channel") or "")
         if query and channel in _RESEARCH_CHANNELS:
-            pending.append(SearchRequest(query=query, channel=channel))
+            request = SearchRequest(query=query, channel=channel)
+            step_id = str(item.get("step_id") or "")
+            if step_id:
+                request["step_id"] = step_id
+            pending.append(request)
     if pending:
         return pending
 
@@ -802,27 +818,65 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     # Supervisor 约束首轮范围；后续只有 Reflector/Verifier 的结构化建议
     # 可以显式开放互补渠道，避免 Planner 任意越权。
     allowed_channels.update(item["channel"] for item in suggested)
-    fresh_searches: list[SearchRequest] = []
-    fresh_channels: dict[str, Any] = {}
-    for search in result.searches:
-        normalized = _normalize_query(search.query)
-        key = _search_key(normalized, search.channel)
-        if normalized and key not in prior_keys and search.channel in allowed_channels:
-            prior_keys.add(key)
-            fresh_searches.append(
-                SearchRequest(query=normalized, channel=search.channel)
-            )
-            fresh_channels[normalized] = search.channel
+    iteration = state.get("round", 0) + 1
+    revision = state.get("plan_revision", 0) + 1
+    try:
+        plan = build_plan_snapshot(
+            run_id=state["run_id"],
+            iteration=iteration,
+            revision=revision,
+            created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            planned_steps=result.steps,
+            allowed_channels=allowed_channels,
+            prior_search_keys=prior_keys,
+        )
+    except PlanValidationError as exc:
+        return {
+            "pending_searches": [],
+            "pending_queries": [],
+            "pending_plan_step_ids": [],
+            "plan_ready": False,
+            "plan_error_code": exc.code,
+            "round": iteration,
+            "no_progress_count": state.get("no_progress_count", 0) + 1,
+            "replan_required": False,
+            **_structured_usage_patch(state, usage),
+            "steps": _step(
+                "plan_research",
+                "deterministic",
+                None,
+                f"rejected={exc.code}",
+            ),
+        }
+    fresh_searches = requests_for_steps(plan["steps"])
+    audit_searches = [
+        SearchRequest(query=item["query"], channel=item["channel"])
+        for item in fresh_searches
+    ]
+    fresh_channels = {
+        item["query"]: item["channel"] for item in fresh_searches
+    }
     fresh = [item["query"] for item in fresh_searches]
-    no_progress = state.get("no_progress_count", 0) + (0 if fresh_searches else 1)
+    history = list(state.get("plan_history") or [])
+    current_plan = state.get("plan")
+    if current_plan and (
+        not history or history[-1]["plan_id"] != current_plan["plan_id"]
+    ):
+        history.append(current_plan)
     return {
-        "searches": prior_searches + fresh_searches,
-        "pending_searches": fresh_searches,
+        "searches": prior_searches + audit_searches,
+        "pending_searches": [],
         "queries": prior + fresh,
         "query_channels": {**prior_channels, **fresh_channels},
-        "pending_queries": fresh,
-        "round": state.get("round", 0) + 1,
-        "no_progress_count": no_progress,
+        "pending_queries": [],
+        "plan": plan,
+        "plan_history": history,
+        "plan_revision": revision,
+        "plan_ready": True,
+        "plan_error_code": None,
+        "pending_plan_step_ids": [],
+        "round": iteration,
+        "no_progress_count": 0,
         "replan_required": False,
         **_structured_usage_patch(state, usage),
         "steps": _step(
@@ -832,6 +886,46 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
             f"new_searches={len(fresh_searches)}",
         ),
     }
+
+
+async def mark_plan_running(
+    state: SearchState,
+    runtime: Runtime[RunContext],
+) -> dict[str, Any]:
+    """在执行工具前提交可恢复的 running 计划快照。"""
+
+    del runtime
+    plan = state.get("plan")
+    if not plan:
+        return {
+            "pending_searches": [],
+            "pending_queries": [],
+            "pending_plan_step_ids": [],
+            "stop_reason": state.get("stop_reason") or "PLAN_MISSING",
+            "steps": _step("mark_plan_running", "deterministic", None, "plan_missing"),
+        }
+    revision = state.get("plan_revision", plan["revision"]) + 1
+    next_plan, selected = start_ready_steps(plan, revision=revision)
+    pending = requests_for_steps(selected)
+    patch: dict[str, Any] = {
+        "plan": next_plan,
+        "plan_revision": next_plan["revision"],
+        "pending_plan_step_ids": [step["step_id"] for step in selected],
+        "pending_searches": pending,
+        "pending_queries": [item["query"] for item in pending],
+        "replan_required": False,
+        "plan_ready": False,
+        "steps": _step(
+            "mark_plan_running",
+            "deterministic",
+            None,
+            f"running_steps={len(selected)}",
+        ),
+    }
+    if not selected:
+        patch["stop_reason"] = state.get("stop_reason") or "PLAN_NO_RUNNABLE_STEP"
+        patch["no_progress_count"] = state.get("no_progress_count", 0) + 1
+    return patch
 
 
 def _idempotency_key(state: SearchState, arguments: SearchToolInput) -> tuple[str, str]:
@@ -850,6 +944,7 @@ async def _run_one_search(
     tool_call_id: str,
     arguments: SearchToolInput,
     *,
+    plan_step_id: str | None = None,
     timeout_seconds: float | None = None,
     xiaohongshu_public_only: bool = False,
 ) -> tuple[SearchExecutionResult, SearchTrace]:
@@ -859,6 +954,7 @@ async def _run_one_search(
     observed_result_count = 0
     observed_evidence_count = 0
     announced_verifications: set[str] = set()
+    tool_ref = {"planStepId": plan_step_id} if plan_step_id else {}
 
     def stream_progress(update: ChannelProgress) -> None:
         nonlocal observed_evidence_count, observed_result_count, progress_emitted
@@ -868,6 +964,7 @@ async def _run_one_search(
         writer(runtime_event(
             "tool.progress",
             toolCallId=tool_call_id,
+            **tool_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -899,6 +996,7 @@ async def _run_one_search(
         writer(runtime_event(
             event_type,
             toolCallId=tool_call_id,
+            **tool_ref,
             challengeId=update.challenge_id,
             status=update.status,
             expiresAt=update.expires_at,
@@ -911,6 +1009,7 @@ async def _run_one_search(
     writer(runtime_event(
         "tool.started",
         toolCallId=tool_call_id,
+        **tool_ref,
         toolName="web_search",
         query=arguments.query,
         channel=arguments.channel,
@@ -937,6 +1036,7 @@ async def _run_one_search(
             writer(runtime_event(
                 "tool.unknown",
                 toolCallId=tool_call_id,
+                **tool_ref,
                 toolName="web_search",
                 query=arguments.query,
                 channel=arguments.channel,
@@ -957,6 +1057,7 @@ async def _run_one_search(
         writer(runtime_event(
             "tool.unknown",
             toolCallId=tool_call_id,
+            **tool_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -964,6 +1065,7 @@ async def _run_one_search(
         ))
         return result, SearchTrace(
             tool_call_id=tool_call_id,
+            **({"plan_step_id": plan_step_id} if plan_step_id else {}),
             idempotency_key=idempotency_key,
             query=arguments.query,
             channel=arguments.channel,
@@ -994,6 +1096,7 @@ async def _run_one_search(
         writer(runtime_event(
             "tool.unknown",
             toolCallId=tool_call_id,
+            **tool_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -1015,6 +1118,7 @@ async def _run_one_search(
             writer(runtime_event(
                 "tool.unknown",
                 toolCallId=tool_call_id,
+                **tool_ref,
                 toolName="web_search",
                 query=arguments.query,
                 channel=arguments.channel,
@@ -1103,6 +1207,7 @@ async def _run_one_search(
                 writer(runtime_event(
                     "tool.unknown",
                     toolCallId=tool_call_id,
+                    **tool_ref,
                     toolName="web_search",
                     query=arguments.query,
                     channel=arguments.channel,
@@ -1116,6 +1221,7 @@ async def _run_one_search(
                 writer(runtime_event(
                     "tool.unknown",
                     toolCallId=tool_call_id,
+                    **tool_ref,
                     toolName="web_search",
                     query=arguments.query,
                     channel=arguments.channel,
@@ -1151,6 +1257,7 @@ async def _run_one_search(
                 writer(runtime_event(
                     "tool.unknown",
                     toolCallId=tool_call_id,
+                    **tool_ref,
                     toolName="web_search",
                     query=arguments.query,
                     channel=arguments.channel,
@@ -1183,6 +1290,7 @@ async def _run_one_search(
                 writer(runtime_event(
                     "tool.unknown",
                     toolCallId=tool_call_id,
+                    **tool_ref,
                     toolName="web_search",
                     query=arguments.query,
                     channel=arguments.channel,
@@ -1224,6 +1332,7 @@ async def _run_one_search(
         writer(runtime_event(
             "tool.completed",
             toolCallId=tool_call_id,
+            **tool_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -1250,6 +1359,7 @@ async def _run_one_search(
         writer(runtime_event(
             "tool.failed",
             toolCallId=tool_call_id,
+            **tool_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -1268,6 +1378,7 @@ async def _run_one_search(
 
     trace = SearchTrace(
         tool_call_id=tool_call_id,
+        **({"plan_step_id": plan_step_id} if plan_step_id else {}),
         idempotency_key=idempotency_key,
         query=arguments.query,
         channel=arguments.channel,
@@ -1311,6 +1422,7 @@ def _planned_tool_call_id(
 ) -> str:
     material = (
         f"{state['run_id']}|{state.get('round', 0)}|{index}|"
+        f"{search.get('step_id') or 'legacy'}|"
         f"{search['channel']}|{search['query'].casefold().strip()}"
     )
     return f"call_search_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
@@ -1327,6 +1439,27 @@ def _xiaohongshu_circuit_is_open(traces: list[SearchTrace]) -> bool:
         )
         for trace in traces
     )
+
+
+def _settle_pending_plan(
+    state: SearchState,
+    reason_code: str,
+) -> dict[str, Any]:
+    plan = state.get("plan")
+    step_ids = list(state.get("pending_plan_step_ids") or [])
+    if not plan or not step_ids:
+        return {"pending_plan_step_ids": []}
+    revision = state.get("plan_revision", plan["revision"]) + 1
+    settled = settle_running_steps(
+        plan,
+        revision=revision,
+        outcomes={step_id: reason_code for step_id in step_ids},
+    )
+    return {
+        "plan": settled,
+        "plan_revision": revision,
+        "pending_plan_step_ids": [],
+    }
 
 
 async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
@@ -1350,6 +1483,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             "pending_searches": [],
             "pending_queries": [],
             "stop_reason": state.get("stop_reason") or "TOOL_CALL_LIMIT",
+            **_settle_pending_plan(state, "TOOL_CALL_LIMIT"),
             "steps": _step("research", "deterministic", None, "tool_budget_exhausted"),
         }
     if _remaining_model_calls(state) < 4:
@@ -1359,6 +1493,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             "stop_reason": state.get("stop_reason") or "MODEL_CALL_LIMIT",
             "no_progress_count": state.get("no_progress_count", 0) + 1,
             "replan_required": False,
+            **_settle_pending_plan(state, "MODEL_CALL_LIMIT"),
             "steps": _step("research", "deterministic", None, "finalization_budget_reserved"),
         }
 
@@ -1367,7 +1502,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         "TOOL_CALL_LIMIT" if len(targets) < len(pending_searches) else None
     )
     scheduled: list[
-        tuple[int, str, SearchToolInput, float | None]
+        tuple[int, str | None, str, SearchToolInput, float | None]
     ] = []
     for index, target in enumerate(targets):
         channel = target["channel"]
@@ -1380,15 +1515,20 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             continue
         scheduled.append((
             index,
+            target.get("step_id"),
             _planned_tool_call_id(state, index, target),
             SearchToolInput(query=target["query"], channel=channel, max_results=5),
             timeout_seconds,
         ))
 
-    indexed_results: dict[int, tuple[str, SearchExecutionResult, SearchTrace]] = {}
+    indexed_results: dict[
+        int,
+        tuple[str | None, str, SearchExecutionResult, SearchTrace],
+    ] = {}
 
     async def execute_one(
         index: int,
+        plan_step_id: str | None,
         tool_call_id: str,
         arguments: SearchToolInput,
         timeout_seconds: float | None,
@@ -1400,31 +1540,39 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             runtime,
             tool_call_id,
             arguments,
+            plan_step_id=plan_step_id,
             timeout_seconds=timeout_seconds,
             xiaohongshu_public_only=xiaohongshu_public_only,
         )
-        indexed_results[index] = (tool_call_id, result, trace)
+        indexed_results[index] = (plan_step_id, tool_call_id, result, trace)
 
     xiaohongshu_targets = [
-        item for item in scheduled if item[2].channel == "xiaohongshu"
+        item for item in scheduled if item[3].channel == "xiaohongshu"
     ]
     other_targets = [
-        item for item in scheduled if item[2].channel != "xiaohongshu"
+        item for item in scheduled if item[3].channel != "xiaohongshu"
     ]
 
     async def execute_xiaohongshu_group() -> None:
         public_only = _xiaohongshu_circuit_is_open(
             list(state.get("tool_traces") or [])
         )
-        for index, tool_call_id, arguments, timeout_seconds in xiaohongshu_targets:
+        for (
+            index,
+            plan_step_id,
+            tool_call_id,
+            arguments,
+            timeout_seconds,
+        ) in xiaohongshu_targets:
             await execute_one(
                 index,
+                plan_step_id,
                 tool_call_id,
                 arguments,
                 timeout_seconds,
                 xiaohongshu_public_only=public_only,
             )
-            trace = indexed_results[index][2]
+            trace = indexed_results[index][3]
             if _xiaohongshu_circuit_is_open([trace]):
                 public_only = True
 
@@ -1439,9 +1587,24 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
     new_candidates: list[Candidate] = []
     new_evidence: list[Evidence] = []
     traces: list[SearchTrace] = []
+    outcomes: dict[str, str | None] = {
+        step_id: projected_limit or "PLAN_STEP_NOT_EXECUTED"
+        for step_id in state.get("pending_plan_step_ids") or []
+    }
+    evidence_targets = {
+        step["step_id"]: step["evidence_needed"]
+        for step in (state.get("plan") or {}).get("steps", [])
+    }
     for index in sorted(indexed_results):
-        tool_call_id, result, trace = indexed_results[index]
+        plan_step_id, tool_call_id, result, trace = indexed_results[index]
         traces.append(trace)
+        if plan_step_id:
+            if trace["status"] not in {"completed", "cached"}:
+                outcomes[plan_step_id] = trace.get("error_code") or "SEARCH_FAILED"
+            elif trace["evidence_count"] < evidence_targets.get(plan_step_id, 0):
+                outcomes[plan_step_id] = "PLAN_EVIDENCE_TARGET_UNMET"
+            else:
+                outcomes[plan_step_id] = None
         if result.error_code == "RUN_TIME_RESERVE":
             projected_limit = projected_limit or "RUN_TIME_RESERVE"
         for item in result.results:
@@ -1493,9 +1656,23 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
     executed_tool_calls = len(indexed_results)
     interaction_wait_seconds = sum(
         result.interaction_wait_ms
-        for _tool_call_id, result, _trace in indexed_results.values()
+        for _plan_step_id, _tool_call_id, result, _trace in indexed_results.values()
     ) / 1000
     gained = len(evidence) - len(state.get("evidence") or [])
+    plan_patch: dict[str, Any] = {"pending_plan_step_ids": []}
+    current_plan = state.get("plan")
+    if current_plan and state.get("pending_plan_step_ids"):
+        revision = state.get("plan_revision", current_plan["revision"]) + 1
+        settled = settle_running_steps(
+            current_plan,
+            revision=revision,
+            outcomes=outcomes,
+        )
+        plan_patch = {
+            "plan": settled,
+            "plan_revision": revision,
+            "pending_plan_step_ids": [],
+        }
     return {
         "candidates": candidates,
         "evidence": evidence,
@@ -1507,6 +1684,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         ),
         "pending_searches": [],
         "pending_queries": [],
+        **plan_patch,
         "stop_reason": state.get("stop_reason") or projected_limit,
         "no_progress_count": 0 if gained else state.get("no_progress_count", 0) + 1,
         "replan_required": False,
@@ -2068,6 +2246,16 @@ def route_after_intent(state: SearchState) -> str:
     if not state.get("need_search"):
         return "compose"
     return "compose" if budget_reason(state, reserve_model_calls=2) else "plan_research"
+
+
+def route_after_plan(state: SearchState) -> str:
+    return "mark_plan_running" if state.get("plan_ready") else "reflect"
+
+
+def route_after_research(state: SearchState) -> str:
+    if not state.get("stop_reason") and has_todo_steps(state.get("plan")):
+        return "mark_plan_running"
+    return "reflect"
 
 
 def route_after_reflect(state: SearchState) -> str:

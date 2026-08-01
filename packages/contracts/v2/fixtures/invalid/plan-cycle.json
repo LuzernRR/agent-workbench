@@ -8,8 +8,8 @@
     "scope": { "tenantId": "tenant_1", "actorId": "actor_1", "visitorId": "visitor_1", "projectId": "project_1", "threadId": "thread_1" },
     "revision": 1,
     "steps": [
-      { "id": "step_a", "facet": "A", "objective": "步骤 A", "queries": [], "preferredTools": [], "dependsOn": ["step_b"], "evidenceNeeded": 0, "status": "todo" },
-      { "id": "step_b", "facet": "B", "objective": "步骤 B", "queries": [], "preferredTools": [], "dependsOn": ["step_a"], "evidenceNeeded": 0, "status": "todo" }
+      { "id": "step_a", "facet": "A", "objective": "步骤 A", "queries": [], "preferredTools": [], "dependsOn": ["step_b"], "priority": 80, "evidenceNeeded": 0, "canParallelize": false, "status": "todo" },
+      { "id": "step_b", "facet": "B", "objective": "步骤 B", "queries": [], "preferredTools": [], "dependsOn": ["step_a"], "priority": 70, "evidenceNeeded": 0, "canParallelize": false, "status": "todo" }
     ],
     "stopConditions": ["完成计划"],
     "reasonCodes": ["search_required"],

@@ -158,7 +158,7 @@ describe("reduceAgentEvent", () => {
   it("uses the latest event-driven plan and records run timing", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "run.created", {}),
-      event(2, "plan.updated", { steps: [
+      event(2, "plan.updated", { planId: "plan-one", revision: 2, steps: [
         { id: "one", title: "读取项目", status: "done" },
         { id: "two", title: "完成测试", status: "in_progress" },
         { id: "three", title: "等待授权", status: "blocked", notes: "需要确认数据权限" }
@@ -166,12 +166,25 @@ describe("reduceAgentEvent", () => {
       event(3, "run.completed", {})
     ]);
     expect(state.plan).toEqual([
-      { id: "one", title: "读取项目", status: "done", notes: undefined },
-      { id: "two", title: "完成测试", status: "in_progress", notes: undefined },
-      { id: "three", title: "等待授权", status: "blocked", notes: "需要确认数据权限" }
+      { id: "one", planId: "plan-one", revision: 2, title: "读取项目", status: "done", notes: undefined },
+      { id: "two", planId: "plan-one", revision: 2, title: "完成测试", status: "in_progress", notes: undefined },
+      { id: "three", planId: "plan-one", revision: 2, title: "等待授权", status: "blocked", notes: "需要确认数据权限" }
     ]);
+    expect(state.planId).toBe("plan-one");
+    expect(state.planRevision).toBe(2);
     expect(state.runTimings.run).toEqual({ startedAt: base.createdAt, completedAt: base.createdAt });
     expect(state.runStatuses.run).toBe("completed");
+  });
+
+  it("拒绝较旧计划修订覆盖已持久化快照", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "plan.updated", { planId: "plan-new", revision: 3, steps: [{ id: "new", title: "新计划", status: "running" }] }),
+      event(2, "plan.updated", { planId: "plan-old", revision: 2, steps: [{ id: "old", title: "旧计划", status: "done" }] })
+    ]);
+
+    expect(state.planId).toBe("plan-new");
+    expect(state.planRevision).toBe(3);
+    expect(state.plan[0]).toMatchObject({ id: "new", status: "in_progress" });
   });
 
   it.each(["run.completed", "run.failed", "run.cancelled"] as const)("在 %s 终态把悬空工具诚实结算为 unknown", (terminalType) => {

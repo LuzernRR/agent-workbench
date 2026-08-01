@@ -18,7 +18,9 @@
       "queries": [],
       "preferredTools": [],
       "dependsOn": [],
+      "priority": 100,
       "evidenceNeeded": 0,
+      "canParallelize": false,
       "status": "done"
     },
     {
@@ -28,7 +30,9 @@
       "queries": [],
       "preferredTools": [],
       "dependsOn": ["step_analyze"],
+      "priority": 80,
       "evidenceNeeded": 0,
+      "canParallelize": false,
       "status": "todo"
     }
   ],

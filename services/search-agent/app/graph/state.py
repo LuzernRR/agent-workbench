@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import operator
 from datetime import UTC, datetime
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from app.prompts.agents import PROMPT_VERSION
 from app.tools.channels.base import ChannelName
@@ -22,6 +22,7 @@ NodeName = Literal[
     "load_context",
     "classify_intent",
     "plan_research",
+    "mark_plan_running",
     "research",
     "reflect",
     "compose",
@@ -83,6 +84,7 @@ class SearchTrace(TypedDict):
     """安全的工具账本；不含原始 Provider body 或模型思维链。"""
 
     tool_call_id: str
+    plan_step_id: NotRequired[str]
     idempotency_key: str
     query: str
     channel: ChannelName
@@ -104,6 +106,36 @@ class SearchRequest(TypedDict):
 
     query: str
     channel: ChannelName
+    step_id: NotRequired[str]
+
+
+PlanStepStatus = Literal["todo", "running", "done", "blocked", "skipped"]
+
+
+class PlanStep(TypedDict):
+    """一个可持久化、可追踪的原子计划步骤。"""
+
+    step_id: str
+    facet: str
+    objective: str
+    query: str
+    channel: ChannelName
+    depends_on: list[str]
+    priority: int
+    evidence_needed: int
+    can_parallelize: bool
+    status: PlanStepStatus
+    reason_code: str | None
+
+
+class PlanSnapshot(TypedDict):
+    """完整计划快照；每次状态变化产生新 revision。"""
+
+    plan_id: str
+    revision: int
+    iteration: int
+    created_at: str
+    steps: list[PlanStep]
 
 
 class Citation(TypedDict):
@@ -137,6 +169,12 @@ class SearchState(TypedDict, total=False):
     # 各节点产出
     intent: dict  # 意图分类结果
     need_search: bool
+    plan: PlanSnapshot | None
+    plan_history: list[PlanSnapshot]
+    plan_revision: int
+    plan_ready: bool
+    plan_error_code: str | None
+    pending_plan_step_ids: list[str]
     searches: list[SearchRequest]  # 已接受的查询+渠道历史；去重以二者组合为准
     pending_searches: list[SearchRequest]  # 当前轮待执行的结构化查询；完成后清空
     queries: list[str]  # 兼容审计视图；同一查询可因渠道不同重复出现
@@ -227,6 +265,12 @@ def initial_state(
         started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         prompt_version=PROMPT_VERSION,
         steps=[],
+        plan=None,
+        plan_history=[],
+        plan_revision=0,
+        plan_ready=False,
+        plan_error_code=None,
+        pending_plan_step_ids=[],
         round=0,
         sufficient=False,
         stop_reason=None,

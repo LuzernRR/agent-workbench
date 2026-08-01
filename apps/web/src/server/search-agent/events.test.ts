@@ -202,19 +202,52 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     expect(parseSearchAgentEvent(nodeCompleted).type).toBe("node.completed");
     expect(() => parseSearchAgentEvent({ ...nodeCompleted, publicSummarySource: null })).toThrow(/同时存在/u);
     expect(() => parseSearchAgentEvent({ ...nodeCompleted, publicSummary: null })).toThrow(/同时存在/u);
+    const plan = {
+      planId: "plan_runtime_one",
+      revision: 1,
+      iteration: 1,
+      steps: [{
+        stepId: "step_runtime_one",
+        facet: "定义",
+        objective: "读取真实模型规划的官方定义",
+        query: "Agent Workbench 官方定义",
+        channel: "web",
+        dependsOn: [],
+        priority: 100,
+        evidenceNeeded: 1,
+        canParallelize: true,
+        status: "todo",
+        reasonCode: null
+      }]
+    } as const;
     expect(() => parseSearchAgentEvent({
       ...sourceEnvelope,
       type: "plan.updated",
-      iteration: 1,
-      queries: ["真实模型查询"]
+      ...plan
     })).toThrow();
     expect(parseSearchAgentEvent({
       ...sourceEnvelope,
       type: "plan.updated",
-      iteration: 1,
-      queries: ["真实模型查询"],
+      ...plan,
       planSource: "model"
     }).type).toBe("plan.updated");
+    expect(parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "plan.rejected",
+      iteration: 1,
+      reasonCode: "PLAN_CHANNEL_NOT_ALLOWED",
+      planSource: "model"
+    }).type).toBe("plan.rejected");
+    expect(() => parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "plan.updated",
+      ...plan,
+      steps: [
+        { ...plan.steps[0], dependsOn: ["step_runtime_two"] },
+        { ...plan.steps[0], stepId: "step_runtime_two", query: "第二个查询", dependsOn: ["step_runtime_one"] }
+      ],
+      planSource: "model"
+    })).toThrow(/依赖图/u);
     expect(() => parseSearchAgentEvent({
       ...sourceEnvelope,
       type: "tool.presented",
@@ -228,6 +261,7 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       ...sourceEnvelope,
       type: "tool.progress",
       toolCallId: "call_one",
+      planStepId: "step_runtime_one",
       toolName: "web_search",
       query: "LangGraph 最新文档",
       channel: "web",

@@ -28,6 +28,8 @@ export function createEmptyThreadState(projectId: string | null, threadId: strin
     files: [],
     logs: [],
     plan: [],
+    planId: null,
+    planRevision: 0,
     planUpdatedAt: null,
     runTimings: {},
     runStatuses: {},
@@ -147,12 +149,25 @@ function planValue(value: unknown): PlanStep[] | null {
   const steps: PlanStep[] = [];
   for (const [index, item] of value.entries()) {
     if (!item || typeof item !== "object") return null;
-    const candidate = item as Partial<PlanStep>;
-    if (typeof candidate.title !== "string" || !candidate.title.trim() || !["todo", "in_progress", "done", "blocked"].includes(candidate.status || "")) return null;
+    const candidate = item as Omit<Partial<PlanStep>, "status"> & { status?: string };
+    const rawStatus = candidate.status === "running" ? "in_progress" : candidate.status;
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : typeof candidate.objective === "string" ? candidate.objective.trim() : "";
+    if (!title || !["todo", "in_progress", "done", "blocked", "skipped"].includes(rawStatus || "")) return null;
     steps.push({
       id: typeof candidate.id === "string" && candidate.id ? candidate.id : String(index + 1),
-      title: candidate.title.trim(),
-      status: candidate.status as PlanStep["status"],
+      title,
+      ...(typeof candidate.planId === "string" ? { planId: candidate.planId } : {}),
+      ...(typeof candidate.revision === "number" ? { revision: candidate.revision } : {}),
+      ...(typeof candidate.facet === "string" && candidate.facet.trim() ? { facet: candidate.facet.trim() } : {}),
+      ...(typeof candidate.objective === "string" && candidate.objective.trim() ? { objective: candidate.objective.trim() } : {}),
+      ...(typeof candidate.query === "string" && candidate.query.trim() ? { query: candidate.query.trim() } : {}),
+      ...(["web", "x", "xiaohongshu"].includes(candidate.channel || "") ? { channel: candidate.channel } : {}),
+      ...(Array.isArray(candidate.dependsOn) && candidate.dependsOn.every((item) => typeof item === "string") ? { dependsOn: candidate.dependsOn } : {}),
+      ...(typeof candidate.priority === "number" && Number.isInteger(candidate.priority) ? { priority: candidate.priority } : {}),
+      ...(typeof candidate.evidenceNeeded === "number" && Number.isInteger(candidate.evidenceNeeded) ? { evidenceNeeded: candidate.evidenceNeeded } : {}),
+      ...(typeof candidate.canParallelize === "boolean" ? { canParallelize: candidate.canParallelize } : {}),
+      ...(typeof candidate.reasonCode === "string" && candidate.reasonCode ? { reasonCode: candidate.reasonCode } : {}),
+      status: rawStatus as PlanStep["status"],
       notes: typeof candidate.notes === "string" && candidate.notes.trim() ? candidate.notes.trim() : undefined
     });
   }
@@ -352,6 +367,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         id,
         runId: event.runId,
         toolCallId,
+        planStepId: stringValue(payload.planStepId) || undefined,
         name: stringValue(payload.name, "工具"),
         summary: stringValue(payload.summary, "正在准备"),
         status: "running",
@@ -514,8 +530,16 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
       };
     }
     case "plan.updated": {
+      const revision = numberValue(payload.revision);
+      if (revision > 0 && revision <= next.planRevision) return next;
       const plan = planValue(payload.steps);
-      return plan ? { ...next, plan, planUpdatedAt: event.createdAt } : next;
+      const planId = stringValue(payload.planId) || next.planId;
+      const hydrated = plan?.map((step) => ({
+        ...step,
+        ...(planId ? { planId } : {}),
+        ...(revision > 0 ? { revision } : {})
+      }));
+      return hydrated ? { ...next, plan: hydrated, planId, planRevision: revision || next.planRevision + 1, planUpdatedAt: event.createdAt } : next;
     }
     case "artifact.created":
     case "artifact.updated": {
@@ -636,6 +660,8 @@ export function truncateThreadStateForEdit(state: AgentThreadState, messageId: s
     files: [],
     logs: [],
     plan: [],
+    planId: null,
+    planRevision: 0,
     planUpdatedAt: null,
     runStatuses: Object.fromEntries(Object.entries(state.runStatuses).filter(([runId]) => !removedRunIds.has(runId))),
     runTimings: Object.fromEntries(Object.entries(state.runTimings).filter(([runId]) => !removedRunIds.has(runId)))

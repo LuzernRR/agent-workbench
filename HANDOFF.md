@@ -1,5 +1,30 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #12 结构化任务计划已完成）
+
+- 当前唯一活动功能为
+  [#12](https://github.com/LuzernRR/agent-workbench/issues/12)“结构化任务计划成为运行时
+  一等状态”，状态为 `ready`，`Execution Gate: allowed`。用户已预先授权按一 Issue、
+  一 feature 连续开发，因此本项通过完整门禁后直接执行受控收口，不等待逐项人工确认。
+- 共享 `SearchPlan/PlanStep` 合同新增 `priority` 与 `canParallelize`；生产 Planner 现在
+  输出 1–4 个原子步骤，字段包含局部 ID、facet、objective、query、channel、depends_on、
+  priority、evidence_needed 与 can_parallelize。服务端而非模型分配稳定 planId/stepId。
+- 新增 `app/graph/plan.py`，负责稳定 ID、query+channel 去重、渠道授权、优先级/证据目标
+  边界、未知依赖、依赖环、根步骤和生命周期校验。非法计划保留稳定 reason code，
+  不产生虚构公开摘要，也不把 Prompt、私有 CoT 或 Provider body 写入事件。
+- LangGraph 新增确定性 `mark_plan_running` 节点。完整计划快照按 revision 单调经历
+  `todo → running → done/blocked`；依赖步骤按拓扑批次推进，独立且声明可并行的步骤仍
+  由现有 Research 节点并发执行。真正的图级 `Send` fan-out/fan-in 留给下一 Issue。
+- 每个真实搜索事件与 `SearchTrace` 均保留 `planStepId`。Search Agent NDJSON、BFF Zod、
+  mapper、持久 AgentEvent、Reducer 和 Workbench 计划视图已贯通；Reducer 拒绝旧 revision
+  覆盖新快照，刷新/replay 可重建同一计划。
+- Workbench 计划页展示模型结构输出中的目标、query/channel、依赖、优先级、证据目标、
+  并行能力、步骤状态和稳定 reason code；前端只做标签与分组，不生成推理文案。
+- 门禁：共享合同 `6 passed`；Search Agent `210 passed`、Ruff、compileall；Web
+  `378 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。完整记录见
+  `docs/development/2026-08-01-018-issue-12-structured-runtime-plan.md`。
+
 ## 当前结论（2026-08-01，Issue #10 已获用户验收，执行受控收口）
 
 - 当前唯一活动功能为重新打开的

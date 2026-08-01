@@ -25,15 +25,19 @@ from app.graph.nodes import (
     compose,
     finalize,
     load_context,
+    mark_plan_running,
     plan_research,
     reflect,
     research,
     route_after_compose,
     route_after_intent,
+    route_after_plan,
     route_after_reflect,
+    route_after_research,
     route_after_verify,
     verify,
 )
+from app.graph.plan import public_plan_steps
 from app.graph.state import SearchState
 
 Node = Callable[[SearchState, Runtime[RunContext]], Awaitable[dict[str, Any]]]
@@ -42,6 +46,7 @@ _AGENT_BY_NODE = {
     "load_context": "supervisor",
     "classify_intent": "supervisor",
     "plan_research": "planner",
+    "mark_plan_running": "planner",
     "research": "researcher",
     "reflect": "reflector",
     "compose": "writer",
@@ -95,13 +100,16 @@ def _evented(name: str, function: Node) -> Node:
         try:
             patch = await function(state, runtime)
         except Exception as exc:
+            reason_code = str(getattr(exc, "code", "") or "").strip()
+            if not reason_code:
+                reason_code = type(exc).__name__.upper()[:80]
             writer(runtime_event(
                 "node.failed",
                 node=name,
                 nodeRunId=node_run_id,
                 agent=_AGENT_BY_NODE[name],
                 iteration=iteration,
-                reasonCode=type(exc).__name__.upper()[:80],
+                reasonCode=reason_code,
             ))
             raise
         steps = patch.get("steps") or []
@@ -127,15 +135,29 @@ def _evented(name: str, function: Node) -> Node:
             publicSummary=public_summary or None,
             publicSummarySource="model" if public_summary else None,
         ))
+        plan = patch.get("plan")
         if (
-            name == "plan_research"
-            and patch.get("pending_queries")
-            and model_call_recorded
+            plan
+            and int(plan.get("revision") or 0) > int(state.get("plan_revision") or 0)
         ):
             writer(runtime_event(
                 "plan.updated",
+                planId=plan["plan_id"],
+                revision=plan["revision"],
+                iteration=plan["iteration"],
+                steps=public_plan_steps(plan),
+                planSource="model" if name == "plan_research" else "runtime",
+            ))
+        plan_error_code = str(patch.get("plan_error_code") or "")
+        if (
+            name == "plan_research"
+            and plan_error_code
+            and plan_error_code != str(state.get("plan_error_code") or "")
+        ):
+            writer(runtime_event(
+                "plan.rejected",
                 iteration=patch.get("round", iteration),
-                queries=patch["pending_queries"],
+                reasonCode=plan_error_code,
                 planSource="model",
             ))
         if name == "verify":
@@ -157,6 +179,10 @@ def build_graph(checkpointer: object | None = None):
     graph.add_node("load_context", _evented("load_context", load_context))
     graph.add_node("classify_intent", _evented("classify_intent", classify_intent))
     graph.add_node("plan_research", _evented("plan_research", plan_research))
+    graph.add_node(
+        "mark_plan_running",
+        _evented("mark_plan_running", mark_plan_running),
+    )
     graph.add_node("research", _evented("research", research))
     graph.add_node("reflect", _evented("reflect", reflect))
     graph.add_node("compose", _evented("compose", compose))
@@ -170,8 +196,17 @@ def build_graph(checkpointer: object | None = None):
         route_after_intent,
         {"plan_research": "plan_research", "compose": "compose"},
     )
-    graph.add_edge("plan_research", "research")
-    graph.add_edge("research", "reflect")
+    graph.add_conditional_edges(
+        "plan_research",
+        route_after_plan,
+        {"mark_plan_running": "mark_plan_running", "reflect": "reflect"},
+    )
+    graph.add_edge("mark_plan_running", "research")
+    graph.add_conditional_edges(
+        "research",
+        route_after_research,
+        {"mark_plan_running": "mark_plan_running", "reflect": "reflect"},
+    )
     graph.add_conditional_edges(
         "reflect",
         route_after_reflect,

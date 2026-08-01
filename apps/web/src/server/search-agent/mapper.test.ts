@@ -41,9 +41,78 @@ describe("Search Agent v1 白名单投影", () => {
     expect(JSON.stringify([planned, replanned, reflected])).not.toContain("【");
   });
 
-  it("搜索查询只由真实工具卡展示，不创建运行结束后会陈旧的重复计划栏", () => {
-    const projection = mapSearchAgentEvent(source({ type: "plan.updated", iteration: 1, queries: ["CC Switch 定义", "CC Switch 原理"], planSource: "model" }), "run_one");
-    expect(projection.events).toEqual([]);
+  it("持久化完整结构化计划快照，供刷新与回放一致重建", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "plan.updated",
+      planId: "plan_runtime_one",
+      revision: 1,
+      iteration: 1,
+      planSource: "model",
+      steps: [{
+        stepId: "step_runtime_one",
+        facet: "定义",
+        objective: "读取 CC Switch 官方定义",
+        query: "CC Switch 定义",
+        channel: "web",
+        dependsOn: [],
+        priority: 100,
+        evidenceNeeded: 1,
+        canParallelize: true,
+        status: "todo",
+        reasonCode: null
+      }]
+    }), "run_one");
+    expect(projection.events).toEqual([{
+      type: "plan.updated",
+      payload: expect.objectContaining({
+        planId: "plan_runtime_one",
+        revision: 1,
+        steps: [expect.objectContaining({
+          id: "step_runtime_one",
+          query: "CC Switch 定义",
+          status: "todo",
+          canParallelize: true
+        })]
+      })
+    }]);
+  });
+
+  it("把计划拒绝保留为纯结构化日志码，不生成推理文案", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "plan.rejected",
+      iteration: 1,
+      reasonCode: "PLAN_CHANNEL_NOT_ALLOWED",
+      planSource: "model"
+    }), "run_one");
+
+    expect(projection.events).toMatchObject([{
+      type: "log.appended",
+      payload: {
+        log: expect.objectContaining({
+          actor: "planner",
+          level: "warn",
+          content: "PLAN_CHANNEL_NOT_ALLOWED"
+        })
+      }
+    }]);
+    expect(JSON.stringify(projection)).not.toContain("思考");
+  });
+
+  it("保留真实工具调用与结构计划步骤的关联", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "tool.started",
+      toolCallId: "call_one",
+      planStepId: "step_runtime_one",
+      toolName: "web_search",
+      query: "LangGraph 官方文档",
+      channel: "web",
+      cached: false
+    }), "run_one");
+
+    expect(projection.events[0].payload).toMatchObject({
+      toolCallId: "call_one",
+      planStepId: "step_runtime_one"
+    });
   });
 
   it("只持久化安全搜索字段，保留可点击来源且丢弃 snippet", () => {

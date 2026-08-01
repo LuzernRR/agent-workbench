@@ -28,6 +28,25 @@ class PlannedSearch(StrictModel):
     channel: ResearchChannel
 
 
+class PlannedStep(StrictModel):
+    """Planner 生成的局部步骤；稳定运行时 ID 由服务端分配。"""
+
+    local_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+        description="计划内唯一局部标识，例如 source_a；不得包含用户数据或密钥",
+    )
+    facet: str = Field(min_length=1, max_length=200)
+    objective: str = Field(min_length=1, max_length=500)
+    query: str = Field(min_length=2, max_length=300)
+    channel: ResearchChannel
+    depends_on: list[str] = Field(default_factory=list, max_length=4)
+    priority: int = Field(ge=0, le=100)
+    evidence_needed: int = Field(ge=0, le=10)
+    can_parallelize: bool
+
+
 class IntentResult(StrictModel):
     """classify_intent 节点产出。"""
 
@@ -46,12 +65,56 @@ class IntentResult(StrictModel):
 class PlanResult(StrictModel):
     """plan_research 节点产出。"""
 
-    searches: list[PlannedSearch] = Field(
-        description="1到4个查询与渠道组合，覆盖问题的不同方面并保留关键实体",
+    steps: list[PlannedStep] = Field(
+        description="1到4个原子检索步骤，包含目标、查询、渠道、依赖与证据要求",
         min_length=1,
         max_length=4,
     )
     summary: str = Field(description="一句话说明你的检索计划，面向用户，不超过80字")
+
+    @model_validator(mode="after")
+    def validate_step_graph(self) -> PlanResult:
+        ids = [step.local_id for step in self.steps]
+        if len(ids) != len(set(ids)):
+            raise ValueError("计划步骤 local_id 必须唯一")
+        known = set(ids)
+        dependencies: dict[str, list[str]] = {}
+        query_keys: set[tuple[str, ResearchChannel]] = set()
+        roots = 0
+        for step in self.steps:
+            if len(step.depends_on) != len(set(step.depends_on)):
+                raise ValueError("计划步骤依赖不得重复")
+            if step.local_id in step.depends_on:
+                raise ValueError("计划步骤不得依赖自身")
+            if any(dependency not in known for dependency in step.depends_on):
+                raise ValueError("计划步骤包含未知依赖")
+            dependencies[step.local_id] = list(step.depends_on)
+            roots += int(not step.depends_on)
+            query_key = (" ".join(step.query.casefold().split()), step.channel)
+            if query_key in query_keys:
+                raise ValueError("计划不得重复 query+channel")
+            query_keys.add(query_key)
+        if roots == 0:
+            raise ValueError("计划至少需要一个无依赖根步骤")
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def has_cycle(step_id: str) -> bool:
+            if step_id in visiting:
+                return True
+            if step_id in visited:
+                return False
+            visiting.add(step_id)
+            if any(has_cycle(dependency) for dependency in dependencies[step_id]):
+                return True
+            visiting.remove(step_id)
+            visited.add(step_id)
+            return False
+
+        if any(has_cycle(step_id) for step_id in ids):
+            raise ValueError("计划依赖图不得包含环")
+        return self
 
 
 class SourcePresentation(StrictModel):

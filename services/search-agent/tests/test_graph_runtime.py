@@ -422,12 +422,19 @@ class Scenario:
         elif role == "planner":
             queries = self.plans[min(index, len(self.plans) - 1)]
             result = PlanResult(
-                searches=[
+                steps=[
                     {
+                        "local_id": f"search_{position + 1}",
+                        "facet": f"证据面 {position + 1}",
+                        "objective": f"检索 {query}",
                         "query": query,
                         "channel": self.channels_by_query.get(query, "web"),
+                        "depends_on": [],
+                        "priority": 100 - position,
+                        "evidence_needed": 0,
+                        "can_parallelize": True,
                     }
-                    for query in queries
+                    for position, query in enumerate(queries)
                 ],
                 summary="已形成检索计划",
             )
@@ -823,6 +830,17 @@ async def test_force_search_runs_real_tool_even_when_supervisor_suggests_direct(
         "tool.completed",
         "tool.presented",
     ]
+    plan_events = [event for event in events if event["type"] == "plan.updated"]
+    assert [event["revision"] for event in plan_events] == [1, 2, 3]
+    assert [event["steps"][0]["status"] for event in plan_events] == [
+        "todo",
+        "running",
+        "done",
+    ]
+    started = next(event for event in events if event["type"] == "tool.started")
+    assert started["planStepId"] == plan_events[1]["steps"][0]["stepId"]
+    assert output["plan"]["revision"] == 3
+    assert output["tool_traces"][0]["plan_step_id"] == started["planStepId"]
 
 
 @pytest.mark.asyncio
@@ -1241,6 +1259,9 @@ async def test_planner_cannot_escape_supervisor_channel_scope(
     assert output["queries"] == []
     assert scenario.tool_executions == []
     assert not any(event["type"] == "tool.started" for event in events)
+    rejected = [event for event in events if event["type"] == "plan.rejected"]
+    assert rejected
+    assert {event["reasonCode"] for event in rejected} == {"PLAN_CHANNEL_NOT_ALLOWED"}
 
 
 @pytest.mark.asyncio

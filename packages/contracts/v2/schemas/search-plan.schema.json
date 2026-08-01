@@ -35,7 +35,7 @@
     "PlanStep": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "facet", "objective", "queries", "preferredTools", "dependsOn", "evidenceNeeded", "status"],
+      "required": ["id", "facet", "objective", "queries", "preferredTools", "dependsOn", "priority", "evidenceNeeded", "canParallelize", "status"],
       "properties": {
         "id": { "$ref": "common.schema.json#/$defs/opaqueId" },
         "facet": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -55,7 +55,9 @@
           "uniqueItems": true,
           "items": { "$ref": "common.schema.json#/$defs/opaqueId" }
         },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
         "evidenceNeeded": { "type": "integer", "minimum": 0 },
+        "canParallelize": { "type": "boolean" },
         "status": { "enum": ["todo", "running", "done", "blocked", "skipped"] }
       }
     }

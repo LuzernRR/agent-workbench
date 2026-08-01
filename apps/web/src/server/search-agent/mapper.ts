@@ -82,14 +82,50 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     return { events: [] };
   }
   if (event.type === "plan.updated") {
-    // Planner 的模型摘要已经进入唯一思考项的逐行详情；具体查询由真实
-    // tool.started/completed 卡片展示。这里不再创建无法随工具结果可靠
-    // 收口的重复计划栏，避免运行结束后仍显示“进行中”。
-    return { events: [] };
+    return {
+      events: [{
+        type: "plan.updated",
+        payload: {
+          planId: event.planId,
+          revision: event.revision,
+          steps: event.steps.map((step) => ({
+            id: step.stepId,
+            stepId: step.stepId,
+            title: oneLine(step.objective, 500),
+            facet: oneLine(step.facet, 200),
+            objective: oneLine(step.objective, 500),
+            query: oneLine(step.query, 300),
+            channel: step.channel,
+            dependsOn: step.dependsOn,
+            priority: step.priority,
+            evidenceNeeded: step.evidenceNeeded,
+            canParallelize: step.canParallelize,
+            status: step.status,
+            reasonCode: step.reasonCode
+          }))
+        }
+      }]
+    };
+  }
+  if (event.type === "plan.rejected") {
+    return {
+      events: [{
+        type: "log.appended",
+        payload: {
+          log: {
+            id: `plan-rejected:${event.eventId}`,
+            createdAt: event.createdAt,
+            actor: "planner",
+            level: "warn",
+            content: event.reasonCode
+          }
+        }
+      }]
+    };
   }
   if (event.type === "tool.started") {
     const unknown = event.toolName === "unknown_tool";
-    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
+    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, planStepId: event.planStepId, name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
   }
   if (event.type === "tool.progress") {
     const source = verifiedSource(event.source);

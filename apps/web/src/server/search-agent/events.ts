@@ -31,13 +31,27 @@ const base = {
   createdAt,
   type: z.string()
 };
-const node = z.enum(["load_context", "classify_intent", "plan_research", "research", "reflect", "compose", "verify", "finalize"]);
+const node = z.enum(["load_context", "classify_intent", "plan_research", "mark_plan_running", "research", "reflect", "compose", "verify", "finalize"]);
 const agent = z.enum(["supervisor", "planner", "researcher", "reflector", "writer", "verifier"]);
 const publicToolName = z.enum(["web_search", "unknown_tool"]);
 const searchChannel = z.enum(["web", "x", "xiaohongshu"]);
 const outcomeStatus = z.enum(["success", "degraded", "failed"]);
 const nextAction = z.enum(["none", "use_fallback", "use_alternative_channel", "reconnect_account", "retry_later", "stop"]);
 const resolvedVerificationStatus = z.enum(["succeeded", "expired", "account_mismatch", "failed", "cancelled"]);
+const planStepStatus = z.enum(["todo", "running", "done", "blocked", "skipped"]);
+const planStepSchema = z.object({
+  stepId: identifier,
+  facet: compactText(200),
+  objective: compactText(500),
+  query: compactText(300),
+  channel: searchChannel,
+  dependsOn: z.array(identifier).max(4),
+  priority: z.number().int().min(0).max(100),
+  evidenceNeeded: z.number().int().min(0).max(10),
+  canParallelize: z.boolean(),
+  status: planStepStatus,
+  reasonCode: reasonCode.nullable()
+}).strict();
 
 const provenanceSchema = z.object({
   discovery_provider: compactText(80),
@@ -82,16 +96,17 @@ const searchAgentEventUnion = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("node.started"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative() }).strict(),
   z.object({ ...base, type: z.literal("node.completed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), durationMs: z.number().nonnegative(), publicSummary: optionalSummary, publicSummarySource: z.literal("model").nullable() }).strict(),
   z.object({ ...base, type: z.literal("node.failed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), reasonCode }).strict(),
-  z.object({ ...base, type: z.literal("plan.updated"), iteration: z.number().int().nonnegative(), queries: z.array(compactText(300)).min(1).max(4), planSource: z.literal("model") }).strict(),
-  z.object({ ...base, type: z.literal("tool.started"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), channel: searchChannel, cached: z.boolean() }).strict(),
-  z.object({ ...base, type: z.literal("tool.progress"), toolCallId: identifier, toolName: z.literal("web_search"), query: compactText(300), channel: searchChannel, provider: compactText(80), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), source: resultSchema.nullable() }).strict(),
-  z.object({ ...base, type: z.literal("tool.verification.required"), toolCallId: identifier, challengeId: verificationChallengeId, status: z.literal("pending"), expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
-  z.object({ ...base, type: z.literal("tool.verification.heartbeat"), toolCallId: identifier, challengeId: verificationChallengeId, status: z.literal("pending"), expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
-  z.object({ ...base, type: z.literal("tool.verification.resolved"), toolCallId: identifier, challengeId: verificationChallengeId, status: resolvedVerificationStatus, expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
-  z.object({ ...base, type: z.literal("tool.completed"), toolCallId: identifier, toolName: z.literal("web_search"), query: compactText(300), channel: searchChannel, provider: compactText(80), status: outcomeStatus.optional(), primaryProvider: compactText(80).optional(), effectiveProvider: compactText(80).optional(), reasonCode: reasonCode.nullable().optional(), message: compactText(500).nullable().optional(), retryable: z.boolean().optional(), nextAction: nextAction.optional(), summary: compactText(500), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), results: z.array(resultSchema).max(10), cached: z.boolean(), durationMs: z.number().int().nonnegative() }).strict(),
+  z.object({ ...base, type: z.literal("plan.updated"), planId: identifier, revision: z.number().int().positive(), iteration: z.number().int().nonnegative(), steps: z.array(planStepSchema).min(1).max(4), planSource: z.enum(["model", "runtime"]) }).strict(),
+  z.object({ ...base, type: z.literal("plan.rejected"), iteration: z.number().int().nonnegative(), reasonCode, planSource: z.literal("model") }).strict(),
+  z.object({ ...base, type: z.literal("tool.started"), toolCallId: identifier, planStepId: identifier.optional(), toolName: publicToolName, query: compactText(300), channel: searchChannel, cached: z.boolean() }).strict(),
+  z.object({ ...base, type: z.literal("tool.progress"), toolCallId: identifier, planStepId: identifier.optional(), toolName: z.literal("web_search"), query: compactText(300), channel: searchChannel, provider: compactText(80), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), source: resultSchema.nullable() }).strict(),
+  z.object({ ...base, type: z.literal("tool.verification.required"), toolCallId: identifier, planStepId: identifier.optional(), challengeId: verificationChallengeId, status: z.literal("pending"), expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
+  z.object({ ...base, type: z.literal("tool.verification.heartbeat"), toolCallId: identifier, planStepId: identifier.optional(), challengeId: verificationChallengeId, status: z.literal("pending"), expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
+  z.object({ ...base, type: z.literal("tool.verification.resolved"), toolCallId: identifier, planStepId: identifier.optional(), challengeId: verificationChallengeId, status: resolvedVerificationStatus, expiresAt: createdAt, retryAfterMs: z.number().int().min(100).max(10_000), reasonCode: reasonCode.nullable(), message: compactText(300) }).strict(),
+  z.object({ ...base, type: z.literal("tool.completed"), toolCallId: identifier, planStepId: identifier.optional(), toolName: z.literal("web_search"), query: compactText(300), channel: searchChannel, provider: compactText(80), status: outcomeStatus.optional(), primaryProvider: compactText(80).optional(), effectiveProvider: compactText(80).optional(), reasonCode: reasonCode.nullable().optional(), message: compactText(500).nullable().optional(), retryable: z.boolean().optional(), nextAction: nextAction.optional(), summary: compactText(500), resultCount: z.number().int().nonnegative().max(50), evidenceCount: z.number().int().nonnegative().max(50), results: z.array(resultSchema).max(10), cached: z.boolean(), durationMs: z.number().int().nonnegative() }).strict(),
   z.object({ ...base, type: z.literal("tool.presented"), toolCallId: identifier, sources: z.array(sourcePresentationSchema).min(1).max(10), presentationSource: z.literal("model") }).strict(),
-  z.object({ ...base, type: z.literal("tool.failed"), toolCallId: identifier, toolName: publicToolName, query: unicodeText(300), channel: searchChannel, provider: compactText(80), status: outcomeStatus.optional(), primaryProvider: compactText(80).optional(), effectiveProvider: compactText(80).optional(), reasonCode, message: compactText(500), retryable: z.boolean(), nextAction: nextAction.optional(), resultCount: z.number().int().nonnegative().max(50).optional(), evidenceCount: z.number().int().nonnegative().max(50).optional(), durationMs: z.number().int().nonnegative() }).strict(),
-  z.object({ ...base, type: z.literal("tool.unknown"), toolCallId: identifier, toolName: publicToolName, query: compactText(300), channel: searchChannel, reasonCode }).strict(),
+  z.object({ ...base, type: z.literal("tool.failed"), toolCallId: identifier, planStepId: identifier.optional(), toolName: publicToolName, query: unicodeText(300), channel: searchChannel, provider: compactText(80), status: outcomeStatus.optional(), primaryProvider: compactText(80).optional(), effectiveProvider: compactText(80).optional(), reasonCode, message: compactText(500), retryable: z.boolean(), nextAction: nextAction.optional(), resultCount: z.number().int().nonnegative().max(50).optional(), evidenceCount: z.number().int().nonnegative().max(50).optional(), durationMs: z.number().int().nonnegative() }).strict(),
+  z.object({ ...base, type: z.literal("tool.unknown"), toolCallId: identifier, planStepId: identifier.optional(), toolName: publicToolName, query: compactText(300), channel: searchChannel, reasonCode }).strict(),
   z.object({ ...base, type: z.literal("memory.status"), status: z.enum(["available", "stored", "degraded"]), recalledCount: z.number().int().nonnegative().max(100).optional(), storedCount: z.number().int().nonnegative().max(100).optional(), embeddingVersion: compactText(120).optional(), reasonCode: reasonCode.optional() }).strict(),
   z.object({ ...base, type: z.literal("verification.completed"), nodeRunId: identifier, passed: z.boolean(), action: z.enum(["pass", "rewrite", "research_more"]), publicSummary: optionalSummary, publicSummarySource: z.literal("model").nullable() }).strict(),
   z.object({ ...base, type: z.literal("run.completed"), answerMarkdown: unicodeText(100_000, 1), answerSource: z.literal("model"), answerModelCalls: z.number().int().positive().max(100), promptVersion: compactText(120), responseStatus: z.enum(["completed", "partial"]), citations: z.array(z.object({ label: compactText(300), url: httpUrl }).strict()).max(60), verificationPassed: z.boolean(), stopReason: reasonCode, usage: usageSchema, modelCalls: z.number().int().positive().max(100), toolCalls: z.number().int().nonnegative().max(100), evidenceCount: z.number().int().nonnegative().max(1_000) }).strict(),
@@ -100,6 +115,38 @@ const searchAgentEventUnion = z.discriminatedUnion("type", [
 ]);
 
 export const searchAgentEventSchema = searchAgentEventUnion.superRefine((event, context) => {
+  if (event.type === "plan.updated") {
+    const ids = new Set(event.steps.map((step) => step.stepId));
+    const queryKeys = new Set<string>();
+    const dependencies = new Map(event.steps.map((step) => [step.stepId, step.dependsOn]));
+    if (ids.size !== event.steps.length) {
+      context.addIssue({ code: "custom", path: ["steps"], message: "计划步骤 ID 必须唯一" });
+    }
+    for (const [index, step] of event.steps.entries()) {
+      if (step.dependsOn.some((dependency) => !ids.has(dependency))) {
+        context.addIssue({ code: "custom", path: ["steps", index, "dependsOn"], message: "计划包含未知依赖" });
+      }
+      const key = `${step.channel}:${step.query.trim().toLocaleLowerCase()}`;
+      if (queryKeys.has(key)) {
+        context.addIssue({ code: "custom", path: ["steps", index, "query"], message: "计划不得重复 query+channel" });
+      }
+      queryKeys.add(key);
+    }
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (stepId: string): boolean => {
+      if (visiting.has(stepId)) return true;
+      if (visited.has(stepId)) return false;
+      visiting.add(stepId);
+      const cycle = (dependencies.get(stepId) || []).some(hasCycle);
+      visiting.delete(stepId);
+      visited.add(stepId);
+      return cycle;
+    };
+    if ([...ids].some(hasCycle)) {
+      context.addIssue({ code: "custom", path: ["steps"], message: "计划依赖图不得包含环" });
+    }
+  }
   if (event.type === "node.completed" || event.type === "verification.completed") {
     const hasSummary = event.publicSummary !== null;
     const hasModelSource = event.publicSummarySource === "model";

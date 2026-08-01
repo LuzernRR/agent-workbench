@@ -106,6 +106,7 @@ export type ToolItem = {
   id: string;
   runId: string;
   toolCallId: string;
+  planStepId?: string;
   name: string;
   summary: string;
   settlementSummary?: string;
@@ -193,8 +194,19 @@ export type LogEntry = {
 
 export type PlanStep = {
   id: string;
+  planId?: string;
+  revision?: number;
   title: string;
-  status: "todo" | "in_progress" | "done" | "blocked";
+  facet?: string;
+  objective?: string;
+  query?: string;
+  channel?: "web" | "x" | "xiaohongshu";
+  dependsOn?: string[];
+  priority?: number;
+  evidenceNeeded?: number;
+  canParallelize?: boolean;
+  reasonCode?: string;
+  status: "todo" | "in_progress" | "done" | "blocked" | "skipped";
   notes?: string;
 };
 
@@ -215,6 +227,8 @@ export type AgentThreadState = {
   files: WorkbenchFile[];
   logs: LogEntry[];
   plan: PlanStep[];
+  planId: string | null;
+  planRevision: number;
   planUpdatedAt: string | null;
   runTimings: Record<string, RunTiming>;
   runStatuses: Record<string, RunStatus>;
