@@ -41,7 +41,10 @@ class PlannedStep(StrictModel):
     objective: str = Field(min_length=1, max_length=500)
     query: str = Field(min_length=2, max_length=300)
     channel: ResearchChannel
-    depends_on: list[str] = Field(default_factory=list, max_length=4)
+    depends_on: list[str] = Field(
+        description="依赖的本计划 local_id；没有依赖时也必须显式返回空数组",
+        max_length=4,
+    )
     priority: int = Field(ge=0, le=100)
     evidence_needed: int = Field(ge=0, le=10)
     can_parallelize: bool
@@ -176,15 +179,19 @@ class ReflectResult(StrictModel):
     """reflect 节点产出：判断证据是否足够。"""
 
     sufficient: bool = Field(description="现有证据是否足以回答问题")
-    missing: str = Field(default="", description="若不足，缺什么；若足够，留空")
+    missing: str = Field(description="若不足，缺什么；若足够，必须显式返回空字符串")
     extra_searches: list[PlannedSearch] = Field(
-        default_factory=list,
-        description="若不足，给出互补的查询与渠道组合；节点只接受前2个合法新组合",
+        description=(
+            "若不足，给出互补的查询与渠道组合；节点只接受前2个合法新组合；"
+            "无需补搜时也必须显式返回空数组"
+        ),
         max_length=4,
     )
     source_presentations: list[SourcePresentation] = Field(
-        default_factory=list,
-        description="为当前轮每一条已读取 Evidence URL 各生成一条有效说明；未读候选不得出现",
+        description=(
+            "为当前轮每一条已读取 Evidence URL 各生成一条有效说明；未读候选不得出现；"
+            "没有可展示来源时也必须显式返回空数组"
+        ),
         max_length=50,
     )
     summary: str = Field(description="一句话说明证据评估结论，面向用户，不超过80字")
@@ -207,10 +214,12 @@ class VerifyResult(StrictModel):
     action: Literal["pass", "rewrite", "research_more"] = Field(
         description="通过选pass；仅需改写选rewrite；缺证据选research_more"
     )
-    issue: str = Field(default="", description="若未通过，指出问题；通过则留空")
+    issue: str = Field(description="若未通过，指出问题；通过时必须显式返回空字符串")
     extra_searches: list[PlannedSearch] = Field(
-        default_factory=list,
-        description="research_more 时给出补充查询与渠道组合，否则为空；节点只接受前2个合法新组合",
+        description=(
+            "research_more 时给出补充查询与渠道组合，否则必须显式返回空数组；"
+            "节点只接受前2个合法新组合"
+        ),
         max_length=4,
     )
     summary: str = Field(description="一句话说明核验结论，面向用户，不超过80字")

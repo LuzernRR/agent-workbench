@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel
 
 from app.config.agent import agent_config
@@ -66,6 +66,21 @@ class StructuredOutputError(RuntimeError):
         self.usage = usage
 
 
+class StrictSchemaError(RuntimeError):
+    """生产 strict function Schema 不满足 Provider 的静态约束。"""
+
+    code = "STRICT_SCHEMA_INVALID"
+
+
+class StructuredProviderRequestError(RuntimeError):
+    """Provider 在生成前拒绝 strict structured-output 请求。"""
+
+    code = "MODEL_STRUCTURED_REQUEST_INVALID"
+
+    def __init__(self) -> None:
+        super().__init__("模型结构化请求未被 Provider 接受")
+
+
 @dataclass(frozen=True)
 class ResearchToolCall:
     id: str
@@ -114,6 +129,34 @@ def _usage_from_langchain(message: object, model_id: str) -> ModelUsage:
 
 
 @cache
+def validate_strict_schema(schema: type[BaseModel]) -> None:
+    """递归验证 strict tool schema，避免把必然被拒绝的请求发给 Provider。"""
+
+    document = schema.model_json_schema()
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                properties = set((value.get("properties") or {}).keys())
+                required = set(value.get("required") or [])
+                if value.get("additionalProperties") is not False:
+                    raise StrictSchemaError(
+                        f"{schema.__name__} strict object allows extra fields at {path}"
+                    )
+                if properties != required:
+                    raise StrictSchemaError(
+                        f"{schema.__name__} strict object has optional fields at {path}"
+                    )
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(document, "$")
+
+
+@cache
 def _structured_chat_model(role: ModelRole, model_id: str | None = None) -> ChatOpenAI:
     config = runtime_config()
     model = config.model(model_id)
@@ -143,6 +186,7 @@ async def invoke_structured[SchemaT: BaseModel](
     负责在 run state 中限制全程最多一次 repair；这里返回聚合后的真实 usage
     与 attempts，使失败后的成功调用也完整计入预算。
     """
+    validate_strict_schema(schema)
     resolved_model = runtime_config().model(model_id).id
     runnable = _structured_chat_model(role, resolved_model).with_structured_output(
         schema,
@@ -154,7 +198,10 @@ async def invoke_structured[SchemaT: BaseModel](
     request_messages = list(messages)
     max_attempts = 2 if allow_repair else 1
     for attempt in range(max_attempts):
-        result = await runnable.ainvoke(request_messages)
+        try:
+            result = await runnable.ainvoke(request_messages)
+        except BadRequestError as exc:
+            raise StructuredProviderRequestError() from exc
         parsed = result.get("parsed") if isinstance(result, dict) else None
         raw = result.get("raw") if isinstance(result, dict) else None
         parsing_error = result.get("parsing_error") if isinstance(result, dict) else None

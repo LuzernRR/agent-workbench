@@ -1,5 +1,37 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #14 strict 结构化 Schema 兼容已完成）
+
+- 本轮唯一功能为
+  [#14](https://github.com/LuzernRR/agent-workbench/issues/14)“生产 strict 结构化 Schema
+  与 Planner 兼容”，`Execution Gate: allowed`。根因是 DeepSeek strict function calling
+  要求每个 object property 都在 required 中，而 Plan、Reflect、Verify 共 6 个字段因
+  Pydantic 默认值成为 optional。
+- `depends_on`、`missing/extra_searches/source_presentations`、`issue/extra_searches` 现在
+  均由模型显式返回；空语义只能用空字符串/空数组表达。缺字段直接校验失败，服务端不使用
+  默认值伪造计划、反思或核验语义。
+- 新增递归 `validate_strict_schema` preflight：所有 object 必须
+  `additionalProperties=false` 且 `properties == required`，嵌套 `$defs` 同样检查。静态
+  不兼容以 `STRICT_SCHEMA_INVALID` 在 Provider 调用前失败。
+- Provider 对 strict structured-output 请求返回 400 时统一转换为
+  `MODEL_STRUCTURED_REQUEST_INVALID`；公开事件不包含 Provider message/body、Prompt、私有
+  CoT、`reasoning_content`、Cookie、token 或密钥。
+- Prompt 版本升级到 `2026-08-01.v27-strict-required-fields`，只要求空字段也必须显式返回，
+  没有加入任何固定自然语言计划、思考、核验或回答模板。
+- 门禁：strict/repair/prompt 定向 `34 passed`；graph/fan-out 定向 `57 passed`；Search
+  Agent 全量 `225 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `379 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。
+- 已保留 `agent-workbench/search-agent:pre-issue-14-d387b66` 并只滚动部署 Search Agent。
+  真实运行 `run_issue14_1785574081801` 在 100.596 秒完成 Web+X 两次工具调用、两个
+  Research Send 分支、一个 merge、3 Evidence 和唯一 `run.completed / partial`；全部节点
+  started/completed 成对，0 node.failed，公开 NDJSON 敏感字段扫描为 0。
+- Compose 七服务 healthy，3000、8080 和
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 可用。生产 Planner
+  `invalid_request_error` 已消除，下一 feature 可继续通用 ToolGateway、完整工具调用账本与
+  Evidence 状态机。完整记录见
+  `docs/development/2026-08-01-020-issue-14-strict-schema-compatibility.md`。
+
 ## 当前结论（2026-08-01，Issue #13 LangGraph 图级 fan-out/fan-in 已完成）
 
 - 本轮唯一功能为

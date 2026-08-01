@@ -116,6 +116,11 @@ def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> 
     assert "绝不能把 web 或 x" in WRITER_PROMPT
     assert "补充背景" in REFLECTOR_PROMPT
     assert "至少 3 个不同的指定渠道正文" in REFLECTOR_PROMPT
+    assert "depends_on 也必须是空数组" in PLANNER_PROMPT
+    assert "missing 必须为空字符串" in REFLECTOR_PROMPT
+    assert "source_presentations 必须为空数组" in REFLECTOR_PROMPT
+    assert "issue 必须为空字符串" in VERIFIER_PROMPT
+    assert "extra_searches 必须为空数组" in VERIFIER_PROMPT
 
 
 def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> None:

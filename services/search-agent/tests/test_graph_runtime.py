@@ -455,6 +455,9 @@ class Scenario:
             )
         elif role == "reflector":
             data = copy.deepcopy(self.reflects[min(index, len(self.reflects) - 1)])
+            data.setdefault("missing", "")
+            data.setdefault("extra_searches", [])
+            data.setdefault("source_presentations", [])
             for presentation in data.get("source_presentations", []):
                 presentation.setdefault("include_in_details", True)
             result = ReflectResult(summary="已评估证据覆盖", **data)
