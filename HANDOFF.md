@@ -1,5 +1,39 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #15 ToolGateway 与完整工具调用账本已完成）
+
+- 本轮唯一功能为
+  [#15](https://github.com/LuzernRR/agent-workbench/issues/15)“生产级 ToolGateway 与完整工具
+  调用账本”，`Execution Gate: allowed`。新增
+  `services/search-agent/app/tools/gateway.py`，真实搜索 Provider 调用、幂等 begin、终态结算、
+  取消和 outcome unknown 统一经过该边界；LangGraph 节点不再直接操作 ledger。
+- 每个逻辑 `toolCallId` 现在持久记录 `operationRef`、attempt、plan step、research batch/result、
+  input/output SHA-256、`resultRef`、Provider、开始/结束时间、duration、请求/候选/证据/页面读取/
+  bytes 计数、成本未知语义、稳定 outcome/error、retryable 和 nextAction。同一确定性调用重放不
+  新增 Provider attempt，进行中的并发重放以 unknown fail-closed。
+- 新增 `003_tool_gateway_ledger.sql` 与独立 `search_agent_tool_results` 引用表。ledger 行不再内联
+  可重放结果；旧 509 条内联结果在新 Search Agent 启动时递归移除 query、Prompt、messages、
+  reasoning、Provider body、Cookie、token、headers 和 tool arguments 后迁移，旧 `result` 已
+  清零。迁移在真实 PostgreSQL 连续执行两次成功，关键列无空回填，结果表敏感键扫描为 0。
+- Search Agent NDJSON、BFF 白名单投影、`wb_agent_events` 持久事件与 Workbench reducer 已贯通
+  相同安全字段。`tool.unknown` 成为明确终态并携带 `operationRef`、usage 与
+  `nextAction=check_operation`；Workbench 仍只按真实 `toolCallId` 保留一个工具行。
+- 公开事件与结果引用表新增双重隐私门，不接收或保存 Provider 原始请求/响应、Prompt、messages、
+  Cookie、token、API key、headers、tool arguments、私有 CoT 或 `reasoning_content`。UI 只展示
+  公开工具事实；没有新增硬编码回答或模型过程文案。
+- 门禁：Search Agent `231 passed`、Ruff、compileall；共享 Python 合同 `6 passed`；Web
+  `381 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。
+- 已保留 `agent-workbench/{search-agent,web}:pre-issue-15-5b925ff`，滚动部署 Web 与 Search
+  Agent。真实运行 `run_issue15_1785578091405` 在 96.5 秒内完成 10 对节点、1 次 Web 工具调用、
+  5 条候选、2 条 Evidence 和唯一 `run.completed / completed / VERIFIED`；Provider attempt=1，
+  input/output hash 均为 64 位，resultRef 可解析，usage 为 1 query/2 page reads，公开 NDJSON
+  禁止字段计数为 0。3000、8080 与
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200，两个新容器 healthy。
+- 下一独立 feature 应实现 Evidence 生命周期/状态机与声明级可审计关联；不得重新实现现有
+  HarnessRunner、ToolGateway 或图级 fan-out/fan-in。完整记录见
+  `docs/development/2026-08-01-021-issue-15-tool-gateway-ledger.md`。
+
 ## 当前结论（2026-08-01，Issue #14 strict 结构化 Schema 兼容已完成）
 
 - 本轮唯一功能为

@@ -293,6 +293,27 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     }).type).toBe("tool.progress");
   });
 
+  it("接受安全工具账本引用并拒绝伪造哈希或私有调用参数", () => {
+    const started = {
+      ...sourceEnvelope,
+      type: "tool.started",
+      toolCallId: "call_ledger",
+      planStepId: "step_one",
+      operationRef: "operation_1234567890abcdef",
+      attempt: 1,
+      inputHash: "a".repeat(64),
+      researchBatchId: "research_batch_one",
+      researchResultId: "research_result_one",
+      toolName: "web_search",
+      query: "LangGraph tracing",
+      channel: "web",
+      cached: false
+    };
+    expect(parseSearchAgentEvent(started).type).toBe("tool.started");
+    expect(() => parseSearchAgentEvent({ ...started, inputHash: "not-a-hash" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...started, toolArguments: { query: "private" } })).toThrow(/禁止字段/u);
+  });
+
   it("只接受不含二维码和内部地址的工具账号验证事件", () => {
     const required = {
       ...sourceEnvelope,

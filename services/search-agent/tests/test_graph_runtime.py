@@ -33,13 +33,20 @@ from app.llm.deepseek import (
     ResearchToolCall,
     StructuredOutputError,
 )
-from app.persistence.tool_ledger import LedgerDecision
+from app.persistence.tool_ledger import (
+    LedgerDecision,
+    ToolLedgerSettlement,
+    canonical_payload,
+    payload_hash,
+    safe_result_payload,
+)
 from app.tools.channels.base import (
     ChannelProgress,
     ChannelVerificationUpdate,
     SourceProvenance,
     channel_resolution,
 )
+from app.tools.gateway import ToolGateway
 from app.tools.search_tool import (
     PublicSearchResult,
     SearchEvidence,
@@ -319,27 +326,85 @@ def test_public_process_drops_fetch_noise_without_inventing_replacement() -> Non
 
 class MemoryLedger:
     def __init__(self) -> None:
-        self.rows: dict[str, tuple[str, dict[str, Any] | None, str | None]] = {}
+        self.rows: dict[str, LedgerDecision] = {}
 
     async def begin(self, **kwargs: Any) -> LedgerDecision:
         key = kwargs["idempotency_key"]
         row = self.rows.get(key)
         if row is None:
-            self.rows[key] = ("started", None, None)
-            return LedgerDecision("execute", "started")
-        status, result, error = row
-        if status in {"completed", "failed"}:
-            return LedgerDecision("cached", status, result, error)
-        return LedgerDecision("unknown", status, result, error or "OUTCOME_UNKNOWN")
+            row = LedgerDecision(
+                "execute",
+                "started",
+                operation_ref=kwargs["operation_ref"],
+                attempt=kwargs["attempt"],
+                input_hash=kwargs["input_hash"],
+            )
+            self.rows[key] = row
+            return row
+        if row.status in {"completed", "failed"}:
+            return LedgerDecision(**{**row.__dict__, "action": "cached"})
+        return LedgerDecision(**{
+            **row.__dict__,
+            "action": "unknown",
+            "error_code": row.error_code or "OUTCOME_UNKNOWN",
+        })
 
-    async def complete(self, key: str, result: dict[str, Any]) -> None:
-        self.rows[key] = ("completed", result, None)
+    async def settle(
+        self,
+        key: str,
+        settlement: ToolLedgerSettlement,
+    ) -> LedgerDecision:
+        current = self.rows[key]
+        result = safe_result_payload(settlement.result)
+        assert isinstance(result, dict)
+        decision = LedgerDecision(
+            "cached",
+            settlement.status,
+            result=result,
+            error_code=settlement.error_code,
+            operation_ref=current.operation_ref,
+            attempt=current.attempt,
+            result_ref=f"tool_result_{current.operation_ref[10:]}_{current.attempt}",
+            input_hash=current.input_hash,
+            output_hash=payload_hash(result),
+            provider=settlement.provider,
+            outcome_status=settlement.outcome_status,
+            retryable=settlement.retryable,
+            next_action=settlement.next_action,
+            duration_ms=settlement.duration_ms,
+            request_count=settlement.request_count,
+            result_count=settlement.result_count,
+            evidence_count=settlement.evidence_count,
+            page_read_count=settlement.page_read_count,
+            output_bytes=len(canonical_payload(result)),
+            actual_cost_usd=settlement.actual_cost_usd,
+        )
+        self.rows[key] = decision
+        return decision
 
-    async def fail(self, key: str, result: dict[str, Any], error: str) -> None:
-        self.rows[key] = ("failed", result, error)
-
-    async def unknown(self, key: str, error: str) -> None:
-        self.rows[key] = ("unknown", None, error)
+    async def mark_unknown(
+        self,
+        key: str,
+        error: str,
+        *,
+        duration_ms: int = 0,
+        request_count: int = 0,
+        possible_duplicate_cost_usd: str = "0",
+    ) -> LedgerDecision:
+        current = self.rows[key]
+        decision = LedgerDecision(
+            "unknown",
+            "unknown",
+            error_code=error,
+            operation_ref=current.operation_ref,
+            attempt=current.attempt,
+            input_hash=current.input_hash,
+            duration_ms=duration_ms,
+            request_count=request_count,
+            possible_duplicate_cost_usd=possible_duplicate_cost_usd,
+        )
+        self.rows[key] = decision
+        return decision
 
 
 @dataclass
@@ -692,7 +757,7 @@ async def run_scenario(
     graph = build_graph()
     context = RunContext(
         agent_config(),
-        MemoryLedger(),
+        ToolGateway(MemoryLedger()),
         None,
         XiaohongshuVerificationRegistry() if verification_registry else None,
     )
@@ -1051,6 +1116,17 @@ async def test_single_search_uses_deterministic_tool_id_and_complete_ledger(
     assert scenario.researcher_messages == []
     tool_call_id = output["tool_traces"][0]["tool_call_id"]
     assert tool_call_id.startswith("call_search_")
+    assert output["tool_traces"][0]["research_batch_id"].startswith(
+        "research_batch_"
+    )
+    assert output["tool_traces"][0]["research_result_id"].startswith(
+        "research_result_"
+    )
+    assert output["tool_traces"][0]["operation_ref"].startswith("operation_")
+    assert output["tool_traces"][0]["attempt"] == 1
+    assert len(output["tool_traces"][0]["input_hash"]) == 64
+    assert len(output["tool_traces"][0]["output_hash"]) == 64
+    assert output["tool_traces"][0]["result_ref"].startswith("tool_result_")
     tool_events = [
         event for event in events if event.get("toolCallId") == tool_call_id
     ]
@@ -1067,6 +1143,14 @@ async def test_single_search_uses_deterministic_tool_id_and_complete_ledger(
         if event["type"] == "tool.progress"
     ] == [(1, 0), (1, 1)]
     completed = next(event for event in tool_events if event["type"] == "tool.completed")
+    started = next(event for event in tool_events if event["type"] == "tool.started")
+    assert started["operationRef"] == output["tool_traces"][0]["operation_ref"]
+    assert started["researchBatchId"] == output["tool_traces"][0]["research_batch_id"]
+    assert started["researchResultId"] == output["tool_traces"][0]["research_result_id"]
+    assert completed["resultRef"] == output["tool_traces"][0]["result_ref"]
+    assert completed["outputHash"] == output["tool_traces"][0]["output_hash"]
+    assert completed["usage"]["calls"] == 1
+    assert completed["usage"]["pageReads"] == 1
     assert completed["status"] == "success"
     assert completed["primaryProvider"] == "deterministic"
     assert completed["effectiveProvider"] == "deterministic"

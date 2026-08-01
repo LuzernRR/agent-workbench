@@ -21,6 +21,64 @@ describe("reduceAgentEvent", () => {
     });
   });
 
+  it("保留完整安全工具账本字段并把 unknown 作为唯一工具行终态", () => {
+    const usage = {
+      toolId: "web_search",
+      toolVersion: "1",
+      provider: "tavily",
+      pricingVersion: "unpriced-v1",
+      currency: "USD",
+      calls: 1,
+      attempts: 1,
+      units: 0,
+      bytes: 0,
+      resultCount: 0,
+      searchQueries: 1,
+      pageReads: 0,
+      estimatedCostUsd: "0",
+      actualCostUsd: null,
+      possibleDuplicateCostUsd: "0"
+    };
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "tool.started", {
+        toolCallId: "search-ledger",
+        planStepId: "step_one",
+        researchBatchId: "research_batch_one",
+        researchResultId: "research_result_one",
+        operationRef: "operation_1234567890abcdef",
+        attempt: 1,
+        inputHash: "a".repeat(64),
+        name: "网页搜索",
+        summary: "搜索中"
+      }),
+      event(2, "tool.unknown", {
+        toolCallId: "search-ledger",
+        operationRef: "operation_1234567890abcdef",
+        attempt: 1,
+        inputHash: "a".repeat(64),
+        status: "unknown",
+        reasonCode: "LEDGER_SETTLEMENT_UNKNOWN",
+        nextAction: "check_operation",
+        usage,
+        durationMs: 321
+      })
+    ]);
+
+    expect(state.itemOrder).toEqual(["tool:search-ledger"]);
+    expect(state.items["tool:search-ledger"]).toMatchObject({
+      status: "unknown",
+      planStepId: "step_one",
+      researchBatchId: "research_batch_one",
+      researchResultId: "research_result_one",
+      operationRef: "operation_1234567890abcdef",
+      attempt: 1,
+      inputHash: "a".repeat(64),
+      nextAction: "check_operation",
+      usage,
+      durationMs: 321
+    });
+  });
+
   it("安全验证等待与成功状态保留同一工具调用和受控链接", () => {
     const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [

@@ -9,13 +9,13 @@ from app.config.agent import AgentConfig
 
 if TYPE_CHECKING:
     from app.memory.milvus_store import MilvusEvidenceStore
-    from app.persistence.tool_ledger import ToolOperationLedger
+    from app.tools.gateway import ToolGateway
     from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
 
 
 @dataclass(frozen=True)
 class RunContext:
     config: AgentConfig
-    ledger: ToolOperationLedger
+    tool_gateway: ToolGateway
     milvus: MilvusEvidenceStore | None = None
     xiaohongshu_verifications: XiaohongshuVerificationRegistry | None = None

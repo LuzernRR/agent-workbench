@@ -17,13 +17,20 @@ _FORBIDDEN_KEYS = {
     "authorization",
     "apikey",
     "cookie",
+    "headers",
+    "prompt",
     "systemprompt",
     "messages",
     "assistantmessage",
     "toolmessages",
     "rawrequest",
     "rawresponse",
+    "requestheaders",
+    "responseheaders",
     "providerbody",
+    "rawprovider",
+    "token",
+    "toolarguments",
 }
 
 def utc_now() -> str:

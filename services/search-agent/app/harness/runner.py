@@ -24,10 +24,11 @@ from app.graph.context import RunContext
 from app.graph.state import initial_state
 from app.prompts.agents import PROMPT_VERSION
 from app.run_control import RunRegistry, StopDecision
+from app.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
     from app.memory.milvus_store import MilvusEvidenceStore
-    from app.persistence.tool_ledger import LedgerDecision
+    from app.persistence.tool_ledger import LedgerDecision, ToolLedgerSettlement
     from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
 
 type AgentEvent = dict[str, Any]
@@ -56,18 +57,30 @@ class HarnessLedger(Protocol):
         visitor_id: str,
         project_id: str | None,
         input_hash: str,
+        operation_ref: str | None = None,
+        tool_id: str = "web_search",
+        tool_version: str = "1",
+        plan_step_id: str | None = None,
+        research_batch_id: str | None = None,
+        research_result_id: str | None = None,
+        attempt: int = 1,
     ) -> LedgerDecision: ...
 
-    async def complete(self, idempotency_key: str, result: dict[str, Any]) -> None: ...
-
-    async def fail(
+    async def settle(
         self,
         idempotency_key: str,
-        result: dict[str, Any],
-        error_code: str,
-    ) -> None: ...
+        settlement: ToolLedgerSettlement,
+    ) -> LedgerDecision: ...
 
-    async def unknown(self, idempotency_key: str, error_code: str) -> None: ...
+    async def mark_unknown(
+        self,
+        idempotency_key: str,
+        error_code: str,
+        *,
+        duration_ms: int = 0,
+        request_count: int = 0,
+        possible_duplicate_cost_usd: str = "0",
+    ) -> LedgerDecision: ...
 
     async def unknown_for_run(self, run_id: str, error_code: str) -> None: ...
 
@@ -202,7 +215,7 @@ class HarnessRunner:
         graph = dependencies.graph
         run_context = RunContext(
             config=config,
-            ledger=dependencies.ledger,  # type: ignore[arg-type]
+            tool_gateway=ToolGateway(dependencies.ledger),  # type: ignore[arg-type]
             milvus=dependencies.milvus,
             xiaohongshu_verifications=dependencies.xiaohongshu_verifications,
         )

@@ -103,6 +103,11 @@ describe("Search Agent v1 白名单投影", () => {
       type: "tool.started",
       toolCallId: "call_one",
       planStepId: "step_runtime_one",
+      operationRef: "operation_1234567890abcdef",
+      attempt: 1,
+      inputHash: "a".repeat(64),
+      researchBatchId: "research_batch_one",
+      researchResultId: "research_result_one",
       toolName: "web_search",
       query: "LangGraph 官方文档",
       channel: "web",
@@ -111,7 +116,12 @@ describe("Search Agent v1 白名单投影", () => {
 
     expect(projection.events[0].payload).toMatchObject({
       toolCallId: "call_one",
-      planStepId: "step_runtime_one"
+      planStepId: "step_runtime_one",
+      operationRef: "operation_1234567890abcdef",
+      attempt: 1,
+      inputHash: "a".repeat(64),
+      researchBatchId: "research_batch_one",
+      researchResultId: "research_result_one"
     });
   });
 
@@ -308,7 +318,7 @@ describe("Search Agent v1 白名单投影", () => {
     expect(partial.terminal).toEqual(expect.objectContaining({ kind: "completed", remember: false, payload: expect.objectContaining({ promptVersion: "2026-07-28.v2", partial: true, responseStatus: "partial", answerSource: "model", answerModelCalls: 1 }) }));
 
     const unknown = mapSearchAgentEvent(source({ type: "tool.unknown", toolCallId: "call_unknown", toolName: "web_search", query: "查询", channel: "web", reasonCode: "OUTCOME_UNKNOWN" }));
-    expect(unknown.events[0]).toEqual(expect.objectContaining({ type: "tool.updated", payload: expect.objectContaining({ status: "unknown" }) }));
+    expect(unknown.events[0]).toEqual(expect.objectContaining({ type: "tool.unknown", payload: expect.objectContaining({ status: "unknown", nextAction: "check_operation" }) }));
 
     const stopped = mapSearchAgentEvent(source({ type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED" }));
     expect(stopped.terminal).toEqual(expect.objectContaining({ kind: "stopped", payload: expect.objectContaining({ reasonCode: "USER_STOPPED", partial: true, sourceEventId: "stream_test_000001" }) }));

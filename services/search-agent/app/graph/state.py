@@ -88,7 +88,14 @@ class SearchTrace(TypedDict):
 
     tool_call_id: str
     plan_step_id: NotRequired[str]
+    research_batch_id: NotRequired[str]
+    research_result_id: NotRequired[str]
     idempotency_key: str
+    operation_ref: str
+    attempt: int
+    input_hash: str
+    output_hash: str | None
+    result_ref: str | None
     query: str
     channel: ChannelName
     provider: str
@@ -102,6 +109,8 @@ class SearchTrace(TypedDict):
     retryable: bool
     next_action: str
     limitation: str | None
+    duration_ms: int
+    usage: dict[str, Any]
 
 
 class SearchRequest(TypedDict):

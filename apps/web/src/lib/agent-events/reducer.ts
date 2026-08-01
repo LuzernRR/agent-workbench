@@ -11,6 +11,7 @@ import type {
   ThinkingItem,
   ToolItem,
   ToolSource,
+  ToolUsage,
   WorkbenchFile
 } from "./types";
 import { safeSourceUrl, sourceUrlIdentity } from "./source-url";
@@ -56,6 +57,32 @@ function stringValue(value: unknown, fallback = "") {
 
 function numberValue(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function opaqueIdValue(value: unknown, fallback?: string) {
+  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/u.test(value) ? value : fallback;
+}
+
+function sha256Value(value: unknown, fallback?: string) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : fallback;
+}
+
+function toolUsageValue(value: unknown, fallback?: ToolUsage): ToolUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const candidate = value as Partial<ToolUsage>;
+  const counters = ["calls", "attempts", "units", "bytes", "resultCount", "searchQueries", "pageReads"] as const;
+  const money = ["estimatedCostUsd", "possibleDuplicateCostUsd"] as const;
+  if (
+    typeof candidate.toolId !== "string"
+    || typeof candidate.toolVersion !== "string"
+    || typeof candidate.provider !== "string"
+    || typeof candidate.pricingVersion !== "string"
+    || candidate.currency !== "USD"
+    || counters.some((key) => !Number.isInteger(candidate[key]) || (candidate[key] ?? -1) < 0)
+    || money.some((key) => typeof candidate[key] !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,8})?$/u.test(candidate[key]))
+    || (candidate.actualCostUsd !== null && (typeof candidate.actualCostUsd !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,8})?$/u.test(candidate.actualCostUsd)))
+  ) return fallback;
+  return candidate as ToolUsage;
 }
 
 function verificationHrefValue(value: unknown, fallback?: string) {
@@ -368,6 +395,14 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         runId: event.runId,
         toolCallId,
         planStepId: stringValue(payload.planStepId) || undefined,
+        researchBatchId: opaqueIdValue(payload.researchBatchId),
+        researchResultId: opaqueIdValue(payload.researchResultId),
+        operationRef: opaqueIdValue(payload.operationRef),
+        resultRef: opaqueIdValue(payload.resultRef),
+        attempt: typeof payload.attempt === "number" && Number.isInteger(payload.attempt) && payload.attempt > 0 ? payload.attempt : undefined,
+        inputHash: sha256Value(payload.inputHash),
+        outputHash: sha256Value(payload.outputHash),
+        usage: toolUsageValue(payload.usage),
         name: stringValue(payload.name, "工具"),
         summary: stringValue(payload.summary, "正在准备"),
         status: "running",
@@ -382,12 +417,13 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
     case "tool.updated":
     case "tool.progress":
     case "tool.completed":
-    case "tool.failed": {
+    case "tool.failed":
+    case "tool.unknown": {
       const toolCallId = stringValue(payload.toolCallId);
       const id = `tool:${toolCallId}`;
       const current = next.items[id];
       if (!current || current.kind !== "tool") return next;
-      const status = event.type === "tool.completed" ? "completed" : event.type === "tool.failed" ? "failed" : stringValue(payload.status, current.status);
+      const status = event.type === "tool.completed" ? "completed" : event.type === "tool.failed" ? "failed" : event.type === "tool.unknown" ? "unknown" : stringValue(payload.status, current.status);
       const progressPayload = payload.progress;
       const progress = progressPayload && typeof progressPayload === "object"
         ? {
@@ -400,7 +436,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         : undefined;
       const startedAt = Date.parse(current.createdAt);
       const finishedAt = Date.parse(event.createdAt);
-      const inferredDuration = ["tool.completed", "tool.failed"].includes(event.type)
+      const inferredDuration = ["tool.completed", "tool.failed", "tool.unknown"].includes(event.type)
         && Number.isFinite(startedAt)
         && Number.isFinite(finishedAt)
         ? Math.max(0, finishedAt - startedAt)
@@ -439,6 +475,15 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
               payload.settlementSummary ?? payload.summary,
               current.settlementSummary
             ) || undefined,
+            planStepId: opaqueIdValue(payload.planStepId, current.planStepId),
+            researchBatchId: opaqueIdValue(payload.researchBatchId, current.researchBatchId),
+            researchResultId: opaqueIdValue(payload.researchResultId, current.researchResultId),
+            operationRef: opaqueIdValue(payload.operationRef, current.operationRef),
+            resultRef: opaqueIdValue(payload.resultRef, current.resultRef),
+            attempt: typeof payload.attempt === "number" && Number.isInteger(payload.attempt) && payload.attempt > 0 ? payload.attempt : current.attempt,
+            inputHash: sha256Value(payload.inputHash, current.inputHash),
+            outputHash: sha256Value(payload.outputHash, current.outputHash),
+            usage: toolUsageValue(payload.usage, current.usage),
             outcomeStatus: ["success", "degraded", "failed"].includes(stringValue(payload.outcomeStatus))
               ? stringValue(payload.outcomeStatus) as ToolItem["outcomeStatus"]
               : current.outcomeStatus,
@@ -451,7 +496,7 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
               ? undefined
               : stringValue(payload.reasonCode, current.reasonCode) || undefined,
             resolutionMessage: stringValue(payload.resolutionMessage, current.resolutionMessage) || undefined,
-            nextAction: ["none", "use_fallback", "use_alternative_channel", "reconnect_account", "retry_later", "stop"].includes(stringValue(payload.nextAction))
+            nextAction: ["none", "use_fallback", "use_alternative_channel", "reconnect_account", "retry_later", "check_operation", "stop"].includes(stringValue(payload.nextAction))
               ? stringValue(payload.nextAction) as ToolItem["nextAction"]
               : current.nextAction,
             resultCount: nextResultCount,

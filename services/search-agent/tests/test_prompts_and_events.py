@@ -55,6 +55,10 @@ def test_every_agent_prompt_treats_external_content_as_untrusted(prompt: str) ->
         "tool_messages",
         "rawResponse",
         "providerBody",
+        "prompt",
+        "toolArguments",
+        "requestHeaders",
+        "token",
     ],
 )
 def test_runtime_event_rejects_forbidden_fields_at_any_depth(key: str) -> None:

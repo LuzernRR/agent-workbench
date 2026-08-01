@@ -215,6 +215,7 @@ function nextActionLabel(action: NonNullable<ToolItem["nextAction"]>) {
     use_alternative_channel: "改用其他只读渠道",
     reconnect_account: "重新连接小红书账号",
     retry_later: "稍后重试",
+    check_operation: "检查工具操作状态",
     stop: "停止自动重试"
   }[action];
 }

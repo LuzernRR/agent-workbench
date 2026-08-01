@@ -17,6 +17,7 @@ export const AGENT_EVENT_TYPES = [
   "tool.source.delta",
   "tool.completed",
   "tool.failed",
+  "tool.unknown",
   "approval.required",
   "approval.resolved",
   "plan.updated",
@@ -47,6 +48,24 @@ export type AgentEvent = {
 export type RunStatus = "idle" | "queued" | "running" | "waiting" | "completed" | "failed" | "stopped" | "reconnecting";
 export type ToolStatus = "preparing" | "running" | "waiting" | "completed" | "failed" | "stopped" | "unknown";
 export type ToolVerificationStatus = "pending" | "succeeded" | "expired" | "account_mismatch" | "failed" | "cancelled";
+
+export type ToolUsage = {
+  toolId: string;
+  toolVersion: string;
+  provider: string;
+  pricingVersion: string;
+  currency: "USD";
+  calls: number;
+  attempts: number;
+  units: number;
+  bytes: number;
+  resultCount: number;
+  searchQueries: number;
+  pageReads: number;
+  estimatedCostUsd: string;
+  actualCostUsd: string | null;
+  possibleDuplicateCostUsd: string;
+};
 
 export type ToolSource = {
   title: string;
@@ -107,6 +126,14 @@ export type ToolItem = {
   runId: string;
   toolCallId: string;
   planStepId?: string;
+  researchBatchId?: string;
+  researchResultId?: string;
+  operationRef?: string;
+  resultRef?: string;
+  attempt?: number;
+  inputHash?: string;
+  outputHash?: string;
+  usage?: ToolUsage;
   name: string;
   summary: string;
   settlementSummary?: string;
@@ -119,7 +146,7 @@ export type ToolItem = {
   effectiveProvider?: string;
   reasonCode?: string;
   resolutionMessage?: string;
-  nextAction?: "none" | "use_fallback" | "use_alternative_channel" | "reconnect_account" | "retry_later" | "stop";
+  nextAction?: "none" | "use_fallback" | "use_alternative_channel" | "reconnect_account" | "retry_later" | "check_operation" | "stop";
   resultCount?: number;
   evidenceCount?: number;
   sources?: ToolSource[];

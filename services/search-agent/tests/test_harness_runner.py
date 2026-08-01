@@ -180,7 +180,7 @@ async def test_no_http_runner_is_deterministic_and_injects_runtime_dependencies(
     assert first[-1]["answerModelCalls"] == 1
     assert first_graph.inputs[0]["run_id"] == "run_1"
     assert first_graph.configs[0]["configurable"]["thread_id"] == "run:run_1"
-    assert first_graph.contexts[0].ledger is first_ledger
+    assert first_graph.contexts[0].tool_gateway.ledger is first_ledger
     assert first_graph.contexts[0].config is agent_config()
 
 

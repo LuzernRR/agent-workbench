@@ -32,6 +32,20 @@ function channelName(channel: "web" | "x" | "xiaohongshu") {
 }
 
 type SearchResultEvent = Extract<SearchAgentEvent, { type: "tool.completed" }>["results"][number];
+type ToolLedgerEvent = Extract<SearchAgentEvent, { toolCallId: string }>;
+
+function toolLedgerPayload(event: ToolLedgerEvent) {
+  return {
+    operationRef: "operationRef" in event ? event.operationRef : undefined,
+    attempt: "attempt" in event ? event.attempt : undefined,
+    inputHash: "inputHash" in event ? event.inputHash : undefined,
+    outputHash: "outputHash" in event ? event.outputHash ?? undefined : undefined,
+    resultRef: "resultRef" in event ? event.resultRef ?? undefined : undefined,
+    researchBatchId: "researchBatchId" in event ? event.researchBatchId : undefined,
+    researchResultId: "researchResultId" in event ? event.researchResultId : undefined,
+    usage: "usage" in event ? event.usage : undefined
+  };
+}
 
 const ineffectiveSourceText = /(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|仅(?:发现|检索到).{0,12}(?:候选|索引)|(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}(?:对比|区别|内容|信息|说明|细节|证据)|(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}(?:内容|信息|证据|说明))/u;
 
@@ -125,7 +139,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
   }
   if (event.type === "tool.started") {
     const unknown = event.toolName === "unknown_tool";
-    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, planStepId: event.planStepId, name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
+    return { events: [{ type: "tool.started", payload: { toolCallId: event.toolCallId, planStepId: event.planStepId, ...toolLedgerPayload(event), name: unknown ? "未知工具请求" : channelName(event.channel), summary: unknown ? "正在拦截未注册工具请求" : `搜索：${oneLine(event.query, 300)}`, channel: event.channel, query: oneLine(event.query, 300), cached: event.cached } }] };
   }
   if (event.type === "tool.progress") {
     const source = verifiedSource(event.source);
@@ -134,6 +148,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
         type: "tool.progress",
         payload: {
           toolCallId: event.toolCallId,
+          ...toolLedgerPayload(event),
           channel: event.channel,
           query: oneLine(event.query, 300),
           provider: oneLine(event.provider, 80),
@@ -194,6 +209,8 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
       .filter((result): result is NonNullable<typeof result> => Boolean(result));
     return { events: [{ type: "tool.completed", payload: {
       toolCallId: event.toolCallId,
+      planStepId: event.planStepId,
+      ...toolLedgerPayload(event),
       settlementSummary: oneLine(event.summary),
       channel: event.channel,
       query: oneLine(event.query, 300),
@@ -248,6 +265,8 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
   if (event.type === "tool.failed") {
     return { events: [{ type: "tool.failed", payload: {
       toolCallId: event.toolCallId,
+      planStepId: event.planStepId,
+      ...toolLedgerPayload(event),
       settlementSummary: event.toolName === "unknown_tool" ? "未知工具请求已被阻止" : "搜索未完成",
       channel: event.channel,
       query: oneLine(event.query, 300),
@@ -266,7 +285,20 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
     } }] };
   }
   if (event.type === "tool.unknown") {
-    return { events: [{ type: "tool.updated", payload: { toolCallId: event.toolCallId, status: "unknown", summary: "搜索结果状态未知", channel: event.channel, query: oneLine(event.query, 300), error: event.reasonCode } }] };
+    return { events: [{ type: "tool.unknown", payload: {
+      toolCallId: event.toolCallId,
+      planStepId: event.planStepId,
+      ...toolLedgerPayload(event),
+      status: "unknown",
+      summary: "搜索结果状态未知",
+      channel: event.channel,
+      query: oneLine(event.query, 300),
+      provider: event.provider ? oneLine(event.provider, 80) : "unknown",
+      error: event.reasonCode,
+      reasonCode: event.reasonCode,
+      nextAction: event.nextAction || "check_operation",
+      durationMs: event.durationMs || 0
+    } }] };
   }
   if (event.type === "memory.status") {
     const summary = event.status === "available"

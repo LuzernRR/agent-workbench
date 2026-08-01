@@ -53,6 +53,7 @@ from app.llm.deepseek import (
     add_usage,
     invoke_structured,
 )
+from app.persistence.tool_ledger import ToolLedgerSettlement
 from app.prompts.agents import (
     DEGRADED_WRITER_PROMPT,
     DIRECT_WRITER_PROMPT,
@@ -64,6 +65,13 @@ from app.prompts.agents import (
     WRITER_PROMPT,
 )
 from app.tools.channels.base import ChannelProgress, ChannelVerificationUpdate
+from app.tools.gateway import (
+    ToolGatewayCall,
+    ToolGatewayCancelled,
+    ToolGatewayExecution,
+    ToolOperationOutcome,
+    usage_payload,
+)
 from app.tools.search_tool import (
     SearchExecutionResult,
     SearchToolInput,
@@ -933,16 +941,6 @@ async def mark_plan_running(
     return patch
 
 
-def _idempotency_key(state: SearchState, arguments: SearchToolInput) -> tuple[str, str]:
-    canonical = arguments.model_dump_json()
-    input_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    material = (
-        f"{state['run_id']}|web_search|{arguments.channel}|"
-        f"{arguments.query.casefold().strip()}|{arguments.max_results}"
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest(), input_hash
-
-
 async def _run_one_search(
     state: SearchState,
     runtime: Runtime[RunContext],
@@ -950,6 +948,8 @@ async def _run_one_search(
     arguments: SearchToolInput,
     *,
     plan_step_id: str | None = None,
+    research_batch_id: str | None = None,
+    research_result_id: str | None = None,
     timeout_seconds: float | None = None,
     xiaohongshu_public_only: bool = False,
 ) -> tuple[SearchExecutionResult, SearchTrace]:
@@ -960,6 +960,33 @@ async def _run_one_search(
     observed_evidence_count = 0
     announced_verifications: set[str] = set()
     tool_ref = {"planStepId": plan_step_id} if plan_step_id else {}
+    prepared = runtime.context.tool_gateway.prepare(ToolGatewayCall(
+        run_id=state["run_id"],
+        visitor_id=state["visitor_id"],
+        project_id=state.get("project_id"),
+        tool_call_id=tool_call_id,
+        tool_id="web_search",
+        tool_version="1",
+        input_payload=arguments.model_dump(mode="json"),
+        plan_step_id=plan_step_id,
+        research_batch_id=research_batch_id,
+        research_result_id=research_result_id,
+    ))
+    gateway_ref = {
+        "operationRef": prepared.operation_ref,
+        "attempt": prepared.attempt,
+        "inputHash": prepared.input_hash,
+        **(
+            {"researchBatchId": prepared.research_batch_id}
+            if prepared.research_batch_id
+            else {}
+        ),
+        **(
+            {"researchResultId": prepared.research_result_id}
+            if prepared.research_result_id
+            else {}
+        ),
+    }
 
     def stream_progress(update: ChannelProgress) -> None:
         nonlocal observed_evidence_count, observed_result_count, progress_emitted
@@ -970,6 +997,7 @@ async def _run_one_search(
             "tool.progress",
             toolCallId=tool_call_id,
             **tool_ref,
+            **gateway_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -1002,6 +1030,7 @@ async def _run_one_search(
             event_type,
             toolCallId=tool_call_id,
             **tool_ref,
+            **gateway_ref,
             challengeId=update.challenge_id,
             status=update.status,
             expiresAt=update.expires_at,
@@ -1010,130 +1039,31 @@ async def _run_one_search(
             message=update.message,
         ))
 
-    idempotency_key, input_hash = _idempotency_key(state, arguments)
     writer(runtime_event(
         "tool.started",
         toolCallId=tool_call_id,
         **tool_ref,
+        **gateway_ref,
         toolName="web_search",
         query=arguments.query,
         channel=arguments.channel,
         cached=False,
     ))
 
-    begin_task = asyncio.create_task(runtime.context.ledger.begin(
-            idempotency_key=idempotency_key,
-            run_id=state["run_id"],
-            tool_call_id=tool_call_id,
-            visitor_id=state["visitor_id"],
-            project_id=state.get("project_id"),
-            input_hash=input_hash,
-        ))
-    try:
-        decision = await asyncio.shield(begin_task)
-    except asyncio.CancelledError:
-        await asyncio.shield(asyncio.gather(begin_task, return_exceptions=True))
-        try:
-            await asyncio.shield(
-                runtime.context.ledger.unknown(idempotency_key, "CANCELLED_OUTCOME_UNKNOWN")
-            )
-        except Exception:  # noqa: BLE001 - stop endpoint 仍会按 run_id 再次结算
-            writer(runtime_event(
-                "tool.unknown",
-                toolCallId=tool_call_id,
-                **tool_ref,
-                toolName="web_search",
-                query=arguments.query,
-                channel=arguments.channel,
-                reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
-            ))
-        raise
-    except Exception:  # noqa: BLE001 - 无账本时禁止盲目执行外部调用
-        result = SearchExecutionResult(
-            ok=False,
-            channel=arguments.channel,
-            query=arguments.query,
-            provider="unknown",
-            results=[],
-            evidence=[],
-            error_code="LEDGER_UNAVAILABLE",
-            error_message="工具幂等账本不可用，已停止外部调用",
-        )
-        writer(runtime_event(
-            "tool.unknown",
-            toolCallId=tool_call_id,
-            **tool_ref,
-            toolName="web_search",
-            query=arguments.query,
-            channel=arguments.channel,
-            reasonCode="LEDGER_UNAVAILABLE",
-        ))
-        return result, SearchTrace(
-            tool_call_id=tool_call_id,
-            **({"plan_step_id": plan_step_id} if plan_step_id else {}),
-            idempotency_key=idempotency_key,
-            query=arguments.query,
-            channel=arguments.channel,
-            provider="unknown",
-            status="unknown",
-            outcome_status="failed",
-            primary_provider="unknown",
-            effective_provider="unknown",
-            result_count=0,
-            evidence_count=0,
-            error_code="LEDGER_UNAVAILABLE",
-            retryable=False,
-            next_action="stop",
-            limitation="工具幂等账本不可用，已停止外部调用",
-        )
+    def restore_result(payload: dict[str, Any]) -> SearchExecutionResult:
+        restored: dict[str, Any] = {**payload, "query": arguments.query}
+        for key in ("results", "evidence"):
+            items = payload.get(key)
+            if isinstance(items, list):
+                restored[key] = [
+                    {**item, "query": arguments.query}
+                    if isinstance(item, dict)
+                    else item
+                    for item in items
+                ]
+        return SearchExecutionResult.model_validate(restored)
 
-    if decision.action == "unknown":
-        result = SearchExecutionResult(
-            ok=False,
-            channel=arguments.channel,
-            query=arguments.query,
-            provider="unknown",
-            results=[],
-            evidence=[],
-            error_code=decision.error_code or "OUTCOME_UNKNOWN",
-            error_message="上次搜索结果未知，已停止自动重试",
-        )
-        writer(runtime_event(
-            "tool.unknown",
-            toolCallId=tool_call_id,
-            **tool_ref,
-            toolName="web_search",
-            query=arguments.query,
-            channel=arguments.channel,
-            reasonCode=result.error_code,
-        ))
-        status = "unknown"
-    elif decision.action == "cached":
-        if not decision.result:
-            result = SearchExecutionResult(
-                ok=False,
-                channel=arguments.channel,
-                query=arguments.query,
-                provider="unknown",
-                results=[],
-                evidence=[],
-                error_code="CACHED_RESULT_MISSING",
-                error_message="幂等账本缺少已结算结果，已停止自动重试",
-            )
-            writer(runtime_event(
-                "tool.unknown",
-                toolCallId=tool_call_id,
-                **tool_ref,
-                toolName="web_search",
-                query=arguments.query,
-                channel=arguments.channel,
-                reasonCode="CACHED_RESULT_MISSING",
-            ))
-            status = "unknown"
-        else:
-            result = SearchExecutionResult.model_validate(decision.result)
-            status = "cached" if result.ok else "failed"
-    else:
+    async def execute_operation() -> ToolOperationOutcome[SearchExecutionResult]:
         try:
             verification_enabled = (
                 arguments.channel == "xiaohongshu"
@@ -1191,48 +1121,6 @@ async def _run_one_search(
                 error_code=code,
                 error_message="搜索调用已停止，以保留反思、写作和核验时间",
             )
-            try:
-                await runtime.context.ledger.fail(
-                    idempotency_key,
-                    result.public_dict(),
-                    code,
-                )
-                status = "failed"
-            except Exception:  # noqa: BLE001 - 无法确认结算持久化结果
-                result = SearchExecutionResult(
-                    ok=False,
-                    channel=arguments.channel,
-                    query=arguments.query,
-                    provider="unknown",
-                    results=[],
-                    evidence=[],
-                    error_code="LEDGER_SETTLEMENT_UNKNOWN",
-                    error_message="限时停止搜索后，幂等账本结算结果未知",
-                )
-                writer(runtime_event(
-                    "tool.unknown",
-                    toolCallId=tool_call_id,
-                    **tool_ref,
-                    toolName="web_search",
-                    query=arguments.query,
-                    channel=arguments.channel,
-                    reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
-                ))
-                status = "unknown"
-        except asyncio.CancelledError:
-            try:
-                await runtime.context.ledger.unknown(idempotency_key, "CANCELLED_OUTCOME_UNKNOWN")
-            except Exception:  # noqa: BLE001 - stop endpoint 仍会按 run_id 再次结算 unknown
-                writer(runtime_event(
-                    "tool.unknown",
-                    toolCallId=tool_call_id,
-                    **tool_ref,
-                    toolName="web_search",
-                    query=arguments.query,
-                    channel=arguments.channel,
-                    reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
-                ))
-            raise
         except Exception as exc:  # noqa: BLE001 - 转换为稳定、可恢复工具错误
             code = _safe_error_code(exc)
             result = SearchExecutionResult(
@@ -1245,65 +1133,104 @@ async def _run_one_search(
                 error_code=code,
                 error_message="搜索工具未能完成",
             )
-            try:
-                await runtime.context.ledger.fail(idempotency_key, result.public_dict(), code)
-                status = "failed"
-            except Exception:  # noqa: BLE001 - 无法确认结算持久化结果
-                result = SearchExecutionResult(
-                    ok=False,
-                    channel=arguments.channel,
-                    query=arguments.query,
-                    provider="unknown",
-                    results=[],
-                    evidence=[],
-                    error_code="LEDGER_SETTLEMENT_UNKNOWN",
-                    error_message="工具失败且幂等账本结算结果未知",
-                )
-                writer(runtime_event(
-                    "tool.unknown",
-                    toolCallId=tool_call_id,
-                    **tool_ref,
-                    toolName="web_search",
-                    query=arguments.query,
-                    channel=arguments.channel,
-                    reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
-                ))
-                status = "unknown"
-        else:
-            try:
-                if result.ok:
-                    await runtime.context.ledger.complete(idempotency_key, result.public_dict())
-                    status = "completed"
-                else:
-                    await runtime.context.ledger.fail(
-                        idempotency_key,
-                        result.public_dict(),
-                        result.error_code or "SEARCH_FAILED",
-                    )
-                    status = "failed"
-            except Exception:  # noqa: BLE001 - 外部调用已发生但账本结算未知
-                result = SearchExecutionResult(
-                    ok=False,
-                    channel=arguments.channel,
-                    query=arguments.query,
-                    provider="unknown",
-                    results=[],
-                    evidence=[],
-                    error_code="LEDGER_SETTLEMENT_UNKNOWN",
-                    error_message="外部调用已结束，但幂等账本结算结果未知",
-                )
-                writer(runtime_event(
-                    "tool.unknown",
-                    toolCallId=tool_call_id,
-                    **tool_ref,
-                    toolName="web_search",
-                    query=arguments.query,
-                    channel=arguments.channel,
-                    reasonCode="LEDGER_SETTLEMENT_UNKNOWN",
-                ))
-                status = "unknown"
+        resolution = result.resolution
+        if resolution is None:  # pragma: no cover - Pydantic after-validator 防御
+            raise RuntimeError("搜索结果缺少结算状态")
+        duration_ms = max(0, round((time.perf_counter() - started) * 1000))
+        result_count = max(observed_result_count, len(result.results))
+        evidence_count = max(observed_evidence_count, len(result.evidence))
+        settlement = ToolLedgerSettlement(
+            status="completed" if result.ok else "failed",
+            result=result.public_dict(),
+            provider=resolution.effective_provider,
+            outcome_status=resolution.status,
+            error_code=resolution.reason_code or result.error_code,
+            retryable=resolution.retryable,
+            next_action=resolution.next_action,
+            duration_ms=duration_ms,
+            request_count=1,
+            result_count=result_count,
+            evidence_count=evidence_count,
+            page_read_count=evidence_count,
+            actual_cost_usd=None,
+        )
+        return ToolOperationOutcome(value=result, settlement=settlement)
 
-    if decision.action == "cached" and result.interaction_wait_ms:
+    def emit_unknown(execution: ToolGatewayExecution[SearchExecutionResult]) -> None:
+        reason_code = execution.decision.error_code or "OUTCOME_UNKNOWN"
+        writer(runtime_event(
+            "tool.unknown",
+            toolCallId=tool_call_id,
+            **tool_ref,
+            **gateway_ref,
+            toolName="web_search",
+            query=arguments.query,
+            channel=arguments.channel,
+            provider=execution.decision.provider,
+            resultRef=execution.decision.result_ref,
+            outputHash=execution.decision.output_hash,
+            reasonCode=reason_code,
+            nextAction="check_operation",
+            durationMs=execution.decision.duration_ms,
+            usage=usage_payload(
+                execution.decision,
+                tool_id=prepared.tool_id,
+                tool_version=prepared.tool_version,
+            ),
+        ))
+
+    try:
+        execution = await runtime.context.tool_gateway.invoke(
+            prepared,
+            execute_operation,
+            restore_result,
+        )
+    except ToolGatewayCancelled as cancelled:
+        execution = cancelled.execution
+        if execution.value is None or execution.decision.status == "unknown":
+            emit_unknown(execution)
+        else:
+            _emit_search_terminal(
+                writer,
+                arguments,
+                execution,
+                tool_ref,
+                gateway_ref,
+                observed_result_count,
+                observed_evidence_count,
+            )
+        raise asyncio.CancelledError from None
+
+    if execution.value is None or execution.decision.status == "unknown":
+        emit_unknown(execution)
+        reason_code = execution.decision.error_code or "OUTCOME_UNKNOWN"
+        result = SearchExecutionResult(
+            ok=False,
+            channel=arguments.channel,
+            query=arguments.query,
+            provider=execution.decision.provider,
+            results=[],
+            evidence=[],
+            error_code=reason_code,
+            error_message=(
+                "工具幂等账本不可用，已停止外部调用"
+                if reason_code in {"LEDGER_REQUIRED", "LEDGER_UNAVAILABLE"}
+                else "工具调用结果未知，已停止自动重试"
+            ),
+        )
+        return result, _search_trace(
+            prepared,
+            execution,
+            arguments,
+            result,
+            plan_step_id=plan_step_id,
+            research_batch_id=research_batch_id,
+            research_result_id=research_result_id,
+            status="unknown",
+        )
+
+    result = execution.value
+    if execution.cached and result.interaction_wait_ms:
         result = result.model_copy(update={"interaction_wait_ms": 0})
 
     if result.ok and not progress_emitted:
@@ -1327,17 +1254,59 @@ async def _run_one_search(
                 ),
             ))
 
-    public_results = [item.model_dump(mode="json") for item in result.results]
+    _emit_search_terminal(
+        writer,
+        arguments,
+        execution,
+        tool_ref,
+        gateway_ref,
+        observed_result_count,
+        observed_evidence_count,
+    )
+    return result, _search_trace(
+        prepared,
+        execution,
+        arguments,
+        result,
+        plan_step_id=plan_step_id,
+        research_batch_id=research_batch_id,
+        research_result_id=research_result_id,
+        status="cached" if execution.cached and result.ok else execution.decision.status,
+    )
+
+
+def _emit_search_terminal(
+    writer: Any,
+    arguments: SearchToolInput,
+    execution: ToolGatewayExecution[SearchExecutionResult],
+    tool_ref: dict[str, str],
+    gateway_ref: dict[str, Any],
+    observed_result_count: int,
+    observed_evidence_count: int,
+) -> None:
+    result = execution.value
+    if result is None:  # pragma: no cover - 调用者已防御
+        raise RuntimeError("工具终态缺少结果")
     resolution = result.resolution
     if resolution is None:  # pragma: no cover - Pydantic after-validator 防御
         raise RuntimeError("搜索结果缺少结算状态")
-    settled_result_count = max(observed_result_count, len(result.results))
-    settled_evidence_count = max(observed_evidence_count, len(result.evidence))
+    decision = execution.decision
+    terminal_ref = {
+        **gateway_ref,
+        "resultRef": decision.result_ref,
+        "outputHash": decision.output_hash,
+        "usage": usage_payload(
+            decision,
+            tool_id=execution.prepared.tool_id,
+            tool_version=execution.prepared.tool_version,
+        ),
+    }
     if result.ok:
         writer(runtime_event(
             "tool.completed",
-            toolCallId=tool_call_id,
+            toolCallId=execution.prepared.tool_call_id,
             **tool_ref,
+            **terminal_ref,
             toolName="web_search",
             query=arguments.query,
             channel=arguments.channel,
@@ -1354,52 +1323,99 @@ async def _run_one_search(
                 if resolution.status == "degraded"
                 else f"找到 {len(result.results)} 条结果，读取 {len(result.evidence)} 个来源"
             ),
-            resultCount=len(result.results),
-            evidenceCount=len(result.evidence),
-            results=public_results,
-            cached=decision.action == "cached",
-            durationMs=max(0, round((time.perf_counter() - started) * 1000)),
+            resultCount=max(decision.result_count, len(result.results)),
+            evidenceCount=max(decision.evidence_count, len(result.evidence)),
+            results=[item.model_dump(mode="json") for item in result.results],
+            cached=execution.cached,
+            durationMs=decision.duration_ms,
         ))
-    elif status != "unknown":
-        writer(runtime_event(
-            "tool.failed",
-            toolCallId=tool_call_id,
-            **tool_ref,
-            toolName="web_search",
-            query=arguments.query,
-            channel=arguments.channel,
-            provider=resolution.effective_provider,
-            status=resolution.status,
-            primaryProvider=resolution.primary_provider,
-            effectiveProvider=resolution.effective_provider,
-            reasonCode=resolution.reason_code or result.error_code or "SEARCH_FAILED",
-            message=resolution.message or result.error_message or "搜索失败",
-            retryable=resolution.retryable,
-            nextAction=resolution.next_action,
-            resultCount=settled_result_count,
-            evidenceCount=settled_evidence_count,
-            durationMs=max(0, round((time.perf_counter() - started) * 1000)),
-        ))
-
-    trace = SearchTrace(
-        tool_call_id=tool_call_id,
-        **({"plan_step_id": plan_step_id} if plan_step_id else {}),
-        idempotency_key=idempotency_key,
+        return
+    writer(runtime_event(
+        "tool.failed",
+        toolCallId=execution.prepared.tool_call_id,
+        **tool_ref,
+        **terminal_ref,
+        toolName="web_search",
         query=arguments.query,
         channel=arguments.channel,
         provider=resolution.effective_provider,
-        status=status,
+        status=resolution.status,
+        primaryProvider=resolution.primary_provider,
+        effectiveProvider=resolution.effective_provider,
+        reasonCode=resolution.reason_code or result.error_code or "SEARCH_FAILED",
+        message=resolution.message or result.error_message or "搜索失败",
+        retryable=resolution.retryable,
+        nextAction=resolution.next_action,
+        resultCount=max(
+            decision.result_count,
+            observed_result_count,
+            len(result.results),
+        ),
+        evidenceCount=max(
+            decision.evidence_count,
+            observed_evidence_count,
+            len(result.evidence),
+        ),
+        durationMs=decision.duration_ms,
+    ))
+
+
+def _search_trace(
+    prepared: Any,
+    execution: ToolGatewayExecution[SearchExecutionResult],
+    arguments: SearchToolInput,
+    result: SearchExecutionResult,
+    *,
+    plan_step_id: str | None,
+    research_batch_id: str | None,
+    research_result_id: str | None,
+    status: str,
+) -> SearchTrace:
+    resolution = result.resolution
+    if resolution is None:  # pragma: no cover - Pydantic after-validator 防御
+        raise RuntimeError("搜索结果缺少结算状态")
+    decision = execution.decision
+    return SearchTrace(
+        tool_call_id=prepared.tool_call_id,
+        **({"plan_step_id": plan_step_id} if plan_step_id else {}),
+        **(
+            {"research_batch_id": research_batch_id}
+            if research_batch_id
+            else {}
+        ),
+        **(
+            {"research_result_id": research_result_id}
+            if research_result_id
+            else {}
+        ),
+        idempotency_key=prepared.idempotency_key,
+        operation_ref=decision.operation_ref or prepared.operation_ref,
+        attempt=decision.attempt,
+        input_hash=decision.input_hash or prepared.input_hash,
+        output_hash=decision.output_hash,
+        result_ref=decision.result_ref,
+        query=arguments.query,
+        channel=arguments.channel,
+        provider=decision.provider or resolution.effective_provider,
+        status=status,  # type: ignore[typeddict-item]
         outcome_status=resolution.status,
         primary_provider=resolution.primary_provider,
         effective_provider=resolution.effective_provider,
-        result_count=len(result.results),
-        evidence_count=len(result.evidence),
-        error_code=resolution.reason_code or result.error_code,
-        retryable=resolution.retryable,
-        next_action=resolution.next_action,
+        result_count=decision.result_count,
+        evidence_count=decision.evidence_count,
+        error_code=decision.error_code or resolution.reason_code or result.error_code,
+        retryable=decision.retryable,
+        next_action=(
+            "check_operation" if status == "unknown" else resolution.next_action
+        ),
         limitation=_result_limitation(result),
+        duration_ms=decision.duration_ms,
+        usage=usage_payload(
+            decision,
+            tool_id=prepared.tool_id,
+            tool_version=prepared.tool_version,
+        ),
     )
-    return result, trace
 
 
 _XIAOHONGSHU_CIRCUIT_CODES = frozenset({
@@ -1560,6 +1576,8 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             target["tool_call_id"],
             arguments,
             plan_step_id=target["plan_step_id"],
+            research_batch_id=work_item["batch_id"],
+            research_result_id=work_item["result_id"],
             timeout_seconds=target["timeout_seconds"],
             xiaohongshu_public_only=(
                 public_only if target["channel"] == "xiaohongshu" else False
