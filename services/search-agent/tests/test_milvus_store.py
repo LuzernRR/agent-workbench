@@ -8,6 +8,7 @@ import pytest
 from app.config.agent import MilvusConfig, agent_config
 from app.graph import nodes
 from app.graph.context import RunContext
+from app.graph.evidence import normalize_evidence, transition_evidence
 from app.graph.state import initial_state
 from app.memory.milvus_store import (
     MilvusEvidenceStore,
@@ -173,20 +174,24 @@ async def test_successful_memory_event_omits_nullable_reason_code(
     state.update({
         "verification_passed": True,
         "stop_reason": "VERIFIED",
-        "answer": "已核验回答",
-        "evidence": [{
+        "answer": "已核验回答[来源1]",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "evidence": [transition_evidence(normalize_evidence({
+            "tool_call_id": "call_one",
+            "channel": "web",
             "url": "https://example.com/source",
             "title": "Source",
             "text": "verified text",
-        }],
+        }), "accepted", "SOURCE_PRESENTED")[0]],
     })
 
     await nodes.finalize(state, runtime)
 
-    assert events[0]["type"] == "memory.status"
-    assert events[0]["status"] == "stored"
-    assert events[0]["storedCount"] == 1
-    assert "reasonCode" not in events[0]
+    memory_event = next(event for event in events if event["type"] == "memory.status")
+    assert memory_event["status"] == "stored"
+    assert memory_event["storedCount"] == 1
+    assert "reasonCode" not in memory_event
 
 
 @pytest.mark.asyncio

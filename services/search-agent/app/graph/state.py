@@ -67,6 +67,12 @@ class Candidate(TypedDict):
 class Evidence(TypedDict):
     """已读取原文的证据片段。"""
 
+    evidence_id: str
+    source_id: str
+    content_hash: str
+    status: Literal["read", "accepted", "rejected", "cited"]
+    status_reason_code: str
+    status_updated_at: str
     channel: ChannelName
     tool_call_id: str
     iteration: int

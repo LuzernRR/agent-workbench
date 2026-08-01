@@ -430,4 +430,39 @@ describe("reduceAgentEvent", () => {
     expect(next.runTimings).toEqual({});
     expect(next.runStatus).toBe("queued");
   });
+
+  it("Evidence 状态单调归并并拒绝重放倒退与身份漂移", () => {
+    const identity = {
+      evidenceId: "evidence_0123456789abcdef0123456789abcdef01234567",
+      sourceId: "source_0123456789abcdef0123456789abcdef01234567",
+      contentHash: "c".repeat(64)
+    };
+    const metadata = (evidenceStatus: string, evidenceReasonCode: string) => ({
+      ...identity,
+      evidenceStatus,
+      evidenceReasonCode,
+      evidenceUpdatedAt: "2026-08-01T00:00:01Z"
+    });
+    const lifecycleEvents = [
+      event(1, "tool.started", { toolCallId: "search-evidence", name: "网页搜索", summary: "搜索中" }),
+      event(2, "tool.completed", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true }] }),
+      event(3, "tool.updated", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true, ...metadata("read", "BODY_READ") }] }),
+      event(4, "tool.updated", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true, ...metadata("accepted", "SOURCE_PRESENTED") }] }),
+      event(5, "tool.updated", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true, ...metadata("cited", "ANSWER_CITED") }] }),
+      event(6, "tool.updated", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true, ...metadata("read", "BODY_READ") }] }),
+      event(7, "tool.updated", { toolCallId: "search-evidence", sources: [{ title: "来源", url: "https://example.com/source", verified: true, ...metadata("cited", "ANSWER_CITED"), evidenceId: "evidence_conflict" }] })
+    ];
+    const state = reduceAgentEvents(
+      createEmptyThreadState("project", "thread"),
+      lifecycleEvents
+    );
+
+    expect(state.items["tool:search-evidence"]).toMatchObject({
+      sources: [{ ...identity, evidenceStatus: "cited", evidenceReasonCode: "ANSWER_CITED" }]
+    });
+    expect(reduceAgentEvents(
+      createEmptyThreadState("project", "thread"),
+      lifecycleEvents
+    )).toEqual(state);
+  });
 });

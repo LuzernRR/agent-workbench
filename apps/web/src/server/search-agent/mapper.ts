@@ -262,6 +262,28 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
         }
       : { events: [] };
   }
+  if (event.type === "evidence.updated") {
+    return {
+      events: [{
+        type: "tool.updated",
+        payload: {
+          toolCallId: event.toolCallId,
+          sources: [{
+            title: oneLine(event.title, 300),
+            url: safeUrl(event.url),
+            verified: true,
+            channel: event.channel,
+            evidenceId: event.evidenceId,
+            sourceId: event.sourceId,
+            contentHash: event.contentHash,
+            evidenceStatus: event.status,
+            evidenceReasonCode: event.reasonCode,
+            evidenceUpdatedAt: event.updatedAt
+          }]
+        }
+      }]
+    };
+  }
   if (event.type === "tool.failed") {
     return { events: [{ type: "tool.failed", payload: {
       toolCallId: event.toolCallId,

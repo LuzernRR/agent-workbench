@@ -16,6 +16,13 @@ from langgraph.runtime import Runtime
 
 from app.events.runtime import runtime_event, safe_public_text
 from app.graph.context import RunContext
+from app.graph.evidence import (
+    EvidenceStateConflictError,
+    answerable_evidence,
+    evidence_event_payload,
+    normalize_evidence,
+    transition_evidence,
+)
 from app.graph.plan import (
     PlanValidationError,
     build_plan_snapshot,
@@ -256,6 +263,15 @@ _NON_MEDICAL_DISCLAIMER = re.compile(r"不构成医疗建议|非医疗建议")
 _CONFLICTING_EVIDENCE_GAP = re.compile(r"冲突|矛盾|不一致|相反")
 
 
+def _event_writer() -> Any:
+    """图外单元测试不具有 stream writer；状态语义不依赖事件旁路。"""
+
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return lambda _event: None
+
+
 def _clean_answer_prefix(value: str) -> str:
     """移除边界压缩后可能留下的空标题、列表标记或未闭合代码块。"""
 
@@ -319,14 +335,7 @@ def _answer_citations(
         for match in _CITATION_REFERENCE.finditer(answer)
     ))
     if not referenced:
-        citations: list[Citation] = []
-        seen: set[str] = set()
-        for item in evidence:
-            if item["url"] in seen:
-                continue
-            seen.add(item["url"])
-            citations.append(Citation(label=item["title"][:160], url=item["url"]))
-        return answer, citations
+        return answer, []
 
     original_to_normalized: dict[int, int] = {}
     url_to_normalized: dict[str, int] = {}
@@ -352,6 +361,27 @@ def _answer_citations(
         answer,
     )
     return normalized_answer, citations
+
+
+def _referenced_evidence(answer: str, evidence: list[Evidence]) -> list[Evidence]:
+    """按 Writer 的 [来源N] 解析实际引用，不把未引用来源伪标 cited。"""
+
+    referenced = list(dict.fromkeys(
+        int(match.group(1))
+        for match in _CITATION_REFERENCE.finditer(answer)
+    ))
+    selected: list[Evidence] = []
+    seen_ids: set[str] = set()
+    for original in referenced:
+        index = original - 1
+        if index < 0 or index >= len(evidence):
+            continue
+        item = evidence[index]
+        if item["evidence_id"] in seen_ids:
+            continue
+        seen_ids.add(item["evidence_id"])
+        selected.append(item)
+    return selected
 
 
 def _freshness_required(question: str) -> bool:
@@ -660,7 +690,7 @@ def _verification_channel_coverage(
             required.append(channel)
 
     covered: list[str] = []
-    for item in state.get("evidence") or []:
+    for item in answerable_evidence(state.get("evidence") or []):
         channel = str(item.get("channel") or "")
         if channel in _RESEARCH_CHANNELS and channel not in covered:
             covered.append(channel)
@@ -743,7 +773,7 @@ def _group_source_presentations(
 async def load_context(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
     question = (state.get("question") or "").strip()
     context = (state.get("conversation_context") or "")[:20_000]
-    writer = get_stream_writer()
+    writer = _event_writer()
     recalled = 0
     project_id = state.get("project_id")
     if runtime.context.milvus and project_id:
@@ -1887,7 +1917,7 @@ async def merge_research(
                 limitation=item.limitation,
             ))
         for item in result.evidence:
-            new_evidence.append(Evidence(
+            new_evidence.append(normalize_evidence(Evidence(
                 channel=item.channel,
                 tool_call_id=tool_call_id,
                 iteration=state.get("round", 0),
@@ -1902,7 +1932,7 @@ async def merge_research(
                 published_at=item.published_at,
                 metrics=item.metrics,
                 limitation=item.limitation,
-            ))
+            )))
 
     seen_candidates = {item["url"] for item in state.get("candidates") or []}
     candidates = list(state.get("candidates") or [])
@@ -1910,12 +1940,17 @@ async def merge_research(
         if item["url"] not in seen_candidates:
             seen_candidates.add(item["url"])
             candidates.append(item)
-    seen_evidence = {item["url"] for item in state.get("evidence") or []}
-    evidence = list(state.get("evidence") or [])
+    evidence = [normalize_evidence(item) for item in state.get("evidence") or []]
+    evidence_by_url = {item["url"]: item for item in evidence}
+    writer = _event_writer()
     for item in new_evidence:
-        if item["url"] not in seen_evidence:
-            seen_evidence.add(item["url"])
+        previous = evidence_by_url.get(item["url"])
+        if previous is None:
+            evidence_by_url[item["url"]] = item
             evidence.append(item)
+            writer(runtime_event("evidence.updated", **evidence_event_payload(item)))
+        elif previous["evidence_id"] != item["evidence_id"]:
+            raise EvidenceStateConflictError("same URL returned conflicting body")
 
     gained = len(evidence) - len(state.get("evidence") or [])
     plan_patch: dict[str, Any] = {"pending_plan_step_ids": []}
@@ -1975,7 +2010,7 @@ async def merge_research(
 
 
 async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-    evidence = state.get("evidence") or []
+    evidence = [normalize_evidence(item) for item in state.get("evidence") or []]
     current_evidence = [
         item
         for item in evidence
@@ -2168,7 +2203,31 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         sufficient = True
         extra_searches = []
         extra = []
-    writer = get_stream_writer()
+    accepted_urls = set(presented_urls)
+    # Source Curator 是 Reflector 漏项后的权威复核；后续明确 include 可以覆盖
+    # 同轮较早的 exclude，但一旦写入状态仍只能沿合法单向迁移。
+    excluded_urls.difference_update(accepted_urls)
+    lifecycle_evidence: list[Evidence] = []
+    lifecycle_events: list[Evidence] = []
+    current_ids = {item["evidence_id"] for item in current_evidence}
+    for item in evidence:
+        target_status = None
+        reason_code = ""
+        if item["evidence_id"] in current_ids:
+            if item["url"] in accepted_urls:
+                target_status, reason_code = "accepted", "SOURCE_PRESENTED"
+            elif item["url"] in excluded_urls:
+                target_status, reason_code = "rejected", "SOURCE_EXCLUDED"
+        if target_status:
+            item, changed = transition_evidence(item, target_status, reason_code)
+            if changed:
+                lifecycle_events.append(item)
+        lifecycle_evidence.append(item)
+    writer = _event_writer()
+    for item in lifecycle_events:
+        writer(runtime_event("evidence.updated", **evidence_event_payload(item)))
+    # 被 Reflector/Source Curator 排除的正文不能继续满足事实写作条件。
+    sufficient = bool(sufficient and answerable_evidence(lifecycle_evidence))
     for tool_call_id, presentations in presentations_by_call.items():
         for presentation in presentations:
             writer(runtime_event(
@@ -2195,6 +2254,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     replan_required = bool(not sufficient and not stop_reason)
     extra_channels = {item["query"]: item["channel"] for item in extra_searches}
     return {
+        "evidence": lifecycle_evidence,
         "sufficient": sufficient,
         "pending_searches": extra_searches,
         "pending_queries": extra,
@@ -2220,7 +2280,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
 
 
 async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-    evidence = state.get("evidence") or []
+    evidence = answerable_evidence(state.get("evidence") or [])
     limit = budget_reason(state, reserve_model_calls=1)
     if limit:
         return {
@@ -2328,7 +2388,7 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
 
 
 async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-    evidence = state.get("evidence") or []
+    evidence = answerable_evidence(state.get("evidence") or [])
     answer = state.get("answer") or ""
     required_channels, evidence_channels, missing_channels = (
         _verification_channel_coverage(state)
@@ -2487,12 +2547,34 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         state.get("verification_passed") and reason == "VERIFIED"
     )
 
-    writer = get_stream_writer()
+    writer = _event_writer()
+    answer_model_calls = int(state.get("answer_model_calls") or 0)
+    answer = (
+        state.get("answer")
+        if state.get("answer_source") == "model" and answer_model_calls > 0
+        else None
+    )
+    eligible_evidence = answerable_evidence(state.get("evidence") or [])
+    referenced = _referenced_evidence(answer or "", eligible_evidence)
+    referenced_ids = {item["evidence_id"] for item in referenced}
+    lifecycle_evidence: list[Evidence] = []
+    cited_evidence: list[Evidence] = []
+    for raw_item in state.get("evidence") or []:
+        item = normalize_evidence(raw_item)
+        if item["evidence_id"] in referenced_ids:
+            item, changed = transition_evidence(item, "cited", "ANSWER_CITED")
+            if changed:
+                writer(runtime_event(
+                    "evidence.updated", **evidence_event_payload(item)
+                ))
+        if item["status"] == "cited":
+            cited_evidence.append(item)
+        lifecycle_evidence.append(item)
     if (
         verification_passed
         and state.get("project_id")
         and runtime.context.milvus
-        and state.get("evidence")
+        and cited_evidence
     ):
         health = runtime.context.milvus.health
         if not health.enabled or not health.available:
@@ -2507,7 +2589,7 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                     tenant_id=state["tenant_id"],
                     visitor_id=state["visitor_id"],
                     project_id=state["project_id"],
-                    evidence=state["evidence"],
+                    evidence=cited_evidence,
                 )
                 memory_payload: dict[str, Any] = {
                     "status": "stored" if stored else "degraded",
@@ -2523,16 +2605,11 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                 ))
 
     response_status = "completed" if reason in {"VERIFIED", "DIRECT_COMPLETED"} else "partial"
-    answer_model_calls = int(state.get("answer_model_calls") or 0)
-    answer = (
-        state.get("answer")
-        if state.get("answer_source") == "model" and answer_model_calls > 0
-        else None
-    )
     citations: list[Citation] = []
     if answer:
-        answer, citations = _answer_citations(answer, state.get("evidence") or [])
+        answer, citations = _answer_citations(answer, eligible_evidence)
     return {
+        "evidence": lifecycle_evidence,
         "stop_reason": reason,
         "citations": citations,
         "answer": answer,

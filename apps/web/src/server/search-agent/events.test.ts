@@ -482,6 +482,27 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     expect(parseSearchAgentEvent({ ...nodeStarted, eventId: "stream_resume_000001", streamId: "stream_resume", streamSeq: 1, seq: 1 }).seq).toBe(1);
   });
 
+  it("只接受正文无关的 Evidence 生命周期白名单", () => {
+    const evidence = {
+      ...sourceEnvelope,
+      type: "evidence.updated",
+      evidenceId: "evidence_0123456789abcdef0123456789abcdef01234567",
+      sourceId: "source_0123456789abcdef0123456789abcdef01234567",
+      contentHash: "a".repeat(64),
+      toolCallId: "call_one",
+      url: "https://example.com/source",
+      title: "公开标题",
+      channel: "web",
+      status: "accepted",
+      reasonCode: "SOURCE_PRESENTED",
+      updatedAt: "2026-07-28T00:00:01Z"
+    };
+    expect(parseSearchAgentEvent(evidence)).toEqual(evidence);
+    expect(() => parseSearchAgentEvent({ ...evidence, text: "不得进入事件的正文" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...evidence, status: "draft" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...evidence, contentHash: "short" })).toThrow();
+  });
+
   it("消费者在终态后提前 return 时取消底层 reader", async () => {
     const cancel = vi.fn();
     const body = new ReadableStream<Uint8Array>({

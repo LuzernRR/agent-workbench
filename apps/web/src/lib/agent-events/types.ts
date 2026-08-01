@@ -48,6 +48,7 @@ export type AgentEvent = {
 export type RunStatus = "idle" | "queued" | "running" | "waiting" | "completed" | "failed" | "stopped" | "reconnecting";
 export type ToolStatus = "preparing" | "running" | "waiting" | "completed" | "failed" | "stopped" | "unknown";
 export type ToolVerificationStatus = "pending" | "succeeded" | "expired" | "account_mismatch" | "failed" | "cancelled";
+export type EvidenceStatus = "read" | "accepted" | "rejected" | "cited";
 
 export type ToolUsage = {
   toolId: string;
@@ -76,6 +77,12 @@ export type ToolSource = {
   publishedAt?: string;
   limitation?: string;
   displayText?: string;
+  evidenceId?: string;
+  sourceId?: string;
+  contentHash?: string;
+  evidenceStatus?: EvidenceStatus;
+  evidenceReasonCode?: string;
+  evidenceUpdatedAt?: string;
 };
 
 export type MessageAttachment = {

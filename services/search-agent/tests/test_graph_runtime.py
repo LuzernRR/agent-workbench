@@ -966,6 +966,7 @@ async def test_current_direct_intent_bypasses_search_with_stale_research_history
     assert output["stop_reason"] == "DIRECT_COMPLETED"
     assert output["answer"] == scenario.writer_answer
     assert output["tool_calls"] == 0
+    assert output["evidence"] == []
     assert scenario.tool_executions == []
     assert scenario.structured_calls.get("supervisor", 0) == 1
     assert scenario.structured_calls.get("planner", 0) == 0
@@ -979,6 +980,7 @@ async def test_current_direct_intent_bypasses_search_with_stale_research_history
     assert classify_step["kind"] == "model"
     assert not [event for event in events if event["type"].startswith("tool.")]
     assert not [event for event in events if event["type"].startswith("plan.")]
+    assert not [event for event in events if event["type"] == "evidence.updated"]
     supervisor_input = scenario.structured_messages["supervisor"][0][-1].content
     assert supervisor_input.index("历史上下文") < supervisor_input.index("当前用户消息")
     assert supervisor_input.rstrip().endswith('"你是谁"')
@@ -1213,13 +1215,35 @@ async def test_single_search_uses_deterministic_tool_id_and_complete_ledger(
     tool_events = [
         event for event in events if event.get("toolCallId") == tool_call_id
     ]
-    assert [event["type"] for event in tool_events] == [
+    assert [
+        event["type"]
+        for event in tool_events
+        if event["type"].startswith("tool.")
+    ] == [
         "tool.started",
         "tool.progress",
         "tool.progress",
         "tool.completed",
         "tool.presented",
     ]
+    evidence_events = [
+        event for event in tool_events if event["type"] == "evidence.updated"
+    ]
+    assert [event["status"] for event in evidence_events] == [
+        "read",
+        "accepted",
+        "cited",
+    ]
+    assert [event["reasonCode"] for event in evidence_events] == [
+        "BODY_READ",
+        "SOURCE_PRESENTED",
+        "ANSWER_CITED",
+    ]
+    assert len({event["evidenceId"] for event in evidence_events}) == 1
+    assert len({event["sourceId"] for event in evidence_events}) == 1
+    assert len({event["contentHash"] for event in evidence_events}) == 1
+    assert not any("text" in event for event in evidence_events)
+    assert output["evidence"][0]["status"] == "cited"
     assert [
         (event["resultCount"], event["evidenceCount"])
         for event in tool_events
@@ -1456,10 +1480,19 @@ async def test_reflector_excludes_read_but_irrelevant_evidence_from_details(
         }],
     }])
 
-    _output, events = await run_scenario(monkeypatch, scenario)
+    output, events = await run_scenario(monkeypatch, scenario)
 
     assert not [event for event in events if event["type"] == "tool.presented"]
     assert scenario.structured_calls.get("source_curator", 0) == 0
+    assert output["evidence"][0]["status"] == "rejected"
+    rejected = [event for event in events if event["type"] == "evidence.updated"]
+    assert rejected[-1]["status"] == "rejected"
+    assert rejected[-1]["reasonCode"] == "SOURCE_EXCLUDED"
+    assert "verified evidence for query one" not in "\n".join(
+        str(message.content)
+        for messages in scenario.structured_messages.get("writer", [])
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio

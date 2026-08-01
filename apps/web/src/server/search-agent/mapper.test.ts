@@ -402,4 +402,33 @@ describe("Search Agent v1 白名单投影", () => {
     const projection = mapSearchAgentEvent(source({ type: "node.failed", node: "research", nodeRunId: "research_dddddddddddddddddddddddddddddddd", agent: "researcher", iteration: 0, reasonCode: "PROVIDER_UNAVAILABLE" }));
     expect(projection.events).toEqual([]);
   });
+
+  it("把 Evidence 状态投影到原始 toolCallId 的公开来源", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "evidence.updated",
+      evidenceId: "evidence_0123456789abcdef0123456789abcdef01234567",
+      sourceId: "source_0123456789abcdef0123456789abcdef01234567",
+      contentHash: "b".repeat(64),
+      toolCallId: "call_one",
+      url: "https://example.com/source",
+      title: "公开标题",
+      channel: "web",
+      status: "cited",
+      reasonCode: "ANSWER_CITED",
+      updatedAt: "2026-07-28T00:00:01Z"
+    }), "run_one");
+
+    expect(projection.events).toEqual([{
+      type: "tool.updated",
+      payload: expect.objectContaining({
+        toolCallId: "call_one",
+        sources: [expect.objectContaining({
+          url: "https://example.com/source",
+          evidenceStatus: "cited",
+          evidenceReasonCode: "ANSWER_CITED"
+        })]
+      })
+    }]);
+    expect(JSON.stringify(projection)).not.toContain("text");
+  });
 });

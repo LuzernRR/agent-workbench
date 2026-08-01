@@ -1,5 +1,39 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #19 Evidence 生命周期已贯通）
+
+- 本轮唯一功能为
+  [#19](https://github.com/LuzernRR/agent-workbench/issues/19)“实现 Evidence 生命周期与可审计状态”，
+  `Execution Gate: allowed`。每条真实已读正文现在由服务端基于 URL 与正文生成稳定
+  `sourceId/evidenceId/contentHash`，状态只允许 `read -> accepted -> cited` 或
+  `read -> rejected`；同状态重放幂等，身份漂移或倒退以 `EVIDENCE_STATE_CONFLICT`
+  fail-closed，模型不能创建或修改 ID。
+- `merge_research` 只为真实正文创建 `read`；Reflector/Source Curator 依据真实来源展示结果标记
+  `accepted/rejected`，未决正文保留 `read`。Writer、Verifier、Citation 与长期记忆只消费
+  `accepted/cited`；最终只有答案实际出现且可解析的 `[来源N]` 对应 Evidence 进入 `cited`，不再
+  为未引用正文自动发布 Citation。
+- `evidence.updated` 公开事件只含 ID、SHA-256、`toolCallId`、URL、标题、渠道、结构化状态、
+  reasonCode 与时间。BFF 严格 Zod 白名单将其持久化到原工具来源，Reducer 只接受合法单向迁移并
+  在刷新/replay 时拒绝倒退或同 URL 身份漂移；Workbench 统一显示“已读取 / 已采用 / 已排除 /
+  已引用”，不生成模型推理文案，也不保存正文、Prompt、Provider body、Cookie、token、私有
+  CoT 或 `reasoning_content`。
+- 真实小红书运行 `run_32747c65d748476d99e723007adf8a14` 用时 31.493 秒，两次工具调用均
+  success、各 5 个候选与 3 条正文；6 个稳定 Evidence 均经历 read/accepted，其中答案实际引用
+  的 3 个进入 cited，另 3 个保持 accepted，助手消息恰有 3 个 Citation，最终
+  `VERIFIED / completed`。持久公开事件敏感字段扫描为 0。身份回归
+  `run_fef1d68859c449bf9da107c77ed3e57c` 在已有其他主题消息的同一线程中用时 3.825 秒，由模型
+  一次调用直接回答“你是谁”，0 plan、0 tool、0 Evidence。
+- 门禁：Search Agent `258 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `385 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。已保留
+  `agent-workbench/{search-agent,web}:pre-issue-19-244a553` 并滚动部署 Search Agent 与 Web；
+  Compose 七服务 healthy，3000、8080 与
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。完整记录见
+  `docs/development/2026-08-01-026-issue-19-evidence-lifecycle.md`。
+- 额外真实探针 `run_4586b7638e894c138c21498b8ca8edae` 暴露出 Supervisor 偶发把明确“请搜索”
+  请求判为直接回答；该问题不通过固定关键词或本 Issue 偷改处理，下一独立路由 Issue 应以真实
+  structured intent 约束修复并保留“你是谁”短路路径。
+
 ## 当前结论（2026-08-01，Issue #20 模型 Markdown 字段输出已优化）
 
 - 本轮唯一功能为

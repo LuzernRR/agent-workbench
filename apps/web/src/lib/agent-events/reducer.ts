@@ -10,6 +10,7 @@ import type {
   StatusItem,
   ThinkingItem,
   ToolItem,
+  EvidenceStatus,
   ToolSource,
   ToolUsage,
   WorkbenchFile
@@ -114,6 +115,26 @@ function sourcesValue(value: unknown): ToolSource[] | undefined {
       const channel = ["web", "x", "xiaohongshu"].includes(candidate.channel || "")
         ? candidate.channel
         : undefined;
+      const evidenceStatuses: EvidenceStatus[] = ["read", "accepted", "rejected", "cited"];
+      const evidenceStatus = evidenceStatuses.includes(candidate.evidenceStatus as EvidenceStatus)
+        ? candidate.evidenceStatus as EvidenceStatus
+        : undefined;
+      const evidenceId = typeof candidate.evidenceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.evidenceId)
+        ? candidate.evidenceId
+        : undefined;
+      const sourceId = typeof candidate.sourceId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.sourceId)
+        ? candidate.sourceId
+        : undefined;
+      const contentHash = typeof candidate.contentHash === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentHash)
+        ? candidate.contentHash
+        : undefined;
+      const evidenceReasonCode = typeof candidate.evidenceReasonCode === "string" && /^[A-Z0-9_]{1,80}$/u.test(candidate.evidenceReasonCode)
+        ? candidate.evidenceReasonCode
+        : undefined;
+      const evidenceUpdatedAt = typeof candidate.evidenceUpdatedAt === "string" && Number.isFinite(Date.parse(candidate.evidenceUpdatedAt))
+        ? candidate.evidenceUpdatedAt
+        : undefined;
+      const completeEvidence = evidenceId && sourceId && contentHash && evidenceStatus && evidenceReasonCode && evidenceUpdatedAt;
       return [{
         title: candidate.title.trim().slice(0, 300) || "搜索来源",
         url,
@@ -121,13 +142,62 @@ function sourcesValue(value: unknown): ToolSource[] | undefined {
         channel,
         author: typeof candidate.author === "string" && candidate.author.trim() ? candidate.author.trim().slice(0, 160) : undefined,
         publishedAt: typeof candidate.publishedAt === "string" && candidate.publishedAt.trim() ? candidate.publishedAt.trim().slice(0, 80) : undefined,
-        limitation: typeof candidate.limitation === "string" && candidate.limitation.trim() ? candidate.limitation.trim().slice(0, 500) : undefined
+        limitation: typeof candidate.limitation === "string" && candidate.limitation.trim() ? candidate.limitation.trim().slice(0, 500) : undefined,
+        ...(completeEvidence ? {
+          evidenceId,
+          sourceId,
+          contentHash,
+          evidenceStatus,
+          evidenceReasonCode,
+          evidenceUpdatedAt
+        } : {})
       }];
     } catch {
       return [];
     }
   });
   return sources.length ? sources : undefined;
+}
+
+function evidenceTransitionAllowed(current: EvidenceStatus, incoming: EvidenceStatus) {
+  return current === incoming
+    || (current === "read" && ["accepted", "rejected"].includes(incoming))
+    || (current === "accepted" && incoming === "cited");
+}
+
+function mergeEvidenceMetadata(previous: ToolSource | undefined, incoming: ToolSource) {
+  if (!incoming.evidenceId || !incoming.sourceId || !incoming.contentHash || !incoming.evidenceStatus) return {};
+  if (!previous?.evidenceId || !previous.sourceId || !previous.contentHash || !previous.evidenceStatus) {
+    return {
+      evidenceId: incoming.evidenceId,
+      sourceId: incoming.sourceId,
+      contentHash: incoming.contentHash,
+      evidenceStatus: incoming.evidenceStatus,
+      evidenceReasonCode: incoming.evidenceReasonCode,
+      evidenceUpdatedAt: incoming.evidenceUpdatedAt
+    };
+  }
+  const sameIdentity = previous.evidenceId === incoming.evidenceId
+    && previous.sourceId === incoming.sourceId
+    && previous.contentHash === incoming.contentHash;
+  if (!sameIdentity || !evidenceTransitionAllowed(previous.evidenceStatus, incoming.evidenceStatus)) {
+    return {
+      evidenceId: previous.evidenceId,
+      sourceId: previous.sourceId,
+      contentHash: previous.contentHash,
+      evidenceStatus: previous.evidenceStatus,
+      evidenceReasonCode: previous.evidenceReasonCode,
+      evidenceUpdatedAt: previous.evidenceUpdatedAt
+    };
+  }
+  return {
+    evidenceId: incoming.evidenceId,
+    sourceId: incoming.sourceId,
+    contentHash: incoming.contentHash,
+    evidenceStatus: incoming.evidenceStatus,
+    evidenceReasonCode: incoming.evidenceReasonCode,
+    evidenceUpdatedAt: incoming.evidenceUpdatedAt
+  };
 }
 
 function sourcePresentationsValue(value: unknown): Array<{ url: string; text: string }> {
@@ -165,7 +235,8 @@ function mergeSources(
       ...previous,
       ...source,
       url: previous?.url || source.url,
-      displayText: previous?.displayText || source.displayText
+      displayText: previous?.displayText || source.displayText,
+      ...mergeEvidenceMetadata(previous, source)
     });
   }
   return [...sources.values()];

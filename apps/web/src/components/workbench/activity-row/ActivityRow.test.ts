@@ -538,4 +538,31 @@ describe("ActivityRow activity disclosure", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开工具调用：上下文读取" }));
     expect(within(view.container).getAllByText("已完成")).toHaveLength(2);
   });
+
+  it("显示公开 Evidence 生命周期状态", () => {
+    render(createElement(ActivityRow, { item: {
+      kind: "tool",
+      id: "tool:evidence",
+      runId: "run-one",
+      toolCallId: "evidence",
+      name: "网页搜索",
+      summary: "搜索完成",
+      status: "completed",
+      sources: [{
+        title: "被答案引用的来源",
+        url: "https://example.com/source",
+        verified: true,
+        evidenceId: "evidence_one",
+        sourceId: "source_one",
+        contentHash: "d".repeat(64),
+        evidenceStatus: "cited",
+        evidenceReasonCode: "ANSWER_CITED",
+        evidenceUpdatedAt: "2026-08-01T00:00:01Z"
+      }],
+      createdAt: "2026-08-01T00:00:00Z"
+    } }));
+
+    fireEvent.click(screen.getByRole("button", { name: "展开工具调用：网页搜索" }));
+    expect(screen.getByText("已引用")).toBeInTheDocument();
+  });
 });

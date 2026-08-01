@@ -98,6 +98,16 @@ function sourceLine(source: NonNullable<ToolItem["sources"]>[number], fallback: 
     : platform ? `${platform} · ${title}` : title;
 }
 
+function evidenceStatusLabel(source: NonNullable<ToolItem["sources"]>[number]) {
+  if (!source.evidenceStatus) return source.verified ? "已读取" : "候选";
+  return {
+    read: "已读取",
+    accepted: "已采用",
+    rejected: "已排除",
+    cited: "已引用"
+  }[source.evidenceStatus];
+}
+
 export function SearchActivitySummary({ items, isCurrentStep = false }: { items: readonly ToolItem[]; isCurrentStep?: boolean }) {
   const active = items.some((item) =>
     ["preparing", "running", "waiting"].includes(item.status) || item.sourcePresentationActive);
@@ -148,7 +158,7 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
       {items.filter((item) => !["preparing", "running", "waiting"].includes(item.status)).map((item) => <p key={`settled:${item.toolCallId}`} className="break-words" data-search-settlement>
         {item.query ? `${item.query}：` : ""}{item.outcomeStatus === "degraded" ? "受控降级，" : ""}{summarizeSearchActivity([item])}
       </p>)}
-      {[...sources.entries()].map(([identity, source], index) => <p key={identity} className="break-words"><a href={source.url} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a></p>)}
+      {[...sources.entries()].map(([identity, source], index) => <p key={identity} className="break-words"><a href={source.url} target="_blank" rel="noopener noreferrer" className="text-link hover:underline" title={source.title}>{sourceLine(source, `来源 ${index + 1}`)}</a><span className="ml-1 text-[13px] text-tertiary">{evidenceStatusLabel(source)}</span></p>)}
     </div> : null}
   </div>;
 }
@@ -200,7 +210,7 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
           {item.sources?.length ? <div className="min-w-0 md:col-span-2"><div className="mb-1 text-[15px] font-medium text-tertiary">来源</div><ul className="space-y-1.5">{item.sources.map((source, index) => {
             const href = safeWorkbenchHref(source.url);
             if (!href) return null;
-            return <li key={`${href}:${index}`} className="min-w-0"><a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1 break-all text-link hover:underline" title={source.title}>{safeLinkLabel(source.title, `来源 ${index + 1}`)}</a><span className="ml-1 text-[13px] text-tertiary">{source.verified ? "已读取" : "候选"}</span></li>;
+            return <li key={`${href}:${index}`} className="min-w-0"><a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1 break-all text-link hover:underline" title={source.title}>{safeLinkLabel(source.title, `来源 ${index + 1}`)}</a><span className="ml-1 text-[13px] text-tertiary">{evidenceStatusLabel(source)}</span></li>;
           })}</ul></div> : null}
         </div>
       ) : null}
