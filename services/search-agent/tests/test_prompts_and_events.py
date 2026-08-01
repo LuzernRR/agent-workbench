@@ -104,14 +104,16 @@ def test_resume_stream_gets_new_stream_id_and_event_ids() -> None:
     assert len({first["eventId"], second["eventId"], resumed["eventId"]}) == 3
 
 
-def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> None:
+def test_search_product_routes_by_current_intent_and_prompts_emit_public_summaries() -> None:
     config = agent_config()
-    assert config.search.force_search is True
+    assert config.search.force_search is False
     assert config.graph.max_iterations == 2
     assert config.graph.max_model_calls == 10
     assert config.graph.max_tool_calls == 4
     assert config.graph.max_run_seconds == 150
-    assert "need_search 必须为 true" in SUPERVISOR_PROMPT
+    assert "need_search=false" in SUPERVISOR_PROMPT
+    assert "当前用户消息是本轮唯一权威任务" in SUPERVISOR_PROMPT
+    assert "不得用关键词命中或固定问答模板" in SUPERVISOR_PROMPT
     assert "不使用固定模板" in SUPERVISOR_PROMPT
     assert "已经通过正文质量检查" in VERIFIER_PROMPT
     assert "不使用 Markdown" in RESEARCHER_PROMPT
@@ -119,8 +121,10 @@ def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> 
     assert "不使用固定模板" in DEGRADED_WRITER_PROMPT
     assert "绝不能把 web 或 x" in WRITER_PROMPT
     assert "补充背景" in REFLECTOR_PROMPT
-    assert "至少 3 个不同的指定渠道正文" in REFLECTOR_PROMPT
+    assert "达到用户的条目下限并覆盖必需字段" in REFLECTOR_PROMPT
     assert "depends_on 也必须是空数组" in PLANNER_PROMPT
+    assert "steps 数不得超过剩余工具调用数" in PLANNER_PROMPT
+    assert "不得自称 Writer Agent" in WRITER_PROMPT
     assert "missing 必须为空字符串" in REFLECTOR_PROMPT
     assert "source_presentations 必须为空数组" in REFLECTOR_PROMPT
     assert "issue 必须为空字符串" in VERIFIER_PROMPT
@@ -142,15 +146,15 @@ def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> N
     assert "不能为压缩篇幅删除必要的 [来源N] 引用" in WRITER_PROMPT
     assert "证据不足的具体部分最多用一句说明" in WRITER_PROMPT
     assert "用户明确指定条目数量、字段" in WRITER_PROMPT
-    assert "来源链接：[来源N]" in WRITER_PROMPT
-    assert "使用 3 个编号" in WRITER_PROMPT
-    assert "严禁把“肤质与场景”" in WRITER_PROMPT
-    assert "不得把产品描述反向推测" in WRITER_PROMPT
-    assert "以上为个人使用体验，非医疗建议" in WRITER_PROMPT
+    assert "条目数量必须位于用户允许范围内" in WRITER_PROMPT
+    assert "真实 [来源N]" in WRITER_PROMPT
+    assert "领域安全边界与免责声明只能在当前问题明确" in WRITER_PROMPT
+    assert "肤质与场景" not in WRITER_PROMPT
+    assert "非医疗建议" not in WRITER_PROMPT
     assert "未作为证据" in WRITER_PROMPT
     assert "条目数量、字段与字段顺序" in VERIFIER_PROMPT
     assert "不能把字段拆成" in VERIFIER_PROMPT
-    assert "反向猜测的人群偏好" in VERIFIER_PROMPT
+    assert "不得从其他领域任务迁移规则" in VERIFIER_PROMPT
 
 
 def test_public_summary_is_compact_plain_text_without_markdown_artifacts() -> None:

@@ -98,6 +98,25 @@ def test_plan_lifecycle_respects_dependencies_and_revisions() -> None:
     assert [step["status"] for step in running_two["steps"]] == ["done", "running"]
 
 
+def test_plan_lifecycle_propagates_blocked_dependency_without_false_todo() -> None:
+    plan = build_plan()
+    running, selected = start_ready_steps(plan, revision=2)
+    blocked_root = settle_running_steps(
+        running,
+        revision=3,
+        outcomes={selected[0]["step_id"]: "PLAN_EVIDENCE_TARGET_UNMET"},
+    )
+
+    propagated, next_selected = start_ready_steps(blocked_root, revision=4)
+
+    assert next_selected == []
+    assert [step["status"] for step in propagated["steps"]] == [
+        "blocked",
+        "blocked",
+    ]
+    assert propagated["steps"][1]["reason_code"] == "PLAN_DEPENDENCY_BLOCKED"
+
+
 @pytest.mark.parametrize(
     ("mutate", "code"),
     [
@@ -153,3 +172,37 @@ def test_plan_rejects_previously_accepted_query_channel() -> None:
         )
 
     assert error.value.code == "PLAN_QUERY_ALREADY_EXECUTED"
+
+
+@pytest.mark.parametrize(
+    ("limits", "code"),
+    [
+        ({"max_steps": 1}, "PLAN_TOOL_BUDGET_EXCEEDED"),
+        (
+            {"max_steps": 2, "max_evidence_per_step": 0},
+            "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY",
+        ),
+        (
+            {"max_steps": 2, "max_evidence_per_step": 2, "max_total_evidence": 1},
+            "PLAN_EVIDENCE_BUDGET_EXCEEDED",
+        ),
+    ],
+)
+def test_plan_rejects_targets_outside_runtime_budget(
+    limits: dict[str, int],
+    code: str,
+) -> None:
+    result = PlanResult(steps=planned_steps(), summary="预算内计划")
+
+    with pytest.raises(PlanValidationError) as error:
+        build_plan_snapshot(
+            run_id="run_budget",
+            iteration=1,
+            revision=1,
+            created_at="2026-08-01T00:00:00Z",
+            planned_steps=result.steps,
+            allowed_channels={"web"},
+            **limits,
+        )
+
+    assert error.value.code == code

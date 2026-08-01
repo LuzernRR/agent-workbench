@@ -411,6 +411,7 @@ class MemoryLedger:
 class Scenario:
     need_search: bool = True
     supervisor_channels: list[str] = field(default_factory=lambda: ["web"])
+    supervisor_use_history: bool = False
     plans: list[list[str]] = field(default_factory=lambda: [["query one"]])
     reflects: list[dict[str, Any]] = field(
         default_factory=lambda: [{
@@ -434,6 +435,8 @@ class Scenario:
     provider_by_query: dict[str, str] = field(default_factory=dict)
     channels_by_query: dict[str, str] = field(default_factory=dict)
     depends_on_by_query: dict[str, list[str]] = field(default_factory=dict)
+    evidence_needed_by_query: dict[str, int] = field(default_factory=dict)
+    evidence_needed_by_plan: list[int] = field(default_factory=list)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
     structured_repair_permissions: list[tuple[str, bool]] = field(default_factory=list)
@@ -496,7 +499,8 @@ class Scenario:
             result = IntentResult(
                 task_type="research" if self.need_search else "direct_answer",
                 need_search=self.need_search,
-                channels=self.supervisor_channels,
+                channels=self.supervisor_channels if self.need_search else [],
+                use_history=self.supervisor_use_history,
                 summary="已判断是否需要联网",
             )
         elif role == "planner":
@@ -511,7 +515,13 @@ class Scenario:
                         "channel": self.channels_by_query.get(query, "web"),
                         "depends_on": self.depends_on_by_query.get(query, []),
                         "priority": 100 - position,
-                        "evidence_needed": 0,
+                        "evidence_needed": (
+                            self.evidence_needed_by_plan[
+                                min(index, len(self.evidence_needed_by_plan) - 1)
+                            ]
+                            if self.evidence_needed_by_plan
+                            else self.evidence_needed_by_query.get(query, 0)
+                        ),
                         "can_parallelize": True,
                     }
                     for position, query in enumerate(queries)
@@ -891,41 +901,70 @@ async def test_writer_output_invalid_returns_structured_failure_without_template
 
 
 @pytest.mark.asyncio
-async def test_force_search_runs_real_tool_even_when_supervisor_suggests_direct(
+async def test_current_direct_intent_bypasses_search_with_stale_research_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenario = Scenario(need_search=False)
-    output, events = await run_scenario(monkeypatch, scenario)
+    scenario = Scenario(
+        need_search=False,
+        writer_answer="我是当前工作台中的 AI 助手，可以直接回答问题，也会在需要时调用工具。",
+    )
+    output, events = await run_scenario(
+        monkeypatch,
+        scenario,
+        question="你是谁",
+        conversation_context=(
+            "用户：请检索英国大学奖学金。\n\n"
+            "助手：上一轮整理了 British Council 和英国大学资料。"
+        ),
+    )
 
-    assert output["need_search"] is True
+    assert output["need_search"] is False
     assert output["response_status"] == "completed"
-    assert output["stop_reason"] == "VERIFIED"
-    assert output["tool_calls"] == 1
-    assert scenario.tool_executions == ["query one"]
-    assert scenario.structured_calls.get("supervisor", 0) == 0
-    assert output["intent"]["channels"] == ["web"]
+    assert output["stop_reason"] == "DIRECT_COMPLETED"
+    assert output["answer"] == scenario.writer_answer
+    assert output["tool_calls"] == 0
+    assert scenario.tool_executions == []
+    assert scenario.structured_calls.get("supervisor", 0) == 1
+    assert scenario.structured_calls.get("planner", 0) == 0
+    assert scenario.structured_calls.get("reflector", 0) == 0
+    assert scenario.structured_calls.get("writer", 0) == 1
+    assert output["intent"]["channels"] == []
+    assert output["plan"] is None
     classify_step = next(
         step for step in output["steps"] if step["node"] == "classify_intent"
     )
-    assert classify_step["kind"] == "deterministic"
-    assert [event["type"] for event in events if event["type"].startswith("tool.")] == [
-        "tool.started",
-        "tool.progress",
-        "tool.progress",
-        "tool.completed",
-        "tool.presented",
-    ]
-    plan_events = [event for event in events if event["type"] == "plan.updated"]
-    assert [event["revision"] for event in plan_events] == [1, 2, 3]
-    assert [event["steps"][0]["status"] for event in plan_events] == [
-        "todo",
-        "running",
-        "done",
-    ]
-    started = next(event for event in events if event["type"] == "tool.started")
-    assert started["planStepId"] == plan_events[1]["steps"][0]["stepId"]
-    assert output["plan"]["revision"] == 3
-    assert output["tool_traces"][0]["plan_step_id"] == started["planStepId"]
+    assert classify_step["kind"] == "model"
+    assert not [event for event in events if event["type"].startswith("tool.")]
+    assert not [event for event in events if event["type"].startswith("plan.")]
+    supervisor_input = scenario.structured_messages["supervisor"][0][-1].content
+    assert supervisor_input.index("历史上下文") < supervisor_input.index("当前用户消息")
+    assert supervisor_input.rstrip().endswith('"你是谁"')
+    writer_input = scenario.structured_messages["writer"][0][-1].content
+    assert "British Council" not in writer_input
+    assert writer_input == "当前用户消息（唯一任务）：你是谁"
+
+
+@pytest.mark.asyncio
+async def test_direct_referential_intent_receives_history_only_when_model_requests_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        need_search=False,
+        supervisor_use_history=True,
+        writer_answer="它指的是上一条消息中的方案。",
+    )
+    output, _events = await run_scenario(
+        monkeypatch,
+        scenario,
+        question="那它指什么？",
+        conversation_context="用户：请解释这个方案。\n\n助手：方案包含两个步骤。",
+    )
+
+    assert output["stop_reason"] == "DIRECT_COMPLETED"
+    writer_input = scenario.structured_messages["writer"][0][-1].content
+    assert "用于消解当前消息指代的会话上下文" in writer_input
+    assert "方案包含两个步骤" in writer_input
+    assert writer_input.rstrip().endswith("当前用户消息（唯一任务）：那它指什么？")
 
 
 @pytest.mark.asyncio
@@ -1056,7 +1095,7 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
     assert scenario.structured_calls["verifier"] == 2
     first_writer_prompt = scenario.structured_messages["writer"][0][-1].content
     assert "输出格式硬约束" in first_writer_prompt
-    assert "每个编号项代表一条完整经验" in first_writer_prompt
+    assert "每个编号项代表一条完整记录" in first_writer_prompt
 
 
 @pytest.mark.asyncio
@@ -1091,8 +1130,8 @@ async def test_schema_repair_is_counted_and_disables_later_node_repair(
 
     assert output["response_status"] == "completed"
     assert output["schema_repair_count"] == 1
-    # 强制搜索不调用 Supervisor，Researcher 也不再复述 Planner 的固定参数。
-    assert output["model_calls"] == 5
+    # Supervisor 真实判断当前意图；Researcher 不再复述 Planner 的固定参数。
+    assert output["model_calls"] == 6
     planner_index = scenario.structured_repair_permissions.index(("planner", True))
     assert all(
         not allowed
@@ -1251,6 +1290,84 @@ async def test_dependent_batch_is_dispatched_only_after_prior_merge_checkpoint(
     assert merge_completions[0]["seq"] < mark_starts[1]["seq"]
     assert [step["status"] for step in output["plan"]["steps"]] == ["done", "done"]
     assert output["plan"]["revision"] == 5
+
+
+@pytest.mark.asyncio
+async def test_unmet_dependency_is_blocked_then_reflected_without_false_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["root without body", "dependent follow-up"]],
+        depends_on_by_query={"dependent follow-up": ["search_1"]},
+        evidence_by_query={"root without body": False, "dependent follow-up": True},
+        evidence_needed_by_query={"root without body": 1},
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert scenario.tool_executions == ["root without body"]
+    assert [step["status"] for step in output["plan"]["steps"]] == [
+        "blocked",
+        "blocked",
+    ]
+    assert output["plan"]["steps"][1]["reason_code"] == "PLAN_DEPENDENCY_BLOCKED"
+    assert output["stop_reason"] != "PLAN_NO_RUNNABLE_STEP"
+    assert any(
+        event["type"] == "node.started" and event["node"] == "reflect"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_step_with_some_evidence_is_done_even_below_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        evidence_by_query={"query one": True},
+        evidence_needed_by_query={"query one": 3},
+    )
+
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    assert output["stop_reason"] == "VERIFIED"
+    assert output["tool_traces"][0]["evidence_count"] == 1
+    assert output["plan"]["steps"][0]["status"] == "done"
+    assert output["plan"]["steps"][0]["reason_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_reflector_preserves_time_for_answer_instead_of_starting_dead_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["query one"], ["query two"]],
+        reflects=[{
+            "sufficient": False,
+            "missing": "仍缺少第二类官方来源",
+            "extra_searches": [{"query": "query two", "channel": "web"}],
+            "source_presentations": [{
+                "url": "https://example.com/1",
+                "text": "该正文提供了第一类官方事实。",
+            }],
+        }],
+        evidence_by_query={"query one": True, "query two": True},
+    )
+    monkeypatch.setattr(
+        nodes,
+        "remaining_run_seconds",
+        lambda state: 70.0 if state.get("evidence") else 120.0,
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert scenario.tool_executions == ["query one"]
+    assert scenario.structured_calls["planner"] == 1
+    assert output["stop_reason"] == "RUN_TIME_RESERVE"
+    assert output["plan"]["steps"][0]["status"] == "done"
+    assert not any(
+        event["type"] == "plan.updated" and event["iteration"] == 2
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -1613,15 +1730,67 @@ async def test_planned_searches_never_exceed_tool_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
-        plans=[["query one", "query two"]],
+        plans=[["query one", "query two"], ["query one"]],
         evidence_by_query={"query one": True, "query two": True},
     )
-    output, _events = await run_scenario(monkeypatch, scenario, max_tool_calls=1)
+    output, events = await run_scenario(monkeypatch, scenario, max_tool_calls=1)
 
     assert output["tool_calls"] == 1
     assert scenario.tool_executions == ["query one"]
-    assert output["stop_reason"] == "TOOL_CALL_LIMIT"
+    assert output["stop_reason"] == "VERIFIED"
     assert len(output["tool_traces"]) == 1
+    assert scenario.structured_calls["planner"] == 2
+    assert not any(
+        step.get("reasonCode") == "TOOL_CALL_LIMIT"
+        for event in events
+        if event["type"] == "plan.updated"
+        for step in event["steps"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_wide_plan_to_two_evidence_led_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[
+            ["query one", "query two", "query three", "query four"],
+            ["query one", "query two"],
+        ],
+        evidence_by_query={"query one": True, "query two": True},
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario, max_tool_calls=4)
+
+    assert output["stop_reason"] == "VERIFIED"
+    assert scenario.structured_calls["planner"] == 2
+    assert scenario.tool_executions == ["query one", "query two"]
+    assert len(output["plan"]["steps"]) == 2
+    assert not [event for event in events if event["type"] == "plan.rejected"]
+    repair_input = scenario.structured_messages["planner"][1][-1].content
+    assert "PLAN_TOOL_BUDGET_EXCEEDED" in repair_input
+    assert '"maxSteps": 2' in scenario.structured_messages["planner"][0][-1].content
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_evidence_targets_above_per_call_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["query one"], ["query one"]],
+        evidence_needed_by_plan=[8, 1],
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert output["stop_reason"] == "VERIFIED"
+    assert scenario.structured_calls["planner"] == 2
+    assert scenario.tool_executions == ["query one"]
+    assert output["plan"]["steps"][0]["evidence_needed"] == 1
+    assert not [event for event in events if event["type"] == "plan.rejected"]
+    repair_input = scenario.structured_messages["planner"][1][-1].content
+    assert "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY" in repair_input
+    assert repair_input.rstrip().endswith('"需要搜索的测试问题"')
 
 
 @pytest.mark.asyncio

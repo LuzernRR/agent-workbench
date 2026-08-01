@@ -79,6 +79,42 @@ def test_semantically_empty_fields_are_required_and_must_be_explicit() -> None:
     assert verified.extra_searches == []
 
 
+def test_intent_route_requires_channels_only_for_research() -> None:
+    direct = IntentResult(
+        task_type="direct_answer",
+        need_search=False,
+        channels=[],
+        use_history=False,
+        summary="直接回答当前问题",
+    )
+    research = IntentResult(
+        task_type="research",
+        need_search=True,
+        channels=["web"],
+        use_history=False,
+        summary="检索当前资料",
+    )
+
+    assert direct.channels == []
+    assert research.channels == ["web"]
+    with pytest.raises(ValidationError):
+        IntentResult(
+            task_type="direct_answer",
+            need_search=False,
+            channels=["web"],
+            use_history=False,
+            summary="无效直接路由",
+        )
+    with pytest.raises(ValidationError):
+        IntentResult(
+            task_type="research",
+            need_search=True,
+            channels=[],
+            use_history=False,
+            summary="无效搜索路由",
+        )
+
+
 def test_preflight_rejects_optional_properties_before_provider_call() -> None:
     class OptionalResult(BaseModel):
         model_config = ConfigDict(extra="forbid")

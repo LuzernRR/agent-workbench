@@ -58,11 +58,24 @@ class IntentResult(StrictModel):
     ] = Field(description="任务类型")
     need_search: bool = Field(description="是否需要联网搜索才能可靠回答")
     channels: list[ResearchChannel] = Field(
-        description="完成任务需要的只读搜索渠道；只允许 web、x、xiaohongshu",
-        min_length=1,
+        description="需要搜索时的只读渠道；直接回答时必须为空数组",
+        min_length=0,
         max_length=3,
     )
+    use_history: bool = Field(
+        description="当前消息是否含有必须依赖会话历史才能消解的明确指代"
+    )
     summary: str = Field(description="一句话说明你如何理解这个任务，面向用户，不超过80字")
+
+    @model_validator(mode="after")
+    def validate_route(self) -> IntentResult:
+        if self.need_search and not self.channels:
+            raise ValueError("需要搜索的任务必须至少选择一个渠道")
+        if not self.need_search and self.channels:
+            raise ValueError("直接回答不得携带搜索渠道")
+        if not self.need_search and self.task_type != "direct_answer":
+            raise ValueError("无需搜索的任务必须路由为 direct_answer")
+        return self
 
 
 class PlanResult(StrictModel):

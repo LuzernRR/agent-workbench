@@ -38,6 +38,9 @@ def build_plan_snapshot(
     planned_steps: Sequence[Any],
     allowed_channels: set[ChannelName],
     prior_search_keys: set[tuple[str, ChannelName]] | None = None,
+    max_steps: int | None = None,
+    max_evidence_per_step: int | None = None,
+    max_total_evidence: int | None = None,
 ) -> PlanSnapshot:
     """把模型局部步骤转换为稳定、严格的运行时计划。"""
 
@@ -45,6 +48,28 @@ def build_plan_snapshot(
         step.model_dump() if hasattr(step, "model_dump") else dict(step)
         for step in planned_steps
     ]
+    if max_steps is not None and len(raw_steps) > max_steps:
+        raise PlanValidationError(
+            "PLAN_TOOL_BUDGET_EXCEEDED",
+            "计划步骤超过本轮剩余工具调用数",
+        )
+    evidence_targets = [int(raw.get("evidence_needed") or 0) for raw in raw_steps]
+    if (
+        max_evidence_per_step is not None
+        and any(target > max_evidence_per_step for target in evidence_targets)
+    ):
+        raise PlanValidationError(
+            "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY",
+            "计划单步证据目标超过一次工具调用的正文读取容量",
+        )
+    if (
+        max_total_evidence is not None
+        and sum(evidence_targets) > max_total_evidence
+    ):
+        raise PlanValidationError(
+            "PLAN_EVIDENCE_BUDGET_EXCEEDED",
+            "计划总证据目标超过本轮可用容量",
+        )
     canonical = json.dumps(raw_steps, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     plan_id = _stable_id("plan", f"{run_id}|{iteration}|{canonical}")
     local_to_step: dict[str, str] = {}

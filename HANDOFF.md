@@ -1,5 +1,40 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #17 当前意图隔离与检索计划预算已完成）
+
+- 本轮唯一功能为
+  [#17](https://github.com/LuzernRR/agent-workbench/issues/17)“修复当前意图隔离与检索计划预算”，
+  `Execution Gate: allowed`。真实故障运行 `run_c0e55bd0d19646f19bceacbe092eb30b`
+  的持久输入确为“你是谁”，但旧配置 `forceSearch=true` 和 Supervisor 的强制搜索规则跳过了
+  真实意图判断；完整奖学金历史又被交给 Planner/Writer，最终产生无关检索和“Writer Agent”
+  自称。这不是线程事件串线。
+- 生产现在由真实 structured Supervisor 返回 `need_search/channels/use_history`。当前消息是唯一
+  权威任务；只有它含有必须依赖历史才能消解的明确指代时，后续直接回答才收到历史。独立问题
+  不再把旧主题交给 Writer。身份回复仍由模型生成，前端和服务端没有固定身份答案、关键词问答
+  或伪造的思考文案。
+- Planner 每轮最多接受两个高区分度步骤，步骤数、单步证据目标和总证据容量均由真实剩余工具/
+  正文预算校验；超预算计划只允许一次真实模型修复，非法快照不公开。上游失败导致依赖不可达时
+  会进入 Reflector，不再误报 `PLAN_NO_RUNNABLE_STEP`；工具成功取得至少一条正文时计划步骤记为
+  done，证据是否充分交由 Evidence 节点判断；重规划前还会保留 Planner 与最终写作/核验时间，
+  不创建一个随后必然全部 blocked 的新计划。
+- 通用 Reflector、Writer、Verifier 已删除防晒、肤质、不适人群和医疗免责声明等案例专属规则。
+  条目、字段、筛选条件和领域安全边界只从当前问题提取；地域、时间、资格和状态不满足的对象
+  不得作为合格结果。Prompt 版本为 `2026-08-01.v30-domain-neutral-contracts`。
+- 生产验收 `run_issue17_direct_v30_1785582433089` 在 3.593 秒内直接模型回答“你是谁”，
+  0 plan、0 tool、0 node.failed，旧奖学金历史未进入答案。首页奖学金回归
+  `run_issue17_scholarship_final2_1785582623189` 真实调用两个 Web 工具、获得 1 条正文 Evidence，
+  无领域污染或禁止字段；一个步骤 done，另一个因真实网页读取超过保留窗口以
+  `RUN_TIME_RESERVE` blocked，最终诚实 partial。它证明搜索路由仍真实可用，也暴露出下一项应
+  独立优化的 Web 正文读取延迟，不能把 partial 伪报为完成。
+- 门禁：Search Agent `242 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `381 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。已保留
+  `agent-workbench/search-agent:pre-issue-17-e9edb65` 并滚动部署 Search Agent；七服务 healthy，
+  3000、8080 与 [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。
+- 下一独立 feature 应优化 Web 正文读取的同域串行慢路径、每页超时和可用正文优先级，目标是在
+  保持 URL/robots/SSRF 安全边界的前提下降低 60–85 秒工具调用；之后继续 Evidence 状态机。
+  完整记录见 `docs/development/2026-08-01-023-issue-17-current-intent-routing.md`。
+
 ## 当前结论（2026-08-01，Issue #16 小红书工具会话二维码竞态已修复）
 
 - 本轮唯一功能为

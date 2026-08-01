@@ -18,7 +18,7 @@
     "maxPagesPerCall": 3
   },
   "search": {
-    "forceSearch": true,
+    "forceSearch": false,
     "defaultProvider": "tavily",
     "allowDuckDuckGoFallback": true,
     "channels": {
