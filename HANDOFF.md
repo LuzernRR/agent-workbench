@@ -1,5 +1,32 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #18 Web 正文读取延迟与部分成功已优化）
+
+- 本轮唯一功能为
+  [#18](https://github.com/LuzernRR/agent-workbench/issues/18)“优化 Web 正文读取延迟与部分成功
+  可靠性”，`Execution Gate: allowed`。旧 `fetch_page` 会分别给 robots 最多 10 秒、正文最多
+  20 秒，单页总耗时可叠加；`fetch_pages` 又把同域并发固定为 1，三个同域候选最坏接近
+  90 秒，外层时间保留可能取消整次工具调用并丢掉已完成正文。
+- 单页 20 秒现在是覆盖 robots、DNS/SSRF 校验、逐跳重定向、正文与可选动态层的总 deadline；
+  单页超时只返回该页稳定 `timeout` FetchResult，不取消同批其他页面。外部 stop/cancel 仍传播
+  `CancelledError`，不会被伪装成普通页面超时。
+- 正文并发硬上限保持全局 3，同一域名从完全串行调整为有界 2；三个同域页面按 2+1 批次执行。
+  URL policy、固定公网 IP、Host/TLS SNI、每跳 robots 重检、内容类型/体积上限和动态抓取
+  fail-closed 均未放宽。
+- 首页奖学金真实生产回归 `run_issue18_scholarship_1785583215521`：两个 Web 工具分别为
+  44.462 秒和 58.565 秒，对比 #17 的 75.055/84.501 秒基线分别减少 30.593/25.936 秒；
+  整轮从 103.334 秒降到 80.359 秒，取得 3 条正文 Evidence。外部搜索仍未覆盖用户全部硬条件，
+  因而诚实以 `RUN_TIME_RESERVE / partial` 收口，没有伪报 verified，也没有领域污染、节点失败或
+  禁止字段。
+- 门禁：新增 deadline、同域/跨域并发、部分成功与取消测试；Search Agent `247 passed`、Ruff、
+  compileall；共享合同 `6 passed`；Web `381 passed, 1 skipped`、typecheck、lint、production
+  build。Playwright 首次因未在 12 秒出现“滚动到底部”按钮而偶发失败，同用例单独复跑通过，
+  随后全量 `16 passed, 3 skipped`；`git diff --check` 通过。
+- 已保留 `agent-workbench/search-agent:pre-issue-18-df143b3` 并只滚动部署 Search Agent；七服务
+  healthy，3000、8080 与 [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench)
+  均为 200。下一独立 feature 回到 Evidence 生命周期/状态机与声明级关联，不再扩展抓取器。
+  完整记录见 `docs/development/2026-08-01-024-issue-18-web-fetch-latency.md`。
+
 ## 当前结论（2026-08-01，Issue #17 当前意图隔离与检索计划预算已完成）
 
 - 本轮唯一功能为

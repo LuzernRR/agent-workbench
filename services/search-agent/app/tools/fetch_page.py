@@ -31,6 +31,11 @@ MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 # 正文截断上限。证据片段无需整页，过长内容会挤占模型上下文。
 MAX_TEXT_CHARS = 20_000
 
+# 公开正文读取必须有界：全局最多 3 页，同一域名最多 2 页。
+# 这既避免三个同域候选完全串行，也不会向单站点发起无界并发。
+MAX_FETCH_CONCURRENCY = 3
+MAX_PER_DOMAIN_CONCURRENCY = 2
+
 _ALLOWED_CONTENT_TYPES = (
     "text/html",
     "application/xhtml+xml",
@@ -226,19 +231,29 @@ async def _fetch_dynamic(url: str) -> FetchResult:
 
 
 async def fetch_page(url: str, timeout: float = 20.0, allow_dynamic: bool = False) -> FetchResult:
-    """抓取单页正文。静态优先，不足时升级动态。"""
-    static = await _fetch_static(url, timeout)
-    if static.ok and static.char_count >= MIN_STATIC_TEXT:
-        return static
+    """抓取单页正文；timeout 覆盖 robots、解析、重定向和正文的总生命周期。"""
 
-    if not allow_dynamic:
-        return static
+    try:
+        async with asyncio.timeout(max(0.001, timeout)):
+            static = await _fetch_static(url, timeout)
+            if static.ok and static.char_count >= MIN_STATIC_TEXT:
+                return static
 
-    dynamic = await _fetch_dynamic(url)
-    # 动态失败时保留静态结果：短正文也胜过没有正文。
-    if not dynamic.ok and static.ok:
-        return static
-    return dynamic
+            if not allow_dynamic:
+                return static
+
+            dynamic = await _fetch_dynamic(url)
+            # 动态失败时保留静态结果：短正文也胜过没有正文。
+            if not dynamic.ok and static.ok:
+                return static
+            return dynamic
+    except TimeoutError:
+        return FetchResult(
+            url=url,
+            ok=False,
+            error="抓取超过单页总时限",
+            error_category="timeout",
+        )
 
 
 async def fetch_pages(urls: list[str], concurrency: int = 3, timeout: float = 20.0) -> list[FetchResult]:
@@ -246,12 +261,17 @@ async def fetch_pages(urls: list[str], concurrency: int = 3, timeout: float = 20
 
     并发上限对应项目文档 21.2 节的单域限制，避免给目标站点造成压力。
     """
-    semaphore = asyncio.Semaphore(concurrency)
+    global_limit = max(1, min(concurrency, MAX_FETCH_CONCURRENCY))
+    domain_limit = min(global_limit, MAX_PER_DOMAIN_CONCURRENCY)
+    semaphore = asyncio.Semaphore(global_limit)
     domain_semaphores: dict[str, asyncio.Semaphore] = {}
 
     async def one(url: str) -> FetchResult:
         domain = (urlsplit(url).hostname or "").lower()
-        domain_semaphore = domain_semaphores.setdefault(domain, asyncio.Semaphore(1))
+        domain_semaphore = domain_semaphores.setdefault(
+            domain,
+            asyncio.Semaphore(domain_limit),
+        )
         async with semaphore, domain_semaphore:
             return await fetch_page(url, timeout=timeout)
 
