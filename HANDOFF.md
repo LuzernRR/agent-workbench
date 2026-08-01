@@ -1,5 +1,36 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #16 小红书工具会话二维码竞态已修复）
+
+- 本轮唯一功能为
+  [#16](https://github.com/LuzernRR/agent-workbench/issues/16)“修复小红书工具会话安全验证
+  二维码”，`Execution Gate: allowed`。生产上先真实复现：登录态为 true，同词搜索在 0.8 秒
+  返回 `CAPTCHA_REQUIRED`，原隔离浏览器已停在 `/website-login/captcha` 且页面存在
+  `qrcode-img` data PNG，但立即启动 challenge 偶发在约 10 秒后返回
+  `VERIFICATION_QRCODE_UNAVAILABLE`。
+- 根因是 `StartLoginVerification` 先启动另一个只读浏览器导航并解析预期账号，再回头读取触发
+  CAPTCHA 的原页面；账号探测延迟会错过短时二维码窗口。现在顺序改为先从原隔离 page/browser
+  捕获并校验 PNG，只保存在进程内存，再确认当前工具账号；账号不稳定、ID 缺失或不一致仍
+  fail-closed，二维码、Cookie、token 和账号 ID 不进入公开响应、日志或持久化。
+- 新增顺序回归测试：测试会在账号解析时使模拟二维码失效，只有“二维码 -> 账号”顺序才能
+  建立 pending challenge。Go 全量 `go test ./...` 通过；镜像构建阶段再次全量通过。
+- 用户完成扫码后，旧手工 challenge 正好越过截止边界并记录 `VERIFICATION_TIMEOUT`，没有把它
+  伪报为 `succeeded`；但平台侧风险状态随后已解除。部署新镜像后，同一“油敏皮夏季通勤防晒”
+  真实搜索 3.7 秒返回 20 个候选，连续读取 5 篇正文全部成功，正文长度为
+  16、99、1032、32、662 字，0 CAPTCHA、0 detail error。当前平台不再产生 challenge，因此
+  没有伪造第二张无关二维码。
+- 门禁：Go 全量通过；Search Agent `231 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `381 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。
+- 已保留 `agent-workbench/xiaohongshu-mcp:pre-issue-16-8650bfc`，只滚动部署
+  `xiaohongshu-mcp`。容器 healthy，3000 与
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。
+- 下一独立 feature 必须修复真实运行 `run_c0e55bd0d19646f19bceacbe092eb30b` 的当前意图
+  隔离：持久输入明确为“你是谁”，但 Search Agent Planner 首轮复用了旧奖学金意图，随后甚至
+  搜索“你是谁 自我介绍”，Writer 最终自称 Writer Agent。不得用硬编码身份回复或模板绕过，
+  必须修复 thread/run history、当前消息优先级、research intent gate 与事件归属。
+  完整记录见 `docs/development/2026-08-01-022-issue-16-xhs-verification-qrcode.md`。
+
 ## 当前结论（2026-08-01，Issue #15 ToolGateway 与完整工具调用账本已完成）
 
 - 本轮唯一功能为

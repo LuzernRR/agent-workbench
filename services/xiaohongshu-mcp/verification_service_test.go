@@ -182,6 +182,47 @@ func TestLoginVerificationUsesCaptchaSessionFromOriginalToolCall(t *testing.T) {
 	assert.Equal(t, verificationPending, started.Status)
 }
 
+func TestLoginVerificationCapturesQRCodeBeforeResolvingAccount(t *testing.T) {
+	service := verificationTestService(t)
+	image, _ := verificationPNGDataURL()
+	qrcodeAvailable := true
+	order := make([]string, 0, 2)
+	service.fetchVerificationQRCode = func(context.Context, *rod.Page) (string, bool, error) {
+		order = append(order, "qrcode")
+		if !qrcodeAvailable {
+			return "", false, context.DeadlineExceeded
+		}
+		return image, false, nil
+	}
+	service.resolveVerificationUser = func(context.Context) (*LoginStatusResponse, error) {
+		order = append(order, "account")
+		qrcodeAvailable = false
+		return &LoginStatusResponse{IsLoggedIn: true, UserID: "expected-user"}, nil
+	}
+	wait := make(chan struct{})
+	service.waitVerificationLogin = func(ctx context.Context, _ *rod.Page) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-wait:
+			return true
+		}
+	}
+	t.Cleanup(func() {
+		close(wait)
+		service.Close()
+	})
+
+	started, err := service.StartLoginVerification(
+		context.Background(),
+		"run-one:tool-one",
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, verificationPending, started.Status)
+	assert.Equal(t, []string{"qrcode", "account"}, order)
+}
+
 func TestLoginVerificationSavesOnlyMatchingAccount(t *testing.T) {
 	t.Run("matching account succeeds", func(t *testing.T) {
 		service := verificationTestService(t)

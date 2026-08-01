@@ -120,6 +120,34 @@ func (s *XiaohongshuService) StartLoginVerification(
 	}
 	closeSession := func() { s.closeVerificationSession(verificationSession) }
 
+	// 安全验证页由触发 CAPTCHA 的原只读浏览器持有，二维码可能短时刷新。
+	// 必须先从该隔离会话捕获二维码，再用另一个已登录会话确认预期账号；
+	// 否则账号状态探测的导航会把二维码读取推迟数秒，并可能错过当前页面的
+	// 可用窗口，向 Workbench 返回一个没有二维码的验证入口。
+	fetchQRCode := s.fetchVerificationQRCode
+	if fetchQRCode == nil {
+		fetchQRCode = safeFetchVerificationQRCode
+	}
+	image, inheritedLogin, err := fetchQRCode(ctx, verificationSession.page)
+	if err != nil || inheritedLogin {
+		closeSession()
+		return nil, &LoginVerificationError{
+			Code:       "VERIFICATION_QRCODE_UNAVAILABLE",
+			Message:    "无法生成小红书工具账号验证二维码",
+			HTTPStatus: 503,
+			Retryable:  true,
+		}
+	}
+	qrcodePNG, err := decodeVerificationQRCode(image)
+	if err != nil {
+		closeSession()
+		return nil, &LoginVerificationError{
+			Code:       "VERIFICATION_QRCODE_INVALID",
+			Message:    "小红书工具账号验证二维码无效",
+			HTTPStatus: 502,
+		}
+	}
+
 	accountResolver := s.resolveVerificationUser
 	if accountResolver == nil {
 		accountResolver = s.CheckLoginStatus
@@ -151,29 +179,6 @@ func (s *XiaohongshuService) StartLoginVerification(
 		}
 	}
 
-	fetchQRCode := s.fetchVerificationQRCode
-	if fetchQRCode == nil {
-		fetchQRCode = safeFetchVerificationQRCode
-	}
-	image, inheritedLogin, err := fetchQRCode(ctx, verificationSession.page)
-	if err != nil || inheritedLogin {
-		closeSession()
-		return nil, &LoginVerificationError{
-			Code:       "VERIFICATION_QRCODE_UNAVAILABLE",
-			Message:    "无法生成小红书工具账号验证二维码",
-			HTTPStatus: 503,
-			Retryable:  true,
-		}
-	}
-	qrcodePNG, err := decodeVerificationQRCode(image)
-	if err != nil {
-		closeSession()
-		return nil, &LoginVerificationError{
-			Code:       "VERIFICATION_QRCODE_INVALID",
-			Message:    "小红书工具账号验证二维码无效",
-			HTTPStatus: 502,
-		}
-	}
 	challengeID, err := newLoginVerificationID()
 	if err != nil {
 		closeSession()
