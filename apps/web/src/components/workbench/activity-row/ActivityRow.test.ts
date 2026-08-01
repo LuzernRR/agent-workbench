@@ -78,6 +78,48 @@ describe("isPlaceholderTool", () => {
 });
 
 describe("SearchActivitySummary", () => {
+  it("安全验证直接提供当前工具会话链接，且不暴露内部错误码", () => {
+    const base = {
+      kind: "tool" as const,
+      id: "tool:xiaohongshu-safety",
+      runId: "run-one",
+      toolCallId: "xiaohongshu-safety",
+      name: "小红书搜索",
+      summary: "搜索未完成",
+      status: "waiting" as const,
+      outcomeStatus: "failed" as const,
+      channel: "xiaohongshu" as const,
+      resultCount: 0,
+      evidenceCount: 0,
+      createdAt: "2026-08-01T00:00:00.000Z"
+    };
+    const view = render(createElement(SearchActivitySummary, {
+      items: [{
+        ...base,
+        reasonCode: "CAPTCHA_REQUIRED",
+        verificationStatus: "pending" as const,
+        verificationHref: "/workbench/verify/xiaohongshu/run-one/abcdefghijklmnopqrstuvwxyzABCDEFGH123456789"
+      }]
+    }));
+
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(view.container).getByRole("status")).toHaveTextContent("小红书工具账号需要安全验证");
+    expect(view.container).toHaveTextContent("成功后当前搜索会自动继续");
+    expect(within(view.container).getByRole("link", { name: "立即验证" })).toHaveAttribute(
+      "href",
+      "/workbench/verify/xiaohongshu/run-one/abcdefghijklmnopqrstuvwxyzABCDEFGH123456789"
+    );
+    expect(view.container).not.toHaveTextContent("CAPTCHA_REQUIRED");
+
+    view.rerender(createElement(SearchActivitySummary, {
+      items: [{ ...base, status: "failed" as const, reasonCode: "AUTH_REQUIRED", nextAction: "reconnect_account" as const }]
+    }));
+    expect(within(view.container).getByRole("status")).toHaveTextContent("当前无法安全确认原账号");
+    expect(view.container).toHaveTextContent("不会打开无关页面或收集登录凭据");
+    expect(within(view.container).queryByRole("link")).not.toBeInTheDocument();
+    expect(view.container).not.toHaveTextContent("AUTH_REQUIRED");
+  });
+
   it("已结束的当前搜索保持展开，下一步骤出现后再折叠", () => {
     const item = {
       kind: "tool" as const,
@@ -102,6 +144,9 @@ describe("SearchActivitySummary", () => {
       isCurrentStep: true
     }));
 
+    expect(view.container.querySelector("[data-search-activity-summary]")).toHaveClass("workbench-disclosure-row");
+    expect(view.container.querySelector("[data-search-activity-summary]")).not.toHaveClass("my-2");
+    expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveClass("workbench-disclosure-trigger");
     expect(within(view.container).getByRole("button", { name: "收起搜索详情" })).toHaveAttribute("aria-expanded", "true");
     expect(view.container.querySelector("[data-search-activity-details]")).toHaveTextContent("这条来源文字已经完整流式展示。");
 
@@ -478,6 +523,9 @@ describe("ActivityRow activity disclosure", () => {
     };
     const view = render(createElement(ActivityRow, { item: running }));
 
+    expect(view.container.querySelector('[data-tool-call-id="context"]')).toHaveClass("workbench-disclosure-row");
+    expect(view.container.querySelector('[data-tool-call-id="context"]')).not.toHaveClass("my-2");
+    expect(screen.getByRole("button", { name: "收起工具调用：上下文读取" })).toHaveClass("workbench-disclosure-trigger");
     expect(screen.getByRole("button", { name: "收起工具调用：上下文读取" })).toHaveAttribute("aria-expanded", "true");
     expect(view.container).toHaveTextContent("执行耗时");
 

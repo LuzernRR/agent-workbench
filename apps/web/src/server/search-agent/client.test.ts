@@ -6,7 +6,14 @@ const config = vi.hoisted(() => ({
 
 vi.mock("./config", () => config);
 
-import { requestSearchAgentStop, SearchAgentRequestError, streamSearchAgentRun } from "./client";
+import {
+  cancelXiaohongshuVerification,
+  requestSearchAgentStop,
+  requestXiaohongshuVerificationQrcode,
+  requestXiaohongshuVerificationStatus,
+  SearchAgentRequestError,
+  streamSearchAgentRun
+} from "./client";
 
 const encoder = new TextEncoder();
 const originalToken = process.env.WORKBENCH_INTERNAL_TOKEN;
@@ -122,5 +129,54 @@ describe("Search Agent 服务端 client", () => {
   it("stop 配置不可用时返回 unavailable，不阻断本地停止兜底", async () => {
     config.loadSearchAgentServiceConfig.mockRejectedValueOnce(new Error("config missing"));
     await expect(requestSearchAgentStop("run_one")).resolves.toBe("unavailable");
+  });
+
+  it("严格代理工具账号验证状态、二维码和取消请求", async () => {
+    const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        version: 1,
+        runId: "run_one",
+        challengeId,
+        status: "pending",
+        expiresAt: "2026-07-28T00:04:00Z",
+        retryAfterMs: 2000,
+        reasonCode: null,
+        message: "等待使用小红书 App 扫码验证工具账号"
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(png, { status: 200, headers: { "content-type": "image/png", "cache-control": "no-store" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_one", challengeId, status: "cancelled" }), { status: 200, headers: { "content-type": "application/json" } }));
+
+    await expect(requestXiaohongshuVerificationStatus("run_one", challengeId)).resolves.toMatchObject({ status: "pending" });
+    await expect(requestXiaohongshuVerificationQrcode("run_one", challengeId)).resolves.toEqual(png);
+    await expect(cancelXiaohongshuVerification("run_one", challengeId)).resolves.toBeUndefined();
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `http://127.0.0.1:8100/v1/runs/run_one/xiaohongshu-verifications/${challengeId}`,
+      `http://127.0.0.1:8100/v1/runs/run_one/xiaohongshu-verifications/${challengeId}/qrcode`,
+      `http://127.0.0.1:8100/v1/runs/run_one/xiaohongshu-verifications/${challengeId}`
+    ]);
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("accept")).toBe("image/png");
+  });
+
+  it("拒绝验证接口的额外字段和伪造二维码", async () => {
+    const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        version: 1,
+        runId: "run_one",
+        challengeId,
+        status: "pending",
+        expiresAt: "2026-07-28T00:04:00Z",
+        retryAfterMs: 2000,
+        reasonCode: null,
+        message: "等待扫码",
+        qrcode: "secret"
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response("not png", { status: 200, headers: { "content-type": "image/png" } }));
+
+    await expect(requestXiaohongshuVerificationStatus("run_one", challengeId)).rejects.toMatchObject({ code: "SEARCH_AGENT_INVALID_EVENT" });
+    await expect(requestXiaohongshuVerificationQrcode("run_one", challengeId)).rejects.toMatchObject({ code: "SEARCH_AGENT_INVALID_EVENT" });
   });
 });

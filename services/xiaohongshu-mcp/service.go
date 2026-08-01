@@ -21,14 +21,51 @@ import (
 
 // XiaohongshuService 小红书业务服务
 type XiaohongshuService struct {
-	logins loginSessions
+	logins        loginSessions
+	verifications loginVerificationSessions
 
-	// 登录态搜索、详情和主页读取共享同一个受控浏览器进程。上层请求仍按页
-	// 隔离，并由互斥锁串行执行，避免同一 Cookie 会话并发争用。任何读取错误
-	// 都会丢弃该浏览器，下一次请求再以磁盘上的最新 Cookie 干净重建。
+	stagedVerificationMu sync.Mutex
+	stagedVerification   *stagedVerificationSession
+
+	// 登录态读取由互斥锁串行执行，避免同一 Cookie 会话并发争用。搜索和主页
+	// 读取可在小上限内复用浏览器；详情正文使用隔离浏览器会话，避免搜索页或
+	// 上一篇详情的 renderer 卡顿传递到下一篇。每次操作仍创建独立页面。
 	readMu          sync.Mutex
 	readBrowser     *headless_browser.Browser
+	readPage        *rod.Page
+	readOperations  int
 	readCookieStamp cookieStamp
+	readCleanup     <-chan struct{}
+
+	// 以下依赖只为生命周期回归测试提供可替换边界；生产构造器始终注入真实
+	// 浏览器、页面、Cookie 标记和同步关闭实现。
+	newReadBrowser   func() (*headless_browser.Browser, error)
+	newReadPage      func(*headless_browser.Browser) (*rod.Page, error)
+	readPageHealthy  func(*rod.Page) bool
+	readCookie       func() cookieStamp
+	closeReadSession func(*rod.Page, *headless_browser.Browser)
+
+	closeVerificationPage   func(*rod.Page, *headless_browser.Browser)
+	resolveVerificationUser func(context.Context) (*LoginStatusResponse, error)
+	fetchVerificationQRCode func(context.Context, *rod.Page) (string, bool, error)
+	waitVerificationLogin   func(context.Context, *rod.Page) bool
+	readVerificationUser    func(context.Context, *rod.Page) (*xiaohongshu.CurrentUser, error)
+	saveVerificationCookies func(*rod.Page) error
+	verificationTimeout     time.Duration
+	verificationStageTTL    time.Duration
+}
+
+// 非详情只读操作最多复用四次，随后整体轮换，页面和 renderer 数量始终受控。
+const maxReadOperationsPerSession = 4
+const readCleanupWait = 2500 * time.Millisecond
+const readPageHealthTimeout = 600 * time.Millisecond
+const defaultVerificationStageTTL = 45 * time.Second
+
+type stagedVerificationSession struct {
+	requestKey string
+	page       *rod.Page
+	browser    *headless_browser.Browser
+	timer      *time.Timer
 }
 
 type cookieStamp struct {
@@ -39,18 +76,115 @@ type cookieStamp struct {
 
 // NewXiaohongshuService 创建小红书服务实例
 func NewXiaohongshuService() *XiaohongshuService {
-	return &XiaohongshuService{}
+	return &XiaohongshuService{
+		newReadBrowser:          safeNewBrowser,
+		newReadPage:             safeNewPage,
+		readPageHealthy:         safeReadPageHealthy,
+		readCookie:              currentCookieStamp,
+		closeReadSession:        safeCloseReadSession,
+		closeVerificationPage:   safeCloseReadSession,
+		fetchVerificationQRCode: safeFetchVerificationQRCode,
+		waitVerificationLogin:   waitForVerificationLogin,
+		readVerificationUser:    readVerificationCurrentUser,
+		saveVerificationCookies: saveCookies,
+		verificationTimeout:     4 * time.Minute,
+		verificationStageTTL:    defaultVerificationStageTTL,
+	}
 }
 
-// Close 关闭可复用的只读浏览器。二维码登录使用自己的短期浏览器会话，仍由
-// waitScanInBackground 负责关闭。
+// Close 关闭可复用的只读页面、待验证页面和正在等待扫码的验证会话。
 func (s *XiaohongshuService) Close() {
+	s.verifications.close()
+	s.closeStagedVerificationSession()
 	s.readMu.Lock()
-	b := s.readBrowser
-	s.readBrowser = nil
-	s.readCookieStamp = cookieStamp{}
+	_ = s.waitForReadCleanupLocked(context.Background())
+	s.resetReadSessionLocked()
 	s.readMu.Unlock()
-	safeCloseBrowser(b)
+}
+
+func (s *XiaohongshuService) closeVerificationSession(
+	session *stagedVerificationSession,
+) {
+	if session == nil {
+		return
+	}
+	if session.timer != nil {
+		session.timer.Stop()
+	}
+	closer := s.closeVerificationPage
+	if closer == nil {
+		closer = s.closeReadSession
+	}
+	if closer == nil {
+		closer = safeCloseReadSession
+	}
+	closer(session.page, session.browser)
+}
+
+func (s *XiaohongshuService) expireStagedVerificationSession(
+	session *stagedVerificationSession,
+) {
+	s.stagedVerificationMu.Lock()
+	if s.stagedVerification != session {
+		s.stagedVerificationMu.Unlock()
+		return
+	}
+	s.stagedVerification = nil
+	s.stagedVerificationMu.Unlock()
+	s.closeVerificationSession(session)
+}
+
+func (s *XiaohongshuService) stageVerificationSession(
+	requestKey string,
+	page *rod.Page,
+	browserInstance *headless_browser.Browser,
+) {
+	ttl := s.verificationStageTTL
+	if ttl <= 0 {
+		ttl = defaultVerificationStageTTL
+	}
+	session := &stagedVerificationSession{
+		requestKey: requestKey,
+		page:       page,
+		browser:    browserInstance,
+	}
+	session.timer = time.AfterFunc(ttl, func() {
+		s.expireStagedVerificationSession(session)
+	})
+
+	s.stagedVerificationMu.Lock()
+	previous := s.stagedVerification
+	s.stagedVerification = session
+	s.stagedVerificationMu.Unlock()
+	if previous != nil {
+		s.closeVerificationSession(previous)
+	}
+}
+
+func (s *XiaohongshuService) takeStagedVerificationSession(
+	requestKey string,
+) (*stagedVerificationSession, bool) {
+	s.stagedVerificationMu.Lock()
+	session := s.stagedVerification
+	if session == nil || session.requestKey != requestKey {
+		s.stagedVerificationMu.Unlock()
+		return nil, false
+	}
+	s.stagedVerification = nil
+	s.stagedVerificationMu.Unlock()
+	if session.timer != nil {
+		session.timer.Stop()
+		session.timer = nil
+	}
+	return session, true
+}
+
+func (s *XiaohongshuService) closeStagedVerificationSession() {
+	s.stagedVerificationMu.Lock()
+	session := s.stagedVerification
+	s.stagedVerification = nil
+	s.stagedVerificationMu.Unlock()
+	s.closeVerificationSession(session)
 }
 
 func currentCookieStamp() cookieStamp {
@@ -103,58 +237,201 @@ func safeNewPage(b *headless_browser.Browser) (page *rod.Page, err error) {
 	return b.NewPage(), nil
 }
 
-func safeClosePage(page *rod.Page) {
+func safeReadPageHealthy(page *rod.Page) (healthy bool) {
 	if page == nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			healthy = false
+		}
+	}()
+	evaluated, err := page.Timeout(readPageHealthTimeout).Eval(`() => true`)
+	return err == nil && evaluated.Value.Bool()
+}
+
+func safeCloseReadSession(page *rod.Page, b *headless_browser.Browser) {
+	// Browser.Close 会回收该进程下的全部页面；生产会话同时持有 browser 时
+	// 不再单独关闭最后一页，避免 page.Close 与新 renderer 启动竞态。
+	if b == nil && page != nil {
+		pageClosed := make(chan struct{})
+		go func() {
+			defer close(pageClosed)
+			defer func() {
+				if recover() != nil {
+					logrus.Warn("只读浏览器页面关闭时发生异常")
+				}
+			}()
+			if err := page.Close(); err != nil {
+				logrus.Warn("只读浏览器页面关闭失败，继续回收浏览器进程")
+			}
+		}()
+		select {
+		case <-pageClosed:
+		case <-time.After(500 * time.Millisecond):
+			logrus.Warn("只读浏览器页面关闭超时，继续回收浏览器进程")
+		}
+	}
+	if b == nil {
 		return
 	}
-	done := make(chan error, 1)
+	browserClosed := make(chan struct{})
 	go func() {
-		done <- page.Close()
+		defer close(browserClosed)
+		safeCloseBrowser(b)
 	}()
 	select {
-	case err := <-done:
-		if err != nil {
-			logrus.Warn("只读浏览器页面关闭失败，浏览器会话将被重建")
-		}
-	case <-time.After(750 * time.Millisecond):
-		logrus.Warn("只读浏览器页面关闭超时，改由浏览器进程回收")
+	case <-browserClosed:
+	case <-time.After(1500 * time.Millisecond):
+		logrus.Warn("只读浏览器进程回收超时，资源将由容器 init 回收")
 	}
 }
 
-func (s *XiaohongshuService) resetReadBrowserLocked() {
+func (s *XiaohongshuService) detachReadSessionLocked() (
+	*rod.Page,
+	*headless_browser.Browser,
+) {
+	page := s.readPage
 	b := s.readBrowser
+	s.readPage = nil
 	s.readBrowser = nil
+	s.readOperations = 0
 	s.readCookieStamp = cookieStamp{}
-	if b != nil {
-		go safeCloseBrowser(b)
+	return page, b
+}
+
+func (s *XiaohongshuService) resetReadSessionLocked() {
+	page, b := s.detachReadSessionLocked()
+	if page == nil && b == nil {
+		return
+	}
+	if s.closeReadSession != nil {
+		s.closeReadSession(page, b)
+	} else {
+		safeCloseReadSession(page, b)
+	}
+}
+
+func (s *XiaohongshuService) discardReadSessionLocked() {
+	page, b := s.detachReadSessionLocked()
+	if page == nil && b == nil {
+		return
+	}
+	closer := s.closeReadSession
+	if closer == nil {
+		closer = safeCloseReadSession
+	}
+	done := make(chan struct{})
+	s.readCleanup = done
+	go func() {
+		defer close(done)
+		closer(page, b)
+	}()
+}
+
+func (s *XiaohongshuService) waitForReadCleanupLocked(ctx context.Context) error {
+	done := s.readCleanup
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		s.readCleanup = nil
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(readCleanupWait):
+		logrus.Warn("等待旧只读浏览器回收超时，将启动隔离的新会话")
+		s.readCleanup = nil
+		return nil
 	}
 }
 
 func (s *XiaohongshuService) resetReadBrowser() {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
-	s.resetReadBrowserLocked()
+	_ = s.waitForReadCleanupLocked(context.Background())
+	s.resetReadSessionLocked()
 }
 
-func (s *XiaohongshuService) ensureReadBrowserLocked() (*headless_browser.Browser, error) {
-	stamp := currentCookieStamp()
+func (s *XiaohongshuService) ensureReadPageLocked() (*rod.Page, error) {
+	stampReader := s.readCookie
+	if stampReader == nil {
+		stampReader = currentCookieStamp
+	}
+	stamp := stampReader()
 	if s.readBrowser != nil && !sameCookieStamp(stamp, s.readCookieStamp) {
 		logrus.Info("登录会话已更新，重建只读浏览器")
-		s.resetReadBrowserLocked()
+		s.resetReadSessionLocked()
+	}
+	if s.readPage != nil {
+		healthCheck := s.readPageHealthy
+		if healthCheck == nil {
+			healthCheck = safeReadPageHealthy
+		}
+		if !healthCheck(s.readPage) {
+			// Chromium 的 renderer 可能在两次只读请求之间退出。先用本地 CDP
+			// Eval 验活，不向平台发请求；失效时在真正导航前干净重建，避免把
+			// 瞬时 page-closed 错误暴露成搜索网络故障。
+			logrus.Info("只读浏览器页面健康检查失败，导航前重建会话")
+			s.resetReadSessionLocked()
+		}
 	}
 	if s.readBrowser == nil {
-		b, err := safeNewBrowser()
+		browserFactory := s.newReadBrowser
+		if browserFactory == nil {
+			browserFactory = safeNewBrowser
+		}
+		b, err := browserFactory()
 		if err != nil {
 			return nil, err
 		}
 		s.readBrowser = b
 		s.readCookieStamp = stamp
 	}
-	return s.readBrowser, nil
+	pageFactory := s.newReadPage
+	if pageFactory == nil {
+		pageFactory = safeNewPage
+	}
+	page, err := pageFactory(s.readBrowser)
+	if err != nil {
+		s.discardReadSessionLocked()
+		return nil, err
+	}
+	// 旧页面保留到本浏览器整体轮换；这里只把健康检查锚点更新为新页面。
+	s.readPage = page
+	return page, nil
 }
 
 func (s *XiaohongshuService) withReadPage(
 	ctx context.Context,
+	operation func(*rod.Page) error,
+) error {
+	return s.withReadPageMode(ctx, false, "", operation)
+}
+
+func (s *XiaohongshuService) withFreshReadPage(
+	ctx context.Context,
+	operation func(*rod.Page) error,
+) error {
+	return s.withReadPageMode(ctx, true, "", operation)
+}
+
+func (s *XiaohongshuService) withFreshReadPageForVerification(
+	ctx context.Context,
+	requestKey string,
+	operation func(*rod.Page) error,
+) error {
+	if !verificationRequestKeyPattern.MatchString(requestKey) {
+		return fmt.Errorf("invalid verification request key")
+	}
+	return s.withReadPageMode(ctx, true, requestKey, operation)
+}
+
+func (s *XiaohongshuService) withReadPageMode(
+	ctx context.Context,
+	forceFreshSession bool,
+	verificationRequestKey string,
 	operation func(*rod.Page) error,
 ) (err error) {
 	s.readMu.Lock()
@@ -163,28 +440,56 @@ func (s *XiaohongshuService) withReadPage(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	b, err := s.ensureReadBrowserLocked()
+	if err := s.waitForReadCleanupLocked(ctx); err != nil {
+		return err
+	}
+	if forceFreshSession && (s.readPage != nil || s.readBrowser != nil) {
+		logrus.Info("详情正文读取前轮换隔离浏览器会话")
+		s.resetReadSessionLocked()
+	}
+	page, err := s.ensureReadPageLocked()
 	if err != nil {
 		return err
 	}
-	page, err := safeNewPage(b)
-	if err != nil {
-		s.resetReadBrowserLocked()
-		return err
-	}
-	defer safeClosePage(page)
 	defer func() {
 		if recover() != nil {
 			err = fmt.Errorf("browser operation failed")
-			s.resetReadBrowserLocked()
+			s.discardReadSessionLocked()
 		}
 	}()
 
+	operationNumber := s.readOperations + 1
 	err = operation(page)
 	if err != nil {
-		s.resetReadBrowserLocked()
+		failure := classifyReadFailure(err)
+		if failure.Code == "CAPTCHA_REQUIRED" &&
+			verificationRequestKeyPattern.MatchString(verificationRequestKey) &&
+			s.readPage != nil && s.readBrowser != nil {
+			verificationPage, verificationBrowser := s.detachReadSessionLocked()
+			s.stageVerificationSession(
+				verificationRequestKey,
+				verificationPage,
+				verificationBrowser,
+			)
+			logrus.WithFields(logrus.Fields{
+				"reasonCode": failure.Code,
+				"operation":  operationNumber,
+			}).Warn("小红书要求安全验证，保留当前工具会话等待扫码")
+			return err
+		}
+		logrus.WithFields(logrus.Fields{
+			"errorType":  fmt.Sprintf("%T", err),
+			"reasonCode": failure.Code,
+			"operation":  operationNumber,
+		}).Warn("只读浏览器操作失败，丢弃当前会话")
+		s.discardReadSessionLocked()
+		return err
 	}
-	return err
+	s.readOperations++
+	if s.readOperations >= maxReadOperationsPerSession {
+		s.resetReadSessionLocked()
+	}
+	return nil
 }
 
 // PublishRequest 发布请求
@@ -562,13 +867,34 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
+	return s.SearchFeedsWithVerification(ctx, keyword, "", filters...)
+}
+
+func (s *XiaohongshuService) SearchFeedsWithVerification(
+	ctx context.Context,
+	keyword string,
+	verificationRequestKey string,
+	filters ...xiaohongshu.FilterOption,
+) (*FeedsListResponse, error) {
 	var feeds []xiaohongshu.Feed
-	err := s.withReadPage(ctx, func(page *rod.Page) error {
+	// 详情读取会导航到 explore 页面并可能改变风控状态。每次新搜索都从隔离
+	// 浏览器会话开始，避免复用上一详情页后立即触发安全验证。
+	operation := func(page *rod.Page) error {
 		action := xiaohongshu.NewSearchAction(page)
 		var searchErr error
 		feeds, searchErr = action.Search(ctx, keyword, filters...)
 		return searchErr
-	})
+	}
+	var err error
+	if verificationRequestKey == "" {
+		err = s.withFreshReadPage(ctx, operation)
+	} else {
+		err = s.withFreshReadPageForVerification(
+			ctx,
+			verificationRequestKey,
+			operation,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +951,7 @@ func (s *XiaohongshuService) GetFeedDetailWithConfigAndSource(
 	xsecSource string,
 ) (*FeedDetailResponse, error) {
 	var result *xiaohongshu.FeedDetailResponse
-	err := s.withReadPage(ctx, func(page *rod.Page) error {
+	err := s.withFreshReadPage(ctx, func(page *rod.Page) error {
 		action := xiaohongshu.NewFeedDetailAction(page)
 		var detailErr error
 		result, detailErr = action.GetFeedDetailWithConfigAndSource(

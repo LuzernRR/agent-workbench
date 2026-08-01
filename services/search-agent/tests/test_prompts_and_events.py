@@ -12,6 +12,7 @@ from app.events.runtime import (
 from app.graph.schemas import ANSWER_MAX_CHARS, ComposeResult
 from app.llm.deepseek import WRITER_MAX_TOKENS
 from app.prompts.agents import (
+    DEGRADED_WRITER_PROMPT,
     DIRECT_WRITER_PROMPT,
     PLANNER_PROMPT,
     REFLECTOR_PROMPT,
@@ -30,6 +31,7 @@ from app.prompts.agents import (
         RESEARCHER_PROMPT,
         REFLECTOR_PROMPT,
         WRITER_PROMPT,
+        DEGRADED_WRITER_PROMPT,
         DIRECT_WRITER_PROMPT,
         VERIFIER_PROMPT,
     ],
@@ -110,8 +112,10 @@ def test_search_product_forces_tool_path_and_prompts_emit_public_summaries() -> 
     assert "已经通过正文质量检查" in VERIFIER_PROMPT
     assert "不使用 Markdown" in RESEARCHER_PROMPT
     assert "missingChannels" in WRITER_PROMPT
+    assert "不使用固定模板" in DEGRADED_WRITER_PROMPT
     assert "绝不能把 web 或 x" in WRITER_PROMPT
     assert "补充背景" in REFLECTOR_PROMPT
+    assert "至少 3 个不同的指定渠道正文" in REFLECTOR_PROMPT
 
 
 def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> None:
@@ -128,6 +132,16 @@ def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> N
     assert "硬上限 760 个 Unicode 字符" in WRITER_PROMPT
     assert "不能为压缩篇幅删除必要的 [来源N] 引用" in WRITER_PROMPT
     assert "证据不足的具体部分最多用一句说明" in WRITER_PROMPT
+    assert "用户明确指定条目数量、字段" in WRITER_PROMPT
+    assert "来源链接：[来源N]" in WRITER_PROMPT
+    assert "使用 3 个编号" in WRITER_PROMPT
+    assert "严禁把“肤质与场景”" in WRITER_PROMPT
+    assert "不得把产品描述反向推测" in WRITER_PROMPT
+    assert "以上为个人使用体验，非医疗建议" in WRITER_PROMPT
+    assert "未作为证据" in WRITER_PROMPT
+    assert "条目数量、字段与字段顺序" in VERIFIER_PROMPT
+    assert "不能把字段拆成" in VERIFIER_PROMPT
+    assert "反向猜测的人群偏好" in VERIFIER_PROMPT
 
 
 def test_public_summary_is_compact_plain_text_without_markdown_artifacts() -> None:

@@ -84,7 +84,8 @@ export function V2ToolActivityRow({ tool }: { tool: V2ToolActivityView }) {
     >
       <button
         type="button"
-        className="flex min-h-9 w-full min-w-0 items-start gap-2 py-1 text-left text-secondary hover:text-ink"
+        className="workbench-disclosure-trigger flex w-full min-w-0 items-start gap-2 text-left text-secondary hover:text-ink"
+        data-workbench-disclosure-trigger
         aria-expanded={open}
         aria-label={`${open ? "收起" : "展开"}工具活动：${tool.registryTitle}`}
         onClick={() => setOpen((current) => !current)}

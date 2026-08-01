@@ -7,6 +7,11 @@ from app.tools import web_search as module
 from app.tools.web_search import SearchHit, SearchOutcome
 
 
+@pytest.fixture(autouse=True)
+def reset_tavily_key_state() -> None:
+    module._reset_tavily_key_state()
+
+
 @pytest.mark.asyncio
 async def test_rate_limit_is_stable_and_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
@@ -22,7 +27,7 @@ async def test_rate_limit_is_stable_and_not_retried(monkeypatch: pytest.MonkeyPa
             error_category="rate_limited",
         )
 
-    monkeypatch.setattr(module, "_tavily_key", lambda: "test-key")
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("test-key",))
     monkeypatch.setattr(module, "_search_tavily", limited)
     outcome = await module.web_search(
         "query", max_attempts=3, allow_duckduckgo_fallback=False
@@ -37,7 +42,7 @@ async def test_timeout_maps_to_stable_category(monkeypatch: pytest.MonkeyPatch) 
     async def timeout(query: str, max_results: int, key: str) -> SearchOutcome:
         raise httpx.TimeoutException("timeout")
 
-    monkeypatch.setattr(module, "_tavily_key", lambda: "test-key")
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("test-key",))
     monkeypatch.setattr(module, "_search_tavily", timeout)
     outcome = await module.web_search(
         "query", max_attempts=1, allow_duckduckgo_fallback=False
@@ -54,7 +59,7 @@ async def test_provider_5xx_maps_to_unavailable(monkeypatch: pytest.MonkeyPatch)
         response = httpx.Response(503, request=request)
         raise httpx.HTTPStatusError("503", request=request, response=response)
 
-    monkeypatch.setattr(module, "_tavily_key", lambda: "test-key")
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("test-key",))
     monkeypatch.setattr(module, "_search_tavily", unavailable)
     outcome = await module.web_search(
         "query", max_attempts=1, allow_duckduckgo_fallback=False
@@ -68,7 +73,7 @@ async def test_provider_5xx_maps_to_unavailable(monkeypatch: pytest.MonkeyPatch)
 async def test_missing_tavily_key_fails_closed_when_fallback_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(module, "_tavily_key", lambda: None)
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ())
     outcome = await module.web_search(
         "query",
         max_attempts=1,
@@ -95,10 +100,130 @@ async def test_tavily_failure_uses_configured_duckduckgo_fallback(
     async def fallback(query: str, max_results: int) -> SearchOutcome:
         return SearchOutcome(ok=True, query=query, provider="duckduckgo")
 
-    monkeypatch.setattr(module, "_tavily_key", lambda: "test-key")
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("test-key",))
     monkeypatch.setattr(module, "_search_tavily", unavailable)
     monkeypatch.setattr(module, "_search_duckduckgo", fallback)
     outcome = await module.web_search("query", max_attempts=1)
+    assert outcome.ok is True
+    assert outcome.provider == "duckduckgo"
+
+
+def test_tavily_config_key_order_is_priority_legacy_then_fallback() -> None:
+    keys = module._tavily_keys_from_config(
+        {
+            "search": {
+                "providers": {
+                    "tavily": {
+                        "apiKeys": ["priority-one", "priority-two", "priority-one"],
+                        "apiKey": "legacy",
+                        "fallbackApiKeys": ["fallback", "  "],
+                    }
+                }
+            }
+        }
+    )
+    assert keys == ("priority-one", "priority-two", "legacy", "fallback")
+
+
+def test_tavily_cursor_never_moves_backwards() -> None:
+    keys = ("priority", "secondary")
+    assert module._tavily_key_candidates(keys)[0][0] == 0
+
+    module._select_tavily_key(keys, 1)
+    module._select_tavily_key(keys, 0)
+
+    assert module._tavily_key_candidates(keys) == ((1, "secondary"),)
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_key_switches_and_keeps_successful_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def search(query: str, max_results: int, key: str) -> SearchOutcome:
+        calls.append(key)
+        if key == "priority":
+            return SearchOutcome(
+                ok=False,
+                query=query,
+                provider="tavily",
+                error="limited",
+                error_category="rate_limited",
+            )
+        return SearchOutcome(ok=True, query=query, provider="tavily")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("priority", "secondary"))
+    monkeypatch.setattr(module, "_search_tavily", search)
+
+    first = await module.web_search(
+        "query", max_attempts=3, allow_duckduckgo_fallback=False
+    )
+    second = await module.web_search(
+        "query", max_attempts=3, allow_duckduckgo_fallback=False
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert calls == ["priority", "secondary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_all_credential_failures_exhaust_pool_before_duckduckgo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def exhausted(query: str, max_results: int, key: str) -> SearchOutcome:
+        calls.append(key)
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="exhausted",
+            error_category="quota_exhausted",
+        )
+
+    async def fallback(query: str, max_results: int) -> SearchOutcome:
+        return SearchOutcome(ok=True, query=query, provider="duckduckgo")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("one", "two", "three"))
+    monkeypatch.setattr(module, "_search_tavily", exhausted)
+    monkeypatch.setattr(module, "_search_duckduckgo", fallback)
+
+    outcome = await module.web_search("query", max_attempts=3)
+
+    assert calls == ["one", "two", "three"]
+    assert outcome.ok is True
+    assert outcome.provider == "duckduckgo"
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_switches_once_then_uses_duckduckgo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def unavailable(query: str, max_results: int, key: str) -> SearchOutcome:
+        calls.append(key)
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="down",
+            error_category="provider_unavailable",
+        )
+
+    async def fallback(query: str, max_results: int) -> SearchOutcome:
+        return SearchOutcome(ok=True, query=query, provider="duckduckgo")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("one", "two", "three"))
+    monkeypatch.setattr(module, "_search_tavily", unavailable)
+    monkeypatch.setattr(module, "_search_duckduckgo", fallback)
+
+    outcome = await module.web_search("query", max_attempts=3)
+
+    assert calls == ["one", "two"]
     assert outcome.ok is True
     assert outcome.provider == "duckduckgo"
 

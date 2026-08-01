@@ -10,6 +10,28 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func respondLoginVerificationError(c *gin.Context, err error) {
+	verificationError, ok := err.(*LoginVerificationError)
+	if !ok {
+		respondError(c, http.StatusInternalServerError, "VERIFICATION_FAILED", "小红书工具账号验证失败", nil)
+		return
+	}
+	nextAction := "stop"
+	if verificationError.Retryable {
+		nextAction = "retry_later"
+	}
+	logrus.WithFields(logrus.Fields{
+		"reasonCode": verificationError.Code,
+		"status":     verificationError.HTTPStatus,
+	}).Warn("小红书工具账号验证请求失败")
+	c.JSON(verificationError.HTTPStatus, ErrorResponse{
+		Error:      verificationError.Message,
+		Code:       verificationError.Code,
+		Retryable:  verificationError.Retryable,
+		NextAction: nextAction,
+	})
+}
+
 // respondError 返回错误响应
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
 	response := ErrorResponse{
@@ -60,6 +82,58 @@ func (s *AppServer) getLoginQrcodeHandler(c *gin.Context) {
 	}
 
 	respondSuccess(c, result, "获取登录二维码成功")
+}
+
+func (s *AppServer) startLoginVerificationHandler(c *gin.Context) {
+	var request StartLoginVerificationRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "验证请求参数无效", nil)
+		return
+	}
+	result, err := s.xiaohongshuService.StartLoginVerification(
+		c.Request.Context(),
+		request.RequestKey,
+	)
+	if err != nil {
+		respondLoginVerificationError(c, err)
+		return
+	}
+	respondSuccess(c, result, "小红书工具账号验证会话已创建")
+}
+
+func (s *AppServer) loginVerificationStatusHandler(c *gin.Context) {
+	result, err := s.xiaohongshuService.LoginVerificationStatus(
+		c.Param("challenge_id"),
+	)
+	if err != nil {
+		respondLoginVerificationError(c, err)
+		return
+	}
+	respondSuccess(c, result, "小红书工具账号验证状态已更新")
+}
+
+func (s *AppServer) loginVerificationQRCodeHandler(c *gin.Context) {
+	image, err := s.xiaohongshuService.LoginVerificationQRCode(
+		c.Param("challenge_id"),
+	)
+	if err != nil {
+		respondLoginVerificationError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Content-Disposition", "inline")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(http.StatusOK, "image/png", image)
+}
+
+func (s *AppServer) cancelLoginVerificationHandler(c *gin.Context) {
+	if err := s.xiaohongshuService.CancelLoginVerification(
+		c.Param("challenge_id"),
+	); err != nil {
+		respondLoginVerificationError(c, err)
+		return
+	}
+	respondSuccess(c, map[string]string{"status": "cancelled"}, "已取消小红书工具账号验证")
 }
 
 // deleteCookiesHandler 删除 cookies，重置登录状态
@@ -133,6 +207,7 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 	var keyword string
 	var filters xiaohongshu.FilterOption
+	var verificationRequestKey string
 
 	switch c.Request.Method {
 	case http.MethodPost:
@@ -145,6 +220,7 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		}
 		keyword = searchReq.Keyword
 		filters = searchReq.Filters
+		verificationRequestKey = searchReq.VerificationRequestKey
 	default:
 		keyword = c.Query("keyword")
 	}
@@ -154,8 +230,19 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 			"缺少关键词参数", "keyword parameter is required")
 		return
 	}
+	if verificationRequestKey != "" &&
+		!verificationRequestKeyPattern.MatchString(verificationRequestKey) {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
+			"安全验证请求标识无效", nil)
+		return
+	}
 
-	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
+	result, err := s.xiaohongshuService.SearchFeedsWithVerification(
+		c.Request.Context(),
+		keyword,
+		verificationRequestKey,
+		filters,
+	)
 	if err != nil {
 		respondReadError(c, err)
 		return

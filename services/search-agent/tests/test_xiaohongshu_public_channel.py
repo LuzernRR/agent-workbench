@@ -9,6 +9,7 @@ from app.tools.channels import xiaohongshu_public as module
 from app.tools.channels.xiaohongshu_public import (
     XiaohongshuPublicChannel,
     _allowed_xhs_url,
+    _hit_matches_query,
 )
 from app.tools.robots_policy import RobotsDecision
 from app.tools.web_search import SearchHit, SearchOutcome
@@ -36,6 +37,69 @@ def hit(title: str = "LangGraph 入门") -> SearchHit:
 )
 def test_xhs_url_allowlist(url: str, allowed: bool) -> None:
     assert _allowed_xhs_url(url) is allowed
+
+
+def test_public_index_relevance_rejects_real_unrelated_fallback_hits() -> None:
+    unrelated = SearchHit(
+        "https://www.xiaohongshu.com/explore/tablet123?xsec_token=signed",
+        "满级大屏，这平板电脑将生产力拉满",
+        "家里、通勤路上和咖啡馆都能随身使用，真实感受很好。",
+        1,
+    )
+    relevant = SearchHit(
+        "https://www.xiaohongshu.com/explore/sunscreen123?xsec_token=signed",
+        "油敏皮防晒决赛圈",
+        "夏季通勤实测，记录清爽度、成膜和泛油情况。",
+        2,
+    )
+
+    query = "油敏皮 夏季通勤 防晒 使用感受"
+    assert _hit_matches_query(query, unrelated) is False
+    assert _hit_matches_query(query, relevant) is True
+
+
+@pytest.mark.asyncio
+async def test_discovery_drops_unrelated_hits_before_public_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = XiaohongshuPublicChannel(agent_config())
+    read_urls: list[str] = []
+
+    async def search(*args: Any, **kwargs: Any) -> SearchOutcome:
+        assert kwargs["max_results"] == 15
+        return SearchOutcome(
+            ok=True,
+            query="油敏皮 夏季通勤 防晒 使用感受 site:xiaohongshu.com/explore",
+            provider="test-index",
+            hits=[
+                SearchHit(
+                    "https://www.xiaohongshu.com/explore/tablet123?xsec_token=signed",
+                    "满级大屏，这平板电脑将生产力拉满",
+                    "家里、通勤路上和咖啡馆都能随身使用。",
+                    1,
+                ),
+                SearchHit(
+                    "https://www.xiaohongshu.com/explore/sunscreen123?xsec_token=signed",
+                    "油敏皮防晒决赛圈",
+                    "夏季通勤实测，清爽不拔干。",
+                    2,
+                ),
+            ],
+        )
+
+    async def read(url: str) -> tuple[str, str | None]:
+        read_urls.append(url)
+        return "油敏皮防晒决赛圈：夏季通勤清爽度与成膜记录。", None
+
+    monkeypatch.setattr(module, "web_search", search)
+    monkeypatch.setattr(channel, "_read_public", read)
+    outcome = await channel.search("油敏皮 夏季通勤 防晒 使用感受", 5)
+
+    assert [item.title for item in outcome.results] == ["油敏皮防晒决赛圈"]
+    assert len(outcome.evidence) == 1
+    assert read_urls == [
+        "https://xiaohongshu.com/explore/sunscreen123?xsec_token=signed"
+    ]
 
 
 @pytest.mark.asyncio

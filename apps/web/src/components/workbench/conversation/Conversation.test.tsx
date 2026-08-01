@@ -5,7 +5,7 @@ import { createEmptyThreadState } from "@/lib/agent-events/reducer";
 import type { ThinkingItem } from "@/lib/agent-events/types";
 import type { S01ProcessFixtureCatalog } from "@/lib/agent-events/v2/process-view-model";
 import { createS01ProcessFixtureCatalog } from "@/server/mock/s01-event-fixtures";
-import { Conversation, ThinkingResult } from "./Conversation";
+import { Conversation, formatAssistantReply, ThinkingResult } from "./Conversation";
 
 vi.mock("@/lib/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/client")>();
@@ -122,6 +122,9 @@ describe("ThinkingResult progressive disclosure", () => {
   it("思考中自动展开并流式显示，结束后自动折叠且可再次展开", () => {
     const view = render(<ThinkingResult item={thinking} />);
 
+    expect(view.container.querySelector("[data-thinking-id]")).toHaveClass("workbench-disclosure-row");
+    expect(view.container.querySelector("[data-thinking-id]")).not.toHaveClass("mb-2");
+    expect(screen.getByRole("button", { name: "思考中" })).toHaveClass("workbench-disclosure-trigger");
     expect(screen.getByRole("button", { name: "思考中" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("先判断需要检索的事实边界。")).toBeInTheDocument();
     expect(screen.getByText("先判断需要检索的事实边界。")).toHaveClass("streaming-cursor");
@@ -159,5 +162,21 @@ describe("ThinkingResult progressive disclosure", () => {
     expect(screen.queryByText("先判断需要检索的事实边界。")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "核验结束" }));
     expect(screen.getByText("先判断需要检索的事实边界。")).toBeInTheDocument();
+  });
+});
+
+describe("assistant reply citations", () => {
+  it("labels citations as source links and includes safe URLs in the copied reply", () => {
+    const copied = formatAssistantReply([{
+      text: "三条经验均来自已读正文。",
+      citations: [
+        { label: "油敏皮防晒决赛圈", url: "https://www.xiaohongshu.com/explore/note_one" },
+        { label: "危险来源", url: "javascript:alert(1)" }
+      ]
+    }]);
+
+    expect(copied).toContain("来源链接");
+    expect(copied).toContain("[1] 油敏皮防晒决赛圈：https://www.xiaohongshu.com/explore/note_one");
+    expect(copied).not.toContain("javascript:");
   });
 });

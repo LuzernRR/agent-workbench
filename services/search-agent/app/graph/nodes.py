@@ -41,6 +41,7 @@ from app.llm.deepseek import (
     invoke_structured,
 )
 from app.prompts.agents import (
+    DEGRADED_WRITER_PROMPT,
     DIRECT_WRITER_PROMPT,
     PLANNER_PROMPT,
     REFLECTOR_PROMPT,
@@ -49,7 +50,7 @@ from app.prompts.agents import (
     VERIFIER_PROMPT,
     WRITER_PROMPT,
 )
-from app.tools.channels.base import ChannelProgress
+from app.tools.channels.base import ChannelProgress, ChannelVerificationUpdate
 from app.tools.search_tool import (
     SearchExecutionResult,
     SearchToolInput,
@@ -75,13 +76,14 @@ _MIN_TOOL_WINDOW_SECONDS = {
     "xiaohongshu": 45,
 }
 _INEFFECTIVE_SOURCE_TEXT = re.compile(
-    r"(?:未(?:成功)?(?:读取|加载|获取|核验|验证)|"
+    r"(?:(?:正文|内容).{0,4}(?:过短|太短)|"
+    r"未(?:成功)?(?:读取|加载|获取|核验|验证)|"
     r"仅(?:发现|检索到).{0,12}(?:候选|索引)|"
     r"(?:正文|帖子|笔记|详情|原文|内容).{0,12}(?:未|没有).{0,6}"
     r"(?:读取|加载|获取|核验|验证)|受.{0,12}(?:读取|详情).{0,8}上限|"
     r"(?:仅|只).{0,12}(?:标题|标签|话题|关键词)|"
     r"(?:未|没有).{0,6}(?:展开|涉及|提及|覆盖|包含|提供).{0,60}"
-    r"(?:对比|区别|内容|信息|说明|细节|证据)|"
+    r"(?:对比|区别|内容|信息|说明|细节|证据|场景|人群|肤质|使用感受|产品类型|不适|适用)|"
     r"(?:无|没有|缺少).{0,12}(?:有效|实质|相关).{0,8}"
     r"(?:内容|信息|证据|说明))",
 )
@@ -98,7 +100,9 @@ _INEFFECTIVE_PROCESS_TEXT = re.compile(
 
 
 def _step(node: str, kind: str, summary: str | None, detail: str = "") -> list[ThinkStep]:
-    return [ThinkStep(node=node, kind=kind, summary=summary or "", detail=detail)]
+    # 确定性节点只能记录结构化内部细节，绝不能携带可被误投影为模型公开摘要的文案。
+    public_summary = summary if kind == "model" else None
+    return [ThinkStep(node=node, kind=kind, summary=public_summary or "", detail=detail)]
 
 
 def _usage_after(state: SearchState, usage: ModelUsage) -> dict[str, int | float]:
@@ -159,7 +163,9 @@ def budget_reason(state: SearchState, *, reserve_model_calls: int = 0) -> str | 
         return "COST_LIMIT"
     started = state.get("started_at")
     if started:
-        elapsed = (datetime.now(UTC) - datetime.fromisoformat(started)).total_seconds()
+        elapsed = (
+            datetime.now(UTC) - datetime.fromisoformat(started)
+        ).total_seconds() - float(state.get("external_wait_seconds") or 0.0)
         if elapsed >= state.get("max_run_seconds", 240):
             return "RUN_TIMEOUT"
     return None
@@ -171,7 +177,9 @@ def remaining_run_seconds(state: SearchState) -> float | None:
     started = state.get("started_at")
     if not started:
         return None
-    elapsed = (datetime.now(UTC) - datetime.fromisoformat(started)).total_seconds()
+    elapsed = (
+        datetime.now(UTC) - datetime.fromisoformat(started)
+    ).total_seconds() - float(state.get("external_wait_seconds") or 0.0)
     return max(0.0, state.get("max_run_seconds", 240) - elapsed)
 
 
@@ -205,6 +213,21 @@ _COMPLETE_ANSWER_BOUNDARY = re.compile(
 )
 _TRAILING_MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 _DANGLING_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*$")
+_CITATION_REFERENCE = re.compile(r"\[来源(\d+)\]")
+_EXPLICIT_OUTPUT_FIELDS = re.compile(
+    r"按\s*[“\"「『]([^\r\n”\"」』]{3,240})[”\"」』]",
+)
+_REQUESTED_ITEM_RANGE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*[–—－~～-]\s*(\d{1,2})\s*条",
+)
+_REQUESTED_ITEM_COUNT = re.compile(r"(?<![\d–—－~～-])(\d{1,2})\s*条")
+_NUMBERED_ANSWER_ITEM = re.compile(r"(?m)^\s*\d{1,2}[.)、]\s+")
+_NON_MEDICAL_REQUEST = re.compile(
+    r"(?:不得|不要|不能).{0,20}(?:个人体验|使用体验|体验).{0,20}医疗建议|"
+    r"(?:不得|不要|不能).{0,20}医疗建议",
+)
+_NON_MEDICAL_DISCLAIMER = re.compile(r"不构成医疗建议|非医疗建议")
+_CONFLICTING_EVIDENCE_GAP = re.compile(r"冲突|矛盾|不一致|相反")
 
 
 def _clean_answer_prefix(value: str) -> str:
@@ -259,21 +282,50 @@ def _compact_answer_markdown(
     return candidate[:max_chars]
 
 
-def _safe_partial_answer(state: SearchState, reason: str) -> str:
-    """预算/外部能力不足时生成不带推断的可交付降级结果。"""
-    evidence = state.get("evidence") or []
-    if not evidence:
-        return (
-            "本次运行未取得足够的可核验证据，无法可靠完成回答。"
-            f"运行已按安全边界停止（{reason}），你可以稍后重试。"
-        )
-    sources = "\n".join(
-        f"- [{item['title'][:160]}]({item['url']})" for item in evidence[:8]
+def _answer_citations(
+    answer: str,
+    evidence: list[Evidence],
+) -> tuple[str, list[Citation]]:
+    """只发布回答实际引用的来源，并把稀疏编号归一为连续编号。"""
+
+    referenced = list(dict.fromkeys(
+        int(match.group(1))
+        for match in _CITATION_REFERENCE.finditer(answer)
+    ))
+    if not referenced:
+        citations: list[Citation] = []
+        seen: set[str] = set()
+        for item in evidence:
+            if item["url"] in seen:
+                continue
+            seen.add(item["url"])
+            citations.append(Citation(label=item["title"][:160], url=item["url"]))
+        return answer, citations
+
+    original_to_normalized: dict[int, int] = {}
+    url_to_normalized: dict[str, int] = {}
+    citations = []
+    for original in referenced:
+        index = original - 1
+        if index < 0 or index >= len(evidence):
+            continue
+        item = evidence[index]
+        normalized = url_to_normalized.get(item["url"])
+        if normalized is None:
+            normalized = len(citations) + 1
+            url_to_normalized[item["url"]] = normalized
+            citations.append(Citation(label=item["title"][:160], url=item["url"]))
+        original_to_normalized[original] = normalized
+
+    normalized_answer = _CITATION_REFERENCE.sub(
+        lambda match: (
+            f"[来源{original_to_normalized[int(match.group(1))]}]"
+            if int(match.group(1)) in original_to_normalized
+            else match.group(0)
+        ),
+        answer,
     )
-    return _compact_answer_markdown(
-        "本次运行已取得以下公开来源，但在完成充分综合与核验前触及安全边界，"
-        f"因此结果仅标记为部分完成（{reason}）：\n\n{sources}"
-    )
+    return normalized_answer, citations
 
 
 def _freshness_required(question: str) -> bool:
@@ -294,6 +346,132 @@ def _safe_error_code(exc: BaseException) -> str:
 
 def _normalize_query(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()[:300]
+
+
+def _explicit_output_contract(
+    question: str,
+) -> tuple[int | None, int | None, list[str]] | None:
+    """提取用户明确给出的条目数量与斜杠分隔字段。"""
+
+    field_match = _EXPLICIT_OUTPUT_FIELDS.search(question)
+    fields: list[str] = []
+    if field_match:
+        fields = [
+            re.sub(r"\s+", " ", value).strip(" *`：:")
+            for value in re.split(r"\s*[/／]\s*", field_match.group(1))
+        ]
+        fields = [value for value in fields if value]
+        if len(fields) < 2 or len(fields) > 8 or any(len(value) > 40 for value in fields):
+            fields = []
+
+    minimum: int | None = None
+    maximum: int | None = None
+    range_match = _REQUESTED_ITEM_RANGE.search(question)
+    if range_match:
+        minimum = int(range_match.group(1))
+        maximum = int(range_match.group(2))
+        if minimum < 1 or maximum < minimum or maximum > 10:
+            minimum = maximum = None
+    else:
+        count_match = _REQUESTED_ITEM_COUNT.search(question)
+        if count_match:
+            requested = int(count_match.group(1))
+            if 1 <= requested <= 10:
+                minimum = maximum = requested
+
+    if not fields and minimum is None:
+        return None
+    return minimum, maximum, fields
+
+
+def _explicit_output_instruction(question: str) -> str | None:
+    """把自然语言格式要求变成 Writer 可逐项核对的短模板。"""
+
+    contract = _explicit_output_contract(question)
+    requires_non_medical = bool(_NON_MEDICAL_REQUEST.search(question))
+    if not contract and not requires_non_medical:
+        return None
+    minimum, maximum, fields = contract or (None, None, [])
+    lines = ["输出格式硬约束："]
+    if minimum is not None and maximum is not None:
+        selected = 3 if minimum <= 3 <= maximum else minimum
+        lines.append(
+            f"- 输出 {selected} 个编号一级列表项（用户允许范围为 {minimum}–{maximum} 条）。"
+        )
+    if fields:
+        lines.append("- 每个编号项代表一条完整经验；禁止把不同字段拆成不同编号项。")
+        lines.append("- 每个编号项都必须按以下顺序逐行包含这些字面字段：")
+        for field in fields:
+            value = "[来源N]" if field == "来源链接" else "该条经验的证据化内容"
+            lines.append(f"  {field}：{value}")
+        lines.append("- 每条控制在约 180 个 Unicode 字符内，总回答不超过 680 字。")
+    if requires_non_medical:
+        lines.append("- 末尾必须保留一句：以上为个人使用体验，非医疗建议。")
+    return "\n".join(lines)
+
+
+def _explicit_output_issue(question: str, answer: str) -> str | None:
+    """确定性检查显式格式契约，防止 Verifier 随机漏判。"""
+
+    contract = _explicit_output_contract(question)
+    requires_non_medical = bool(_NON_MEDICAL_REQUEST.search(question))
+    if not contract and not requires_non_medical:
+        return None
+    minimum, maximum, fields = contract or (None, None, [])
+    markers = list(_NUMBERED_ANSWER_ITEM.finditer(answer))
+    blocks = [
+        answer[marker.end() : markers[index + 1].start() if index + 1 < len(markers) else len(answer)]
+        for index, marker in enumerate(markers)
+    ]
+    problems: list[str] = []
+    if minimum is not None and maximum is not None and not minimum <= len(blocks) <= maximum:
+        problems.append(f"编号条目必须为 {minimum}–{maximum} 条，当前为 {len(blocks)} 条")
+    if fields:
+        invalid_blocks = 0
+        missing_citations = 0
+        for block in blocks:
+            positions = [block.find(field) for field in fields]
+            if any(position < 0 for position in positions) or positions != sorted(positions):
+                invalid_blocks += 1
+                continue
+            if "来源链接" in fields:
+                source_position = positions[fields.index("来源链接")]
+                if not _CITATION_REFERENCE.search(block[source_position:]):
+                    missing_citations += 1
+        if not blocks or invalid_blocks:
+            problems.append(
+                "每个编号条目都必须按顺序包含“" + " / ".join(fields) + "”"
+            )
+        if missing_citations:
+            problems.append("每条“来源链接”后都必须使用真实 [来源N] 引用")
+    if requires_non_medical and not _NON_MEDICAL_DISCLAIMER.search(answer):
+        problems.append("末尾必须明确说明个人体验不构成医疗建议")
+    if not problems:
+        return None
+    return "输出格式不符合用户要求：" + "；".join(problems)
+
+
+def _presented_sources_satisfy_contract(
+    question: str,
+    current_evidence: list[Evidence],
+    presented_urls: set[str],
+    required_channels: list[str],
+    missing: str,
+) -> bool:
+    """已展示正文达到用户条目下限时，避免同义补搜触发平台风控。"""
+
+    contract = _explicit_output_contract(question)
+    if not contract or contract[0] is None or _CONFLICTING_EVIDENCE_GAP.search(missing):
+        return False
+    minimum = contract[0]
+    required = set(required_channels)
+    eligible = [
+        item
+        for item in current_evidence
+        if item["url"] in presented_urls and item["channel"] in required
+    ]
+    covered = {item["channel"] for item in eligible}
+    return len({item["url"] for item in eligible}) >= minimum and required <= covered
 
 
 def _search_key(query: str, channel: str) -> tuple[str, str]:
@@ -519,7 +697,7 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
             task_type="research",
             need_search=True,
             channels=channels,
-            summary="已识别只读搜索渠道",
+            summary="",
         )
         return {
             "intent": result.model_dump(),
@@ -680,6 +858,7 @@ async def _run_one_search(
     progress_emitted = False
     observed_result_count = 0
     observed_evidence_count = 0
+    announced_verifications: set[str] = set()
 
     def stream_progress(update: ChannelProgress) -> None:
         nonlocal observed_evidence_count, observed_result_count, progress_emitted
@@ -696,6 +875,36 @@ async def _run_one_search(
             resultCount=update.result_count,
             evidenceCount=update.evidence_count,
             source=update.source.model_dump(mode="json") if update.source else None,
+        ))
+
+    def stream_verification(update: ChannelVerificationUpdate) -> None:
+        registry = runtime.context.xiaohongshu_verifications
+        if registry is None:
+            raise RuntimeError("xiaohongshu verification registry unavailable")
+        registry.bind(
+            run_id=state["run_id"],
+            tool_call_id=tool_call_id,
+            challenge_id=update.challenge_id,
+            expires_at=update.expires_at,
+        )
+        if update.status == "pending":
+            event_type = (
+                "tool.verification.heartbeat"
+                if update.challenge_id in announced_verifications
+                else "tool.verification.required"
+            )
+            announced_verifications.add(update.challenge_id)
+        else:
+            event_type = "tool.verification.resolved"
+        writer(runtime_event(
+            event_type,
+            toolCallId=tool_call_id,
+            challengeId=update.challenge_id,
+            status=update.status,
+            expiresAt=update.expires_at,
+            retryAfterMs=update.retry_after_ms,
+            reasonCode=update.reason_code,
+            message=update.message,
         ))
 
     idempotency_key, input_hash = _idempotency_key(state, arguments)
@@ -817,11 +1026,23 @@ async def _run_one_search(
             status = "cached" if result.ok else "failed"
     else:
         try:
-            execution_options = (
+            verification_enabled = (
+                arguments.channel == "xiaohongshu"
+                and not xiaohongshu_public_only
+                and runtime.context.xiaohongshu_verifications is not None
+            )
+            execution_options: dict[str, Any] = (
                 {"xiaohongshu_public_only": True}
                 if xiaohongshu_public_only
                 else {}
             )
+            if verification_enabled:
+                execution_options.update({
+                    "verification_request_key": (
+                        f"{state['run_id']}:{tool_call_id}"
+                    ),
+                    "verification": stream_verification,
+                })
             if timeout_seconds is None:
                 result = await execute_search_tool(
                     arguments,
@@ -830,7 +1051,19 @@ async def _run_one_search(
                     **execution_options,
                 )
             else:
-                async with asyncio.timeout(max(0.001, timeout_seconds)):
+                verification_grace = (
+                    runtime.context.config.search.channels.xiaohongshu.verification_timeout_ms
+                    / 1000
+                    if verification_enabled
+                    else 0.0
+                )
+                async with asyncio.timeout(
+                    max(
+                        0.001,
+                        timeout_seconds
+                        + (verification_grace + 10 if verification_enabled else 0),
+                    )
+                ):
                     result = await execute_search_tool(
                         arguments,
                         runtime.context.config,
@@ -957,6 +1190,9 @@ async def _run_one_search(
                 ))
                 status = "unknown"
 
+    if decision.action == "cached" and result.interaction_wait_ms:
+        result = result.model_copy(update={"interaction_wait_ms": 0})
+
     if result.ok and not progress_emitted:
         for result_count in range(1, len(result.results) + 1):
             stream_progress(ChannelProgress(
@@ -1059,6 +1295,12 @@ _XIAOHONGSHU_CIRCUIT_CODES = frozenset({
     "MCP_UNAVAILABLE",
     "MCP_OUTPUT_INVALID",
     "MCP_CIRCUIT_OPEN",
+    "ACCOUNT_MISMATCH",
+    "VERIFICATION_CANCELLED",
+    "VERIFICATION_FAILED",
+    "VERIFICATION_RETRY_FAILED",
+    "VERIFICATION_TIMEOUT",
+    "VERIFICATION_UNAVAILABLE",
 })
 
 
@@ -1249,12 +1491,20 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             evidence.append(item)
 
     executed_tool_calls = len(indexed_results)
+    interaction_wait_seconds = sum(
+        result.interaction_wait_ms
+        for _tool_call_id, result, _trace in indexed_results.values()
+    ) / 1000
     gained = len(evidence) - len(state.get("evidence") or [])
     return {
         "candidates": candidates,
         "evidence": evidence,
         "tool_traces": list(state.get("tool_traces") or []) + traces,
         "tool_calls": state.get("tool_calls", 0) + executed_tool_calls,
+        "external_wait_seconds": (
+            float(state.get("external_wait_seconds") or 0.0)
+            + interaction_wait_seconds
+        ),
         "pending_searches": [],
         "pending_queries": [],
         "stop_reason": state.get("stop_reason") or projected_limit,
@@ -1351,7 +1601,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             missing="证据评估未返回有效结构，交由后续核验收口",
             extra_searches=[],
             source_presentations=[],
-            summary="证据评估将由后续核验收口",
+            summary="",
         )
     extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
     extra = [item["query"] for item in extra_searches]
@@ -1452,6 +1702,17 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         except StructuredOutputError as exc:
             usages.append(exc.usage)
             break
+    contract_sufficient = _presented_sources_satisfy_contract(
+        state["question"],
+        current_evidence,
+        presented_urls,
+        required_channels,
+        result.missing,
+    )
+    if contract_sufficient:
+        sufficient = True
+        extra_searches = []
+        extra = []
     writer = get_stream_writer()
     for tool_call_id, presentations in presentations_by_call.items():
         for presentation in presentations:
@@ -1459,6 +1720,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
                 "tool.presented",
                 toolCallId=tool_call_id,
                 sources=[presentation],
+                presentationSource="model",
             ))
     stop_reason = state.get("stop_reason")
     if not sufficient:
@@ -1474,7 +1736,7 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         "pending_queries": extra,
         "query_channels": {**(state.get("query_channels") or {}), **extra_channels},
         "replan_required": replan_required,
-        "verification_issue": result.missing,
+        "verification_issue": "" if contract_sufficient else result.missing,
         "stop_reason": stop_reason,
         **_structured_usage_patch(state, _sum_usage(usages)),
         "steps": _step(
@@ -1484,7 +1746,10 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             (
                 "structured_output_invalid"
                 if structured_failed
-                else f"sufficient={sufficient} extra_searches={len(extra_searches)}"
+                else (
+                    f"sufficient={sufficient} extra_searches={len(extra_searches)} "
+                    f"contract_sufficient={contract_sufficient}"
+                )
             ),
         ),
     }
@@ -1492,17 +1757,12 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
 
 async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
     evidence = state.get("evidence") or []
-    if state.get("need_search") and not evidence:
-        return {
-            "answer": "本次搜索没有取得可核验的公开来源，因此我不能可靠回答这个时效性问题。你可以稍后重试，或提供希望优先核验的官方来源。",
-            "repair_count": state.get("repair_count", 0),
-            "steps": _step("compose", "deterministic", None, "search_required_without_evidence"),
-        }
-
     limit = budget_reason(state, reserve_model_calls=1)
     if limit:
         return {
-            "answer": _safe_partial_answer(state, limit),
+            "answer": None,
+            "answer_source": "none",
+            "answer_model_calls": 0,
             "repair_count": state.get("repair_count", 0),
             "verification_passed": False,
             "verification_action": "",
@@ -1527,9 +1787,23 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             f"\n渠道证据覆盖：{json.dumps({'requiredChannels': required_channels, 'evidenceChannels': evidence_channels, 'missingChannels': missing_channels}, ensure_ascii=False)}"
             f"\n\n已读取来源：\n{digest}"
         )
+    elif state.get("need_search"):
+        required_channels, evidence_channels, missing_channels = (
+            _verification_channel_coverage(state)
+        )
+        system = DEGRADED_WRITER_PROMPT
+        human = (
+            f"用户问题：{state['question']}"
+            f"\n渠道证据覆盖：{json.dumps({'requiredChannels': required_channels, 'evidenceChannels': evidence_channels, 'missingChannels': missing_channels}, ensure_ascii=False)}"
+            f"\n真实工具反馈：{json.dumps(_tool_feedback(state), ensure_ascii=False)}"
+            f"\n停止原因：{state.get('stop_reason') or 'NO_VERIFIED_EVIDENCE'}"
+        )
     else:
         system = DIRECT_WRITER_PROMPT
         human = f"会话上下文：\n{state.get('conversation_context') or '无'}\n\n用户问题：{state['question']}"
+    output_instruction = _explicit_output_instruction(state["question"])
+    if output_instruction and (evidence or not state.get("need_search")):
+        human += f"\n\n{output_instruction}"
     if state.get("verification_action") == "rewrite" and state.get("verification_issue"):
         human += f"\n\n上一轮核验问题（必须修复）：{state['verification_issue']}"
 
@@ -1544,7 +1818,9 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     except StructuredOutputError as exc:
         stop_reason = state.get("stop_reason") or "OUTPUT_INVALID"
         return {
-            "answer": _safe_partial_answer(state, stop_reason),
+            "answer": None,
+            "answer_source": "none",
+            "answer_model_calls": 0,
             "repair_count": state.get("repair_count", 0),
             "verification_passed": False,
             "verification_action": "",
@@ -1561,6 +1837,8 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     answer = _compact_answer_markdown(result.answer_markdown)
     return {
         "answer": answer,
+        "answer_source": "model",
+        "answer_model_calls": usage.attempts,
         "repair_count": state.get("repair_count", 0) + (1 if repairing else 0),
         "verification_passed": False,
         "verification_action": "",
@@ -1581,6 +1859,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
     required_channels, evidence_channels, missing_channels = (
         _verification_channel_coverage(state)
     )
+    format_issue = _explicit_output_issue(state["question"], answer)
     if not state.get("need_search"):
         return {
             "verification_passed": False,
@@ -1650,7 +1929,15 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
             + "、".join(missing_channels)
         )
         issue = "；".join(value for value in (coverage_issue, issue) if value)
-    extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
+    elif format_issue and action != "research_more":
+        action = "rewrite"
+        passed = False
+        issue = "；".join(value for value in (format_issue, issue) if value)
+    extra_searches = (
+        _fresh_follow_up_searches(state, result.extra_searches)[:2]
+        if action == "research_more"
+        else []
+    )
     extra = [item["query"] for item in extra_searches]
     stop_reason = state.get("stop_reason")
     soft_search_stop = stop_reason in {"MAX_ITERATIONS", "NO_PROGRESS"}
@@ -1676,6 +1963,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         not passed and action == "research_more" and not stop_reason
     )
     extra_channels = {item["query"]: item["channel"] for item in extra_searches}
+    public_summary = _effective_process_text(result.summary) if coverage_compliant else None
     return {
         "verification_passed": passed,
         "verification_action": action,
@@ -1689,7 +1977,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         "steps": _step(
             "verify",
             "model",
-            _effective_process_text(result.summary) if coverage_compliant else None,
+            public_summary,
             (
                 f"passed={passed} action={action} "
                 f"required_channels={required_channels} "
@@ -1711,14 +1999,6 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             reason = "SEARCH_UNAVAILABLE"
         else:
             reason = "VERIFICATION_INCOMPLETE"
-
-    citations: list[Citation] = []
-    seen: set[str] = set()
-    for item in state.get("evidence") or []:
-        if item["url"] in seen:
-            continue
-        seen.add(item["url"])
-        citations.append(Citation(label=item["title"][:160], url=item["url"]))
 
     # 只有以 VERIFIED 结束的搜索答案才能称为已完成核验或进入长期证据记忆。
     # 工具、时间或模型预算可能在 Verifier 之后耗尽；这时旧状态中的一次通过
@@ -1763,17 +2043,21 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
                 ))
 
     response_status = "completed" if reason in {"VERIFIED", "DIRECT_COMPLETED"} else "partial"
-    answer = state.get("answer") or _safe_partial_answer(state, reason)
-    _, _, missing_channels = _verification_channel_coverage(state)
-    if missing_channels and not verification_passed:
-        answer = _safe_partial_answer(
-            state,
-            "MISSING_CHANNEL_EVIDENCE:" + ",".join(missing_channels),
-        )
+    answer_model_calls = int(state.get("answer_model_calls") or 0)
+    answer = (
+        state.get("answer")
+        if state.get("answer_source") == "model" and answer_model_calls > 0
+        else None
+    )
+    citations: list[Citation] = []
+    if answer:
+        answer, citations = _answer_citations(answer, state.get("evidence") or [])
     return {
         "stop_reason": reason,
         "citations": citations,
         "answer": answer,
+        "answer_source": "model" if answer else "none",
+        "answer_model_calls": answer_model_calls if answer else 0,
         "verification_passed": verification_passed,
         "response_status": response_status,
         "steps": _step("finalize", "deterministic", None, f"stop_reason={reason}"),

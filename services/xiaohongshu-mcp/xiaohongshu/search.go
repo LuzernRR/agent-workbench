@@ -23,6 +23,75 @@ type SearchResult struct {
 
 const searchReadTimeout = 12 * time.Second
 
+const (
+	searchStateWaitTimeout    = 8 * time.Second
+	searchStatePollInterval   = 350 * time.Millisecond
+	searchStateEvalTimeout    = 900 * time.Millisecond
+	searchDiagnosticAfter     = 4 * time.Second
+	searchContextSafetyMargin = 1200 * time.Millisecond
+)
+
+type searchPageSnapshot struct {
+	State           string   `json:"state"`
+	Path            string   `json:"path"`
+	ReadyState      string   `json:"readyState"`
+	HasInitialState bool     `json:"hasInitialState"`
+	HasSearchState  bool     `json:"hasSearchState"`
+	FeedCount       int      `json:"feedCount"`
+	FeedKeys        []string `json:"feedKeys"`
+	ExploreLinks    int      `json:"exploreLinks"`
+	RateLimited     bool     `json:"rateLimited"`
+	Empty           bool     `json:"empty"`
+	LoginVisible    bool     `json:"loginVisible"`
+}
+
+const searchPageSnapshotJS = `() => {
+	const unwrap = (candidate) => {
+		if (!candidate || typeof candidate !== "object") return candidate;
+		if (candidate.value !== undefined) return candidate.value;
+		if (candidate._value !== undefined) return candidate._value;
+		if (candidate._rawValue !== undefined) return candidate._rawValue;
+		return candidate;
+	};
+	const feedsContainer = window.__INITIAL_STATE__?.search?.feeds;
+	const feeds = unwrap(feedsContainer);
+	const rawUser = window.__INITIAL_STATE__?.user?.userInfo;
+	const user = unwrap(rawUser);
+	const text = document.body?.innerText || "";
+	const loginVisible = Boolean(document.querySelector(
+		'.login-container, [class*="login-container"], [class*="login-modal"]'
+	));
+	const rateLimited = /操作太快|请求过于频繁|访问频繁|稍后再试/.test(text);
+	const empty = /暂无搜索结果|没有找到相关笔记|未找到相关内容/.test(text);
+	let state = "";
+	if (window.location.pathname.startsWith("/website-login/captcha")) {
+		state = "captcha";
+	} else if (Array.isArray(feeds) && feeds.length > 0) {
+		state = "ready";
+	} else if (user?.guest === true || loginVisible) {
+		state = "logged_out";
+	} else if (rateLimited) {
+		state = "rate_limited";
+	} else if (empty) {
+		state = "empty";
+	}
+	return JSON.stringify({
+		state,
+		path: window.location.pathname,
+		readyState: document.readyState,
+		hasInitialState: Boolean(window.__INITIAL_STATE__),
+		hasSearchState: Boolean(window.__INITIAL_STATE__?.search),
+		feedCount: Array.isArray(feeds) ? feeds.length : -1,
+		feedKeys: feedsContainer && typeof feedsContainer === "object"
+			? Object.keys(feedsContainer).slice(0, 12)
+			: [],
+		exploreLinks: document.querySelectorAll('a[href*="/explore/"]').length,
+		rateLimited,
+		empty,
+		loginVisible,
+	});
+}`
+
 // FilterOption 筛选选项结构体
 type FilterOption struct {
 	SortBy      string `json:"sort_by,omitempty" jsonschema:"排序依据: 综合|最新|最多点赞|最多评论|最多收藏,默认为'综合'"`
@@ -93,6 +162,113 @@ func NewSearchAction(page *rod.Page) *SearchAction {
 	return &SearchAction{page: page}
 }
 
+func readSearchPageSnapshot(page *rod.Page) (searchPageSnapshot, error) {
+	var snapshot searchPageSnapshot
+	evaluated, err := page.Timeout(searchStateEvalTimeout).Eval(searchPageSnapshotJS)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := json.Unmarshal([]byte(evaluated.Value.String()), &snapshot); err != nil {
+		return snapshot, fmt.Errorf("解析搜索页安全状态失败: %w", err)
+	}
+	return snapshot, nil
+}
+
+func logSearchPageSnapshot(stage string, snapshot searchPageSnapshot, evalFailed bool) {
+	// 诊断只包含路径、布尔状态、键名和数量；不记录关键词、正文、URL 查询串、
+	// Cookie 或 xsec_token。
+	logrus.WithFields(logrus.Fields{
+		"stage":           stage,
+		"path":            snapshot.Path,
+		"readyState":      snapshot.ReadyState,
+		"hasInitialState": snapshot.HasInitialState,
+		"hasSearchState":  snapshot.HasSearchState,
+		"feedCount":       snapshot.FeedCount,
+		"feedKeys":        snapshot.FeedKeys,
+		"exploreLinks":    snapshot.ExploreLinks,
+		"rateLimited":     snapshot.RateLimited,
+		"empty":           snapshot.Empty,
+		"loginVisible":    snapshot.LoginVisible,
+		"evalFailed":      evalFailed,
+	}).Info("搜索页安全诊断")
+}
+
+func waitForSearchPageState(
+	ctx context.Context,
+	evaluate func() (searchPageSnapshot, error),
+	timeout time.Duration,
+	interval time.Duration,
+) (searchPageSnapshot, error) {
+	startedAt := time.Now()
+	deadline := startedAt.Add(timeout)
+	nextDiagnostic := startedAt.Add(searchDiagnosticAfter)
+	diagnosticLogged := false
+	var last searchPageSnapshot
+	var lastEvalErr error
+
+	for {
+		if err := ctx.Err(); err != nil {
+			logSearchPageSnapshot("context_done", last, lastEvalErr != nil)
+			return last, err
+		}
+
+		snapshot, err := evaluate()
+		if err == nil {
+			last = snapshot
+			lastEvalErr = nil
+			if snapshot.State != "" {
+				return snapshot, nil
+			}
+		} else {
+			// renderer 短暂繁忙或一次 CDP 读取超时不应立刻丢弃本次搜索；在总
+			// 预算内继续轮询，最终仍通过结构化超时/不可用错误回收会话。
+			lastEvalErr = err
+		}
+
+		now := time.Now()
+		if !diagnosticLogged && !now.Before(nextDiagnostic) {
+			logSearchPageSnapshot("waiting", last, lastEvalErr != nil)
+			diagnosticLogged = true
+		}
+		if !now.Before(deadline) {
+			logSearchPageSnapshot("final", last, lastEvalErr != nil)
+			if lastEvalErr != nil {
+				return last, fmt.Errorf("读取搜索页状态失败: %w", lastEvalErr)
+			}
+			return last, fmt.Errorf("等待搜索结果超时")
+		}
+
+		pause := interval
+		if remaining := time.Until(deadline); pause > remaining {
+			pause = remaining
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			logSearchPageSnapshot("context_done", last, lastEvalErr != nil)
+			return last, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func searchStateWaitBudget(ctx context.Context) time.Duration {
+	budget := searchStateWaitTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline) - searchContextSafetyMargin
+		if remaining < budget {
+			budget = remaining
+		}
+	}
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
 	// 先校验筛选取值，必须在导航之前——写错的值不该先向平台发一次请求再报错。
 	pending, err := collectFilters(filters)
@@ -109,35 +285,35 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		return nil, fmt.Errorf("打开搜索页失败: %w", err)
 	}
 	// 搜索页有持续的埋点和推荐请求，等待整个页面进入 network-idle 会把
-	// 已经到达的搜索数据误判为超时。这里只等待本次读取真正依赖的 feeds
-	// 状态；若平台跳转到安全验证则立即返回，让 LangGraph 切换公开/Web
-	// 策略，而不是在验证码页面空等 30 秒。
-	if err := rod.Try(func() {
-		page.Timeout(10 * time.Second).MustWait(`() => {
-			if (window.location.pathname.startsWith("/website-login/captcha")) {
-				return true;
-			}
-			const feeds = window.__INITIAL_STATE__?.search?.feeds;
-			if (!feeds) return false;
-			const value = feeds.value !== undefined
-				? feeds.value
-				: (feeds._value !== undefined ? feeds._value : feeds);
-			// 搜索页会先创建一个空的响应式数组，再异步写入结果。只判断字段
-			// 存在会在空数组阶段立即返回，令调用方误报“搜索成功但 0 条”。
-			return Array.isArray(value) && value.length > 0;
-		}`)
-	}); err != nil {
-		if searchCtx.Err() != nil {
-			return nil, searchCtx.Err()
-		}
-		return nil, fmt.Errorf("等待搜索结果超时: %w", err)
+	// 已经到达的搜索数据误判为超时。主动轮询只读安全状态，并在总 context
+	// 失效前保留诊断时间，这样既能快速识别平台限制，也不会在超时后再访问
+	// 已经不可用的 renderer。
+	waitBudget := searchStateWaitBudget(searchCtx)
+	if waitBudget <= 0 {
+		return nil, context.DeadlineExceeded
 	}
-	captcha, err := page.Eval(`() => window.location.pathname.startsWith("/website-login/captcha")`)
+	snapshot, err := waitForSearchPageState(
+		searchCtx,
+		func() (searchPageSnapshot, error) { return readSearchPageSnapshot(page) },
+		waitBudget,
+		searchStatePollInterval,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("读取搜索页状态失败: %w", err)
+		return nil, err
 	}
-	if captcha.Value.Bool() {
+	switch snapshot.State {
+	case "captcha":
 		return nil, fmt.Errorf("小红书要求安全验证")
+	case "logged_out":
+		return nil, fmt.Errorf("小红书未登录")
+	case "rate_limited":
+		return nil, fmt.Errorf("小红书请求过于频繁，请稍后再试")
+	case "empty":
+		return nil, errors.ErrNoFeeds
+	case "ready":
+		// 继续读取结构化 feeds。
+	default:
+		return nil, fmt.Errorf("搜索页状态不可用")
 	}
 
 	if len(pending) > 0 {
@@ -177,7 +353,9 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			const feeds = window.__INITIAL_STATE__.search.feeds;
 			const feedsData = feeds.value !== undefined
 				? feeds.value
-				: (feeds._value !== undefined ? feeds._value : feeds);
+				: (feeds._value !== undefined
+					? feeds._value
+					: (feeds._rawValue !== undefined ? feeds._rawValue : feeds));
 			if (feedsData) {
 				return JSON.stringify(feedsData);
 			}
@@ -205,7 +383,11 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 const feedIDsJS = `() => {
 	const f = window.__INITIAL_STATE__?.search?.feeds;
 	const v = f
-		? (f.value !== undefined ? f.value : (f._value !== undefined ? f._value : f))
+		? (f.value !== undefined
+			? f.value
+			: (f._value !== undefined
+				? f._value
+				: (f._rawValue !== undefined ? f._rawValue : f)))
 		: null;
 	return v ? v.map(x => x.id).join(",") : "";
 }`

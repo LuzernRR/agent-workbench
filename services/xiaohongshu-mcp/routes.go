@@ -43,6 +43,10 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 	{
 		api.GET("/login/status", appServer.checkLoginStatusHandler)
 		api.GET("/login/qrcode", appServer.getLoginQrcodeHandler)
+		api.POST("/login/verification", appServer.startLoginVerificationHandler)
+		api.GET("/login/verification/:challenge_id/status", appServer.loginVerificationStatusHandler)
+		api.GET("/login/verification/:challenge_id/qrcode", appServer.loginVerificationQRCodeHandler)
+		api.DELETE("/login/verification/:challenge_id", appServer.cancelLoginVerificationHandler)
 		api.GET("/feeds/search", appServer.searchFeedsHandler)
 		api.POST("/feeds/search", appServer.searchFeedsHandler)
 		api.POST("/feeds/detail", appServer.getFeedDetailHandler)

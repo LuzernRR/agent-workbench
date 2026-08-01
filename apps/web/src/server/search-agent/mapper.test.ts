@@ -29,12 +29,12 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("每个 node.completed 按发生时间创建独立思考原子，交给前端仅合并相邻原子", () => {
-    const planned = mapSearchAgentEvent(source({ type: "node.completed", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 1, durationMs: 10, publicSummary: "将搜索官方规范与当前示例" }), "run_one");
-    const replanned = mapSearchAgentEvent(source({ type: "node.completed", node: "plan_research", nodeRunId: "plan_cccccccccccccccccccccccccccccccc", agent: "planner", iteration: 2, durationMs: 12, publicSummary: "补充检索安装与兼容信息" }), "run_one");
-    const reflected = mapSearchAgentEvent(source({ type: "node.completed", node: "reflect", nodeRunId: "reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", agent: "reflector", iteration: 1, durationMs: 20, publicSummary: "官方来源已覆盖核心用法" }), "run_one");
+    const planned = mapSearchAgentEvent(source({ type: "node.completed", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 1, durationMs: 10, publicSummary: "将搜索官方规范与当前示例", publicSummarySource: "model" }), "run_one");
+    const replanned = mapSearchAgentEvent(source({ type: "node.completed", node: "plan_research", nodeRunId: "plan_cccccccccccccccccccccccccccccccc", agent: "planner", iteration: 2, durationMs: 12, publicSummary: "补充检索安装与兼容信息", publicSummarySource: "model" }), "run_one");
+    const reflected = mapSearchAgentEvent(source({ type: "node.completed", node: "reflect", nodeRunId: "reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", agent: "reflector", iteration: 1, durationMs: 20, publicSummary: "官方来源已覆盖核心用法", publicSummarySource: "model" }), "run_one");
     expect(planned.events).toHaveLength(3);
     expect(planned.events[0].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", activityKind: "thinking" });
-    expect(planned.events[1]).toMatchObject({ type: "thinking.delta", payload: { thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", delta: "将搜索官方规范与当前示例", agent: "planner" } });
+    expect(planned.events[1]).toMatchObject({ type: "thinking.delta", payload: { thinkingId: "thinking:run_one:plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", delta: "将搜索官方规范与当前示例", publicSummarySource: "model", agent: "planner" } });
     expect(replanned.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:plan_cccccccccccccccccccccccccccccccc", delta: "补充检索安装与兼容信息", agent: "planner" });
     expect(reflected.events[1].payload).toMatchObject({ thinkingId: "thinking:run_one:reflect_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", delta: "官方来源已覆盖核心用法", agent: "reflector" });
     expect(planned.events[1].payload.thinkingId).not.toBe(replanned.events[1].payload.thinkingId);
@@ -42,7 +42,7 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("搜索查询只由真实工具卡展示，不创建运行结束后会陈旧的重复计划栏", () => {
-    const projection = mapSearchAgentEvent(source({ type: "plan.updated", iteration: 1, queries: ["CC Switch 定义", "CC Switch 原理"] }), "run_one");
+    const projection = mapSearchAgentEvent(source({ type: "plan.updated", iteration: 1, queries: ["CC Switch 定义", "CC Switch 原理"], planSource: "model" }), "run_one");
     expect(projection.events).toEqual([]);
   });
 
@@ -114,10 +114,77 @@ describe("Search Agent v1 白名单投影", () => {
     expect(JSON.stringify(evidence)).not.toContain("不进入持久事件");
   });
 
+  it("把工具账号挑战投影为可点击验证链接，并忽略轮询心跳", () => {
+    const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+    const required = mapSearchAgentEvent(source({
+      type: "tool.verification.required",
+      toolCallId: "call_xhs",
+      challengeId,
+      status: "pending",
+      expiresAt: "2026-07-28T00:04:00Z",
+      retryAfterMs: 2000,
+      reasonCode: null,
+      message: "等待使用小红书 App 扫码验证工具账号"
+    }), "run_one");
+    expect(required.events).toEqual([
+      {
+        type: "tool.updated",
+        payload: expect.objectContaining({
+          toolCallId: "call_xhs",
+          status: "waiting",
+          reasonCode: "CAPTCHA_REQUIRED",
+          verificationStatus: "pending",
+          verificationHref: `/workbench/verify/xiaohongshu/run_one/${challengeId}`
+        })
+      },
+      {
+        type: "run.status",
+        payload: expect.objectContaining({ status: "waiting", reasonCode: "CAPTCHA_REQUIRED" })
+      }
+    ]);
+
+    const heartbeat = mapSearchAgentEvent(source({
+      type: "tool.verification.heartbeat",
+      toolCallId: "call_xhs",
+      challengeId,
+      status: "pending",
+      expiresAt: "2026-07-28T00:04:00Z",
+      retryAfterMs: 2000,
+      reasonCode: null,
+      message: "等待使用小红书 App 扫码验证工具账号"
+    }), "run_one");
+    expect(heartbeat.events).toEqual([]);
+
+    const resolved = mapSearchAgentEvent(source({
+      type: "tool.verification.resolved",
+      toolCallId: "call_xhs",
+      challengeId,
+      status: "succeeded",
+      expiresAt: "2026-07-28T00:04:00Z",
+      retryAfterMs: 2000,
+      reasonCode: null,
+      message: "小红书工具账号验证成功"
+    }), "run_one");
+    expect(resolved.events[0]).toEqual(expect.objectContaining({
+      type: "tool.updated",
+      payload: expect.objectContaining({
+        status: "running",
+        clearReasonCode: true,
+        verificationStatus: "succeeded"
+      })
+    }));
+    expect(resolved.events[1]).toEqual(expect.objectContaining({
+      type: "run.status",
+      payload: expect.objectContaining({ status: "running" })
+    }));
+    expect(JSON.stringify(required)).not.toMatch(/base64|xiaohongshu-mcp:18060|cookie/iu);
+  });
+
   it("把 Reflector 的结构化来源说明映射到原工具行", () => {
     const projection = mapSearchAgentEvent(source({
       type: "tool.presented",
       toolCallId: "call_one",
+      presentationSource: "model",
       sources: [{ url: "https://example.com/source", text: "该来源聚焦状态图中的工具循环。" }]
     }));
     expect(projection.events).toEqual([
@@ -134,7 +201,8 @@ describe("Search Agent v1 白名单投影", () => {
         payload: expect.objectContaining({
           toolCallId: "call_one",
           url: "https://example.com/source",
-          delta: "该来源聚焦状态图中的工具循环。"
+          delta: "该来源聚焦状态图中的工具循环。",
+          presentationSource: "model"
         })
       },
       {
@@ -159,6 +227,7 @@ describe("Search Agent v1 白名单投影", () => {
       const projection = mapSearchAgentEvent(source({
         type: "tool.presented",
         toolCallId: "call_one",
+        presentationSource: "model",
         sources: [{ url: "https://example.com/source", text }]
       }));
       expect(projection.events).toEqual([]);
@@ -166,8 +235,8 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("诚实映射 partial、failed、unknown 与 stopped", () => {
-    const partial = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "证据不足的回答", promptVersion: "2026-07-28.v2", responseStatus: "partial", citations: [], verificationPassed: false, stopReason: "SEARCH_UNAVAILABLE", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 2, toolCalls: 1, evidenceCount: 0 }));
-    expect(partial.terminal).toEqual(expect.objectContaining({ kind: "completed", remember: false, payload: expect.objectContaining({ promptVersion: "2026-07-28.v2", partial: true, responseStatus: "partial" }) }));
+    const partial = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "证据不足的回答", answerSource: "model", answerModelCalls: 1, promptVersion: "2026-07-28.v2", responseStatus: "partial", citations: [], verificationPassed: false, stopReason: "SEARCH_UNAVAILABLE", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 2, toolCalls: 1, evidenceCount: 0 }));
+    expect(partial.terminal).toEqual(expect.objectContaining({ kind: "completed", remember: false, payload: expect.objectContaining({ promptVersion: "2026-07-28.v2", partial: true, responseStatus: "partial", answerSource: "model", answerModelCalls: 1 }) }));
 
     const unknown = mapSearchAgentEvent(source({ type: "tool.unknown", toolCallId: "call_unknown", toolName: "web_search", query: "查询", channel: "web", reasonCode: "OUTCOME_UNKNOWN" }));
     expect(unknown.events[0]).toEqual(expect.objectContaining({ type: "tool.updated", payload: expect.objectContaining({ status: "unknown" }) }));
@@ -177,7 +246,7 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("direct completed 不误报外部证据核验", () => {
-    const direct = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "直接回答", promptVersion: "2026-07-28.v2", responseStatus: "completed", citations: [], verificationPassed: false, stopReason: "DIRECT_COMPLETED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 2, toolCalls: 0, evidenceCount: 0 }));
+    const direct = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "直接回答", answerSource: "model", answerModelCalls: 1, promptVersion: "2026-07-28.v2", responseStatus: "completed", citations: [], verificationPassed: false, stopReason: "DIRECT_COMPLETED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 2, toolCalls: 0, evidenceCount: 0 }));
     expect(direct.terminal).toEqual(expect.objectContaining({
       kind: "completed",
       remember: false,
@@ -186,7 +255,7 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("verification.completed 创建独立核验活动，不混入思考", () => {
-    const projection = mapSearchAgentEvent(source({ type: "verification.completed", nodeRunId: "verify_cccccccccccccccccccccccccccccccc", passed: false, action: "rewrite", publicSummary: "引用格式需要修正" }));
+    const projection = mapSearchAgentEvent(source({ type: "verification.completed", nodeRunId: "verify_cccccccccccccccccccccccccccccccc", passed: false, action: "rewrite", publicSummary: "引用格式需要修正", publicSummarySource: "model" }));
     expect(projection.events).toHaveLength(3);
     expect(projection.events[0]).toEqual(expect.objectContaining({
       type: "thinking.started",
@@ -197,12 +266,12 @@ describe("Search Agent v1 白名单投影", () => {
     }));
     expect(projection.events[1]).toEqual(expect.objectContaining({
       type: "thinking.delta",
-      payload: expect.objectContaining({ delta: "引用格式需要修正", agent: "verifier", node: "verify" })
+      payload: expect.objectContaining({ delta: "引用格式需要修正", publicSummarySource: "model", agent: "verifier", node: "verify" })
     }));
   });
 
   it("node.completed 的 verify 摘要由 verification.completed 唯一投影", () => {
-    const projection = mapSearchAgentEvent(source({ type: "node.completed", node: "verify", nodeRunId: "verify_cccccccccccccccccccccccccccccccc", agent: "verifier", iteration: 1, durationMs: 20, publicSummary: "引用格式需要修正" }));
+    const projection = mapSearchAgentEvent(source({ type: "node.completed", node: "verify", nodeRunId: "verify_cccccccccccccccccccccccccccccccc", agent: "verifier", iteration: 1, durationMs: 20, publicSummary: "引用格式需要修正", publicSummarySource: "model" }));
     expect(projection.events).toEqual([]);
   });
 
@@ -212,7 +281,8 @@ describe("Search Agent v1 白名单投影", () => {
       nodeRunId: "verify_direct_dddddddddddddddddddddddddddddddd",
       passed: false,
       action: "pass",
-      publicSummary: null
+      publicSummary: null,
+      publicSummarySource: null
     }));
     expect(projection.events).toEqual([]);
   });

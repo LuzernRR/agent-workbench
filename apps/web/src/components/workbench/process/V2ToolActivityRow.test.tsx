@@ -43,6 +43,7 @@ describe("V2ToolActivityList", () => {
     expect(within(row).getByText("网页搜索")).toBeInTheDocument();
     expect(within(row).getByText("已完成")).toBeInTheDocument();
     expect(within(row).getByText("1 项")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /展开工具活动/u })).toHaveClass("workbench-disclosure-trigger");
 
     openTool("call_tool_1");
     expect(within(row).getByText("返回 1 个公开来源")).toBeInTheDocument();

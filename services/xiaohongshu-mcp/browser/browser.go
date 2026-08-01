@@ -86,13 +86,14 @@ func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
 		logrus.Infof("fingerprint seed pinned: %d", cfg.fingerprintSeed)
 	}
 
-	// 加载 cookies
+	// 所有工具浏览器都继承当前持久会话。安全验证必须复用触发风控的原浏览器，
+	// 不能另建匿名会话，否则拿到的不是工具账号的验证入口。
 	cookiePath := cookies.GetCookiesFilePath()
 	cookieLoader := cookies.NewLoadCookie(cookiePath)
 
 	if data, err := cookieLoader.LoadCookies(); err == nil {
 		opts = append(opts, headless_browser.WithCookies(string(data)))
-		logrus.Debugf("loaded cookies from filesuccessfully")
+		logrus.Debug("loaded cookies from file successfully")
 	} else {
 		logrus.Warnf("failed to load cookies: %v", err)
 	}

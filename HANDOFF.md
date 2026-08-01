@@ -1,5 +1,31 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #10 已获用户验收，执行受控收口）
+
+- 当前唯一活动功能为重新打开的
+  [#10](https://github.com/LuzernRR/agent-workbench/issues/10)“真实流式响应、端到端
+  延迟与小红书正文可靠性”，状态为 `ready`，`Execution Gate: allowed`。用户已于
+  2026-08-01 明确回复“通过，先不管小红书”，授权收口本 Issue 并连续进入后续 Agent
+  运行框架开发。
+- `xiaohongshu-mcp` `.5` 按 `runId:toolCallId` 复用触发 CAPTCHA 的原工具 page/browser，
+  Workbench 向拥有该 Run 的当前匿名 visitor 提供同源“立即验证”入口。二维码代理固定
+  为 `image/png` 与 `no-store`；Cookie、token、base64、内部地址和私有推理均不进入
+  事件账本、数据库、日志或 UI。
+- Tavily Provider 已支持有序 Key 池、进程内单调游标、凭据/限流/额度故障切换和有界
+  Provider 故障切换；所有 Key 仍只存在于 Git 忽略的 `config/*.local.json` 或服务端
+  环境变量中。本次收口不读取、不修改也不提交任何本地密钥配置。
+- 新鲜门禁：Go 全包测试/构建通过；Search Agent `202 passed`、Ruff、compileall；
+  Web `374 passed, 1 skipped`、typecheck、lint、production build；3110 Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。
+- 已滚动部署 `xiaohongshu-mcp` 与 Search Agent，Compose 七服务 healthy；3000、8080、
+  `https://luzern.cc.cd/workbench` 均为 200。公网真实运行
+  `run_3f55a761a0794dcf8eda1b728a2bae9b` 在 5.876 秒展示验证链接并返回 6166 字节有效
+  PNG，响应为 200/no-store，持久账本敏感模式扫描为 0。
+- 用户选择暂不执行工具账号人工扫码后的正文恢复验收，因此本记录不虚构“扫码恢复并
+  读取 3 条正文”的证据；该外部平台验证风险不再阻塞 #10 收口。完整记录见
+  `docs/development/2026-08-01-016-issue-10-tavily-key-rotation.md` 与
+  `docs/development/2026-08-01-017-issue-10-xhs-tool-session-verification.md`。
+
 ## 当前结论（2026-08-01，Issue #11 已获用户验收，执行受控收口）
 
 - 当前唯一活动功能是

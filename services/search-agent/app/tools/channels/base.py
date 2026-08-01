@@ -22,6 +22,14 @@ NextAction = Literal[
     "retry_later",
     "stop",
 ]
+VerificationStatus = Literal[
+    "pending",
+    "succeeded",
+    "expired",
+    "account_mismatch",
+    "failed",
+    "cancelled",
+]
 
 
 class StrictChannelModel(BaseModel):
@@ -98,6 +106,8 @@ def next_action_for_reason(reason_code: str | None) -> NextAction:
         "PROVIDER_UNAVAILABLE",
         "TIMEOUT",
         "RATE_LIMITED",
+        "VERIFICATION_RETRY_FAILED",
+        "VERIFICATION_UNAVAILABLE",
     }:
         return "retry_later"
     if code in {
@@ -108,6 +118,10 @@ def next_action_for_reason(reason_code: str | None) -> NextAction:
         "LEDGER_UNAVAILABLE",
         "LEDGER_SETTLEMENT_UNKNOWN",
         "OUTCOME_UNKNOWN",
+        "ACCOUNT_MISMATCH",
+        "VERIFICATION_CANCELLED",
+        "VERIFICATION_TIMEOUT",
+        "VERIFICATION_FAILED",
     }:
         return "stop"
     return "use_alternative_channel" if code else "none"
@@ -150,6 +164,7 @@ class ChannelOutcome(StrictChannelModel):
     error_code: str | None = None
     error_message: str | None = None
     resolution: ChannelResolution | None = None
+    interaction_wait_ms: int = Field(default=0, ge=0, le=600_000)
 
     @model_validator(mode="after")
     def populate_resolution(self) -> ChannelOutcome:
@@ -175,7 +190,22 @@ class ChannelProgress(StrictChannelModel):
     source: ChannelResult | None = None
 
 
+class ChannelVerificationUpdate(StrictChannelModel):
+    """安全验证的公开状态；绝不包含二维码、Cookie 或内部服务地址。"""
+
+    challenge_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    status: VerificationStatus
+    expires_at: str
+    retry_after_ms: int = Field(ge=100, le=10_000)
+    reason_code: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z0-9_]{1,80}$",
+    )
+    message: str = Field(min_length=1, max_length=300)
+
+
 ChannelProgressReporter = Callable[[ChannelProgress], None]
+ChannelVerificationReporter = Callable[[ChannelVerificationUpdate], None]
 
 
 def report_progress(

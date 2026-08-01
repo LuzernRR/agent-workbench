@@ -46,6 +46,7 @@ export type AgentEvent = {
 
 export type RunStatus = "idle" | "queued" | "running" | "waiting" | "completed" | "failed" | "stopped" | "reconnecting";
 export type ToolStatus = "preparing" | "running" | "waiting" | "completed" | "failed" | "stopped" | "unknown";
+export type ToolVerificationStatus = "pending" | "succeeded" | "expired" | "account_mismatch" | "failed" | "cancelled";
 
 export type ToolSource = {
   title: string;
@@ -124,6 +125,10 @@ export type ToolItem = {
   sourcePresentationActive?: boolean;
   cached?: boolean;
   retryable?: boolean;
+  verificationStatus?: ToolVerificationStatus;
+  verificationHref?: string;
+  verificationExpiresAt?: string;
+  verificationMessage?: string;
   input?: unknown;
   progress?: { current: number; total: number };
   output?: string;

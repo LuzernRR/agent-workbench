@@ -69,7 +69,8 @@ Apache-2.0 许可证。项目补丁只把搜索页的全局 network-idle 等待�
 路由返回 404；HTTP 与 MCP 工具 panic 均不返回或记录原始错误，导航日志不包含
 带签名 URL。完整基线和升级规则见
 `services/xiaohongshu-mcp/UPSTREAM.md`。
-当前项目部署版本为 `v2.2.6-agent-workbench.3`。
+当前项目部署版本为 `v2.2.6-agent-workbench.5`。安全验证入口复用触发风控的
+原工具会话，从当前 CAPTCHA 页读取二维码；不会打开普通小红书页面代替验证。
 
 ## 配置与生产约束
 

@@ -14,14 +14,15 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from app.config.agent import AgentConfig
 from app.tools.channels.base import (
@@ -29,6 +30,8 @@ from app.tools.channels.base import (
     ChannelOutcome,
     ChannelProgressReporter,
     ChannelResult,
+    ChannelVerificationReporter,
+    ChannelVerificationUpdate,
     SourceProvenance,
     channel_resolution,
     report_progress,
@@ -45,6 +48,8 @@ _MAX_DETAIL_TOTAL_SECONDS = 24.0
 _MIN_SUBSTANTIVE_DESCRIPTION_CHARS = 12
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,96}$")
 _SAFE_TOKEN_RE = re.compile(r"^[^\s]{8,4096}$")
+_VERIFICATION_REQUEST_KEY_RE = re.compile(r"^[A-Za-z0-9:_-]{8,240}$")
+_VERIFICATION_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _TOPIC_TAG_RE = re.compile(r"#[^#]{1,80}(?:\[话题\])?#")
 _SEARCH_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
     WeakKeyDictionary()
@@ -58,10 +63,38 @@ _FALLBACK_ERROR_CODES = {
     "MCP_OUTPUT_INVALID",
     "MCP_RATE_LIMITED",
 }
+_VERIFICATION_ERROR_CODES = {
+    "ACCOUNT_ID_UNAVAILABLE",
+    "ACCOUNT_MISMATCH",
+    "ACCOUNT_STATUS_UNAVAILABLE",
+    "INVALID_REQUEST",
+    "USER_CANCELLED",
+    "VERIFICATION_ACCOUNT_UNCONFIRMED",
+    "VERIFICATION_CANCELLED",
+    "VERIFICATION_FAILED",
+    "VERIFICATION_NOT_FOUND",
+    "VERIFICATION_QRCODE_GONE",
+    "VERIFICATION_QRCODE_INVALID",
+    "VERIFICATION_QRCODE_UNAVAILABLE",
+    "VERIFICATION_RETRY_FAILED",
+    "VERIFICATION_SAVE_FAILED",
+    "VERIFICATION_SESSION_UNAVAILABLE",
+    "VERIFICATION_TIMEOUT",
+    "VERIFICATION_UNAVAILABLE",
+}
+_KNOWN_MCP_ERROR_CODES = _FALLBACK_ERROR_CODES | _VERIFICATION_ERROR_CODES
+_DETAIL_CIRCUIT_ERROR_CODES = {
+    "AUTH_REQUIRED",
+    "CAPTCHA_REQUIRED",
+    "MCP_TIMEOUT",
+    "MCP_NETWORK_ERROR",
+    "MCP_RATE_LIMITED",
+    "MCP_UNAVAILABLE",
+}
 
 
 def _server_failure_code(response: httpx.Response) -> str:
-    """把受控 MCP 500 响应细分为稳定错误码，不泄露上游详情。"""
+    """把受控 MCP 错误响应细分为稳定错误码，不泄露上游详情。"""
 
     try:
         payload = response.json()
@@ -69,7 +102,7 @@ def _server_failure_code(response: httpx.Response) -> str:
         return "MCP_UNAVAILABLE"
     raw = _dict(payload)
     stable_code = _safe_text(raw.get("code"), 80).upper()
-    if stable_code in _FALLBACK_ERROR_CODES:
+    if stable_code in _KNOWN_MCP_ERROR_CODES:
         return stable_code
     detail = _safe_text(raw.get("details"), 500).casefold()
     if any(
@@ -130,6 +163,10 @@ class XiaohongshuMcpOperation(StrEnum):
     SEARCH_FEEDS = "search_feeds"
     FEED_DETAIL = "feed_detail"
     USER_PROFILE = "user_profile"
+    START_LOGIN_VERIFICATION = "start_login_verification"
+    LOGIN_VERIFICATION_STATUS = "login_verification_status"
+    LOGIN_VERIFICATION_QRCODE = "login_verification_qrcode"
+    CANCEL_LOGIN_VERIFICATION = "cancel_login_verification"
 
 
 _RETRYABLE_OPERATIONS = {
@@ -143,6 +180,22 @@ _READ_ONLY_ROUTES: dict[XiaohongshuMcpOperation, tuple[str, str]] = {
     XiaohongshuMcpOperation.SEARCH_FEEDS: ("POST", "/api/v1/feeds/search"),
     XiaohongshuMcpOperation.FEED_DETAIL: ("POST", "/api/v1/feeds/detail"),
     XiaohongshuMcpOperation.USER_PROFILE: ("POST", "/api/v1/user/profile"),
+    XiaohongshuMcpOperation.START_LOGIN_VERIFICATION: (
+        "POST",
+        "/api/v1/login/verification",
+    ),
+    XiaohongshuMcpOperation.LOGIN_VERIFICATION_STATUS: (
+        "GET",
+        "/api/v1/login/verification/{challenge_id}/status",
+    ),
+    XiaohongshuMcpOperation.LOGIN_VERIFICATION_QRCODE: (
+        "GET",
+        "/api/v1/login/verification/{challenge_id}/qrcode",
+    ),
+    XiaohongshuMcpOperation.CANCEL_LOGIN_VERIFICATION: (
+        "DELETE",
+        "/api/v1/login/verification/{challenge_id}",
+    ),
 }
 
 
@@ -174,6 +227,41 @@ class XiaohongshuLoginQrcode(StrictMcpModel):
     is_logged_in: bool
     timeout: str
     image: SecretStr | None = Field(default=None, exclude=True, repr=False)
+
+
+class XiaohongshuLoginVerification(StrictMcpModel):
+    challenge_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    status: Literal[
+        "pending",
+        "succeeded",
+        "expired",
+        "account_mismatch",
+        "failed",
+        "cancelled",
+    ]
+    expires_at: str
+    retry_after_ms: int = Field(ge=100, le=10_000)
+    reason_code: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z0-9_]{1,80}$",
+    )
+    message: str = Field(min_length=1, max_length=300)
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expires_at(cls, value: str) -> str:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("verification expiry requires timezone")
+        return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        safe = _safe_text(value, 300)
+        if not safe:
+            raise ValueError("verification message is empty")
+        return safe
 
 
 class XiaohongshuFeedCandidate(StrictMcpModel):
@@ -320,6 +408,7 @@ class XiaohongshuMcpClient:
         *,
         body: dict[str, Any] | None = None,
         timeout: httpx.Timeout | None = None,
+        challenge_id: str | None = None,
     ) -> Any:
         try:
             approved = XiaohongshuMcpOperation(operation)
@@ -335,6 +424,21 @@ class XiaohongshuMcpClient:
                 "小红书适配器拒绝非只读操作",
             )
         method, path = route
+        if "{challenge_id}" in path:
+            if (
+                challenge_id is None
+                or not _VERIFICATION_CHALLENGE_RE.fullmatch(challenge_id)
+            ):
+                raise XiaohongshuMcpPolicyError(
+                    "MCP_INPUT_INVALID",
+                    "小红书工具账号验证标识无效",
+                )
+            path = path.replace("{challenge_id}", challenge_id)
+        elif challenge_id is not None:
+            raise XiaohongshuMcpPolicyError(
+                "MCP_INPUT_INVALID",
+                "该小红书操作不接受验证标识",
+            )
         attempts = self.max_attempts if approved in _RETRYABLE_OPERATIONS else 1
         response: httpx.Response | None = None
         for attempt in range(attempts):
@@ -380,7 +484,7 @@ class XiaohongshuMcpClient:
 
             server_failure = (
                 _server_failure_code(response)
-                if response.status_code >= 500
+                if response.status_code >= 400
                 else ""
             )
             elapsed = time.monotonic() - attempt_started
@@ -419,20 +523,43 @@ class XiaohongshuMcpClient:
                 "小红书登录状态已失效，需要重新扫码",
             )
         if response.status_code >= 500:
-            code = _server_failure_code(response)
+            code = server_failure or "MCP_UNAVAILABLE"
             message = {
                 "CAPTCHA_REQUIRED": "小红书搜索需要安全验证",
                 "MCP_TIMEOUT": "小红书登录态搜索超时",
                 "MCP_NETWORK_ERROR": "小红书登录态搜索网络异常",
+                "ACCOUNT_STATUS_UNAVAILABLE": "暂时无法确认小红书工具账号",
+                "VERIFICATION_UNAVAILABLE": "小红书工具账号验证服务暂不可用",
+                "VERIFICATION_QRCODE_UNAVAILABLE": "无法生成小红书工具账号验证二维码",
             }.get(code, "小红书登录态服务读取失败")
             raise XiaohongshuMcpError(
                 code,
                 message,
             )
         if response.status_code >= 400:
+            code = (
+                server_failure
+                if server_failure in _KNOWN_MCP_ERROR_CODES
+                else "MCP_OUTPUT_INVALID"
+            )
+            message = {
+                "CAPTCHA_REQUIRED": "小红书搜索需要安全验证",
+                "MCP_TIMEOUT": "小红书登录态搜索超时",
+                "MCP_NETWORK_ERROR": "小红书登录态搜索网络异常",
+                "MCP_RATE_LIMITED": "小红书登录态搜索请求过于频繁",
+                "AUTH_REQUIRED": "小红书登录状态已失效，需要重新扫码",
+                "ACCOUNT_ID_UNAVAILABLE": "无法安全确认当前小红书工具账号",
+                "ACCOUNT_MISMATCH": "扫码账号与当前小红书工具账号不一致",
+                "USER_CANCELLED": "已取消小红书工具账号验证",
+                "VERIFICATION_NOT_FOUND": "小红书工具账号验证会话不存在",
+                "VERIFICATION_QRCODE_GONE": "小红书工具账号验证二维码已失效",
+                "VERIFICATION_SESSION_UNAVAILABLE": "触发安全验证的工具会话已失效",
+                "VERIFICATION_TIMEOUT": "小红书工具账号验证已超时",
+                "VERIFICATION_UNAVAILABLE": "小红书工具账号验证服务暂不可用",
+            }.get(code, f"小红书登录态服务拒绝只读请求（HTTP {response.status_code}）")
             raise XiaohongshuMcpError(
-                "MCP_OUTPUT_INVALID",
-                f"小红书登录态服务拒绝只读请求（HTTP {response.status_code}）",
+                code,
+                message,
             )
         try:
             payload = response.json()
@@ -447,6 +574,56 @@ class XiaohongshuMcpClient:
                 "小红书登录态服务返回结构无效",
             )
         return payload.get("data")
+
+    async def _request_verification_qrcode(self, challenge_id: str) -> bytes:
+        if not _VERIFICATION_CHALLENGE_RE.fullmatch(challenge_id):
+            raise XiaohongshuMcpPolicyError(
+                "MCP_INPUT_INVALID",
+                "小红书工具账号验证标识无效",
+            )
+        path = f"/api/v1/login/verification/{challenge_id}/qrcode"
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.origin,
+                timeout=self.timeout,
+                follow_redirects=False,
+                trust_env=False,
+                transport=self.transport,
+                headers={
+                    "Accept": "image/png",
+                    "User-Agent": "agent-workbench-search/0.2",
+                },
+            ) as client:
+                response = await client.get(path)
+        except httpx.TimeoutException as exc:
+            raise XiaohongshuMcpError(
+                "MCP_TIMEOUT",
+                "小红书工具账号验证二维码读取超时",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise XiaohongshuMcpError(
+                "MCP_UNAVAILABLE",
+                "小红书工具账号验证服务当前不可用",
+            ) from exc
+        if len(response.content) > _MAX_RESPONSE_BYTES:
+            raise XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书工具账号验证二维码超过大小上限",
+            )
+        if response.status_code >= 400:
+            code = _server_failure_code(response)
+            message = {
+                "VERIFICATION_NOT_FOUND": "小红书工具账号验证会话不存在",
+                "VERIFICATION_QRCODE_GONE": "小红书工具账号验证二维码已失效",
+            }.get(code, "小红书工具账号验证二维码不可用")
+            raise XiaohongshuMcpError(code or "MCP_UNAVAILABLE", message)
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "image/png" or len(response.content) < 8 or not response.content.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书工具账号验证二维码格式无效",
+            )
+        return bytes(response.content)
 
     async def check_login_status(self) -> XiaohongshuLoginStatus:
         data = await self._request(XiaohongshuMcpOperation.LOGIN_STATUS)
@@ -484,14 +661,77 @@ class XiaohongshuMcpClient:
             image=SecretStr(image) if image else None,
         )
 
+    async def start_login_verification(
+        self,
+        request_key: str,
+    ) -> XiaohongshuLoginVerification:
+        if not _VERIFICATION_REQUEST_KEY_RE.fullmatch(request_key):
+            raise XiaohongshuMcpPolicyError(
+                "MCP_INPUT_INVALID",
+                "小红书工具账号验证请求标识无效",
+            )
+        data = await self._request(
+            XiaohongshuMcpOperation.START_LOGIN_VERIFICATION,
+            body={"request_key": request_key},
+        )
+        try:
+            return XiaohongshuLoginVerification.model_validate(data)
+        except ValueError as exc:
+            raise XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书工具账号验证响应结构无效",
+            ) from exc
+
+    async def login_verification_status(
+        self,
+        challenge_id: str,
+    ) -> XiaohongshuLoginVerification:
+        data = await self._request(
+            XiaohongshuMcpOperation.LOGIN_VERIFICATION_STATUS,
+            challenge_id=challenge_id,
+        )
+        try:
+            return XiaohongshuLoginVerification.model_validate(data)
+        except ValueError as exc:
+            raise XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书工具账号验证状态结构无效",
+            ) from exc
+
+    async def login_verification_qrcode(self, challenge_id: str) -> bytes:
+        return await self._request_verification_qrcode(challenge_id)
+
+    async def cancel_login_verification(self, challenge_id: str) -> None:
+        data = await self._request(
+            XiaohongshuMcpOperation.CANCEL_LOGIN_VERIFICATION,
+            challenge_id=challenge_id,
+        )
+        raw = _dict(data)
+        if raw.get("status") != "cancelled":
+            raise XiaohongshuMcpError(
+                "MCP_OUTPUT_INVALID",
+                "小红书工具账号验证取消响应无效",
+            )
+
     async def search_feeds(
         self,
         query: str,
         max_results: int,
+        verification_request_key: str | None = None,
     ) -> list[XiaohongshuFeedCandidate]:
+        body: dict[str, Any] = {"keyword": query}
+        if verification_request_key is not None:
+            if not _VERIFICATION_REQUEST_KEY_RE.fullmatch(
+                verification_request_key
+            ):
+                raise XiaohongshuMcpPolicyError(
+                    "MCP_INPUT_INVALID",
+                    "小红书工具账号验证请求标识无效",
+                )
+            body["verification_request_key"] = verification_request_key
         data = await self._request(
             XiaohongshuMcpOperation.SEARCH_FEEDS,
-            body={"keyword": query},
+            body=body,
         )
         feeds = _list(_dict(data).get("feeds"))
         results: list[XiaohongshuFeedCandidate] = []
@@ -633,6 +873,7 @@ class XiaohongshuMcpChannel:
         origin: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         public_fallback: XiaohongshuPublicChannel | None = None,
+        verification_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self.config = config
         self.settings = config.search.channels.xiaohongshu
@@ -653,6 +894,121 @@ class XiaohongshuMcpChannel:
             else None
         )
         self.public_fallback = public_fallback or XiaohongshuPublicChannel(config)
+        self.verification_sleep = verification_sleep or asyncio.sleep
+
+    @staticmethod
+    def _public_verification_update(
+        value: XiaohongshuLoginVerification,
+    ) -> ChannelVerificationUpdate:
+        return ChannelVerificationUpdate(
+            challenge_id=value.challenge_id,
+            status=value.status,
+            expires_at=value.expires_at,
+            retry_after_ms=value.retry_after_ms,
+            reason_code=value.reason_code,
+            message=value.message,
+        )
+
+    async def _await_login_verification(
+        self,
+        request_key: str,
+        reporter: ChannelVerificationReporter,
+    ) -> tuple[bool, int, XiaohongshuMcpError | None]:
+        if self.client is None:  # pragma: no cover - 调用方已防御
+            return False, 0, XiaohongshuMcpError(
+                "MCP_UNAVAILABLE",
+                "小红书登录态服务当前未配置",
+            )
+        started = time.monotonic()
+        challenge_id: str | None = None
+        last_update: XiaohongshuLoginVerification | None = None
+        try:
+            last_update = await self.client.start_login_verification(request_key)
+            challenge_id = last_update.challenge_id
+            reporter(self._public_verification_update(last_update))
+            configured_deadline = (
+                time.monotonic() + self.settings.verification_timeout_ms / 1000
+            )
+            expires_at = datetime.fromisoformat(last_update.expires_at)
+            provider_seconds = max(
+                0.0,
+                (expires_at - datetime.now(UTC)).total_seconds(),
+            )
+            deadline = min(
+                configured_deadline,
+                time.monotonic() + provider_seconds,
+            )
+            while last_update.status == "pending":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    try:
+                        await asyncio.shield(
+                            self.client.cancel_login_verification(challenge_id)
+                        )
+                    except XiaohongshuMcpError:
+                        pass
+                    timed_out = XiaohongshuLoginVerification(
+                        challenge_id=challenge_id,
+                        status="expired",
+                        expires_at=last_update.expires_at,
+                        retry_after_ms=last_update.retry_after_ms,
+                        reason_code="VERIFICATION_TIMEOUT",
+                        message="小红书工具账号验证已超时",
+                    )
+                    reporter(self._public_verification_update(timed_out))
+                    return False, round((time.monotonic() - started) * 1000), XiaohongshuMcpError(
+                        "VERIFICATION_TIMEOUT",
+                        "小红书工具账号验证已超时",
+                    )
+                delay_ms = min(
+                    last_update.retry_after_ms,
+                    self.settings.verification_poll_max_ms,
+                )
+                await self.verification_sleep(min(remaining, delay_ms / 1000))
+                last_update = await self.client.login_verification_status(
+                    challenge_id
+                )
+                reporter(self._public_verification_update(last_update))
+        except asyncio.CancelledError:
+            if challenge_id is not None:
+                try:
+                    await asyncio.shield(
+                        self.client.cancel_login_verification(challenge_id)
+                    )
+                except XiaohongshuMcpError:
+                    pass
+            raise
+        except XiaohongshuMcpError as exc:
+            if challenge_id is not None and last_update is not None:
+                failed = XiaohongshuLoginVerification(
+                    challenge_id=challenge_id,
+                    status="failed",
+                    expires_at=last_update.expires_at,
+                    retry_after_ms=last_update.retry_after_ms,
+                    reason_code=(
+                        exc.code
+                        if re.fullmatch(r"[A-Z0-9_]{1,80}", exc.code)
+                        else "VERIFICATION_FAILED"
+                    ),
+                    message=str(exc),
+                )
+                reporter(self._public_verification_update(failed))
+            return False, round((time.monotonic() - started) * 1000), exc
+
+        wait_ms = round((time.monotonic() - started) * 1000)
+        if last_update is None:
+            return False, wait_ms, XiaohongshuMcpError(
+                "VERIFICATION_FAILED",
+                "小红书工具账号验证未返回状态",
+            )
+        if last_update.status == "succeeded":
+            return True, wait_ms, None
+        code = last_update.reason_code or {
+            "expired": "VERIFICATION_TIMEOUT",
+            "account_mismatch": "ACCOUNT_MISMATCH",
+            "cancelled": "VERIFICATION_CANCELLED",
+        }.get(last_update.status, "VERIFICATION_FAILED")
+        return False, wait_ms, XiaohongshuMcpError(code, last_update.message)
 
     async def _fallback(
         self,
@@ -726,9 +1082,18 @@ class XiaohongshuMcpChannel:
         query: str,
         max_results: int,
         progress: ChannelProgressReporter | None = None,
+        *,
+        verification_request_key: str | None = None,
+        verification: ChannelVerificationReporter | None = None,
     ) -> ChannelOutcome:
         async with _search_lock():
-            return await self._search_serialized(query, max_results, progress)
+            return await self._search_serialized(
+                query,
+                max_results,
+                progress,
+                verification_request_key=verification_request_key,
+                verification=verification,
+            )
 
     async def search_public_after_mcp_failure(
         self,
@@ -753,6 +1118,9 @@ class XiaohongshuMcpChannel:
         query: str,
         max_results: int,
         progress: ChannelProgressReporter | None = None,
+        *,
+        verification_request_key: str | None = None,
+        verification: ChannelVerificationReporter | None = None,
     ) -> ChannelOutcome:
         if self.client is None:
             return await self._fallback(
@@ -765,36 +1133,81 @@ class XiaohongshuMcpChannel:
                 progress,
             )
 
+        interaction_wait_ms = 0
         try:
-            login = await self.client.check_login_status()
-            if not login.is_logged_in:
-                raise XiaohongshuMcpError(
-                    "AUTH_REQUIRED",
-                    "小红书登录状态已失效，需要重新扫码",
-                )
-            candidates = await self.client.search_feeds(query, max_results)
-        except XiaohongshuMcpError as exc:
-            if exc.code in _FALLBACK_ERROR_CODES:
-                return await self._fallback(query, max_results, exc, progress)
-            return ChannelOutcome(
-                ok=False,
-                channel="xiaohongshu",
-                provider=_MCP_PROVIDER,
-                query=query,
-                error_code=exc.code,
-                error_message=str(exc),
-                resolution=channel_resolution(
-                    status="failed",
-                    primary_provider=_MCP_PROVIDER,
-                    reason_code=exc.code,
-                    message=str(exc),
-                ),
+            candidates = await self.client.search_feeds(
+                query,
+                max_results,
+                verification_request_key,
             )
+        except XiaohongshuMcpError as exc:
+            if (
+                exc.code == "CAPTCHA_REQUIRED"
+                and verification_request_key is not None
+                and verification is not None
+            ):
+                verified, interaction_wait_ms, verification_error = (
+                    await self._await_login_verification(
+                        verification_request_key,
+                        verification,
+                    )
+                )
+                if not verified:
+                    outcome = await self._fallback(
+                        query,
+                        max_results,
+                        verification_error or exc,
+                        progress,
+                    )
+                    outcome.interaction_wait_ms = interaction_wait_ms
+                    return outcome
+                try:
+                    # 安全验证成功后只重试这一次原始搜索；再次触发风控时不再
+                    # 创建第二个挑战，避免同一 Run 无限等待。
+                    candidates = await self.client.search_feeds(
+                        query,
+                        max_results,
+                        verification_request_key,
+                    )
+                except XiaohongshuMcpError as retry_exc:
+                    retry_error = (
+                        XiaohongshuMcpError(
+                            "VERIFICATION_RETRY_FAILED",
+                            "工具账号验证成功，但原小红书搜索仍未能完成",
+                        )
+                        if retry_exc.code == "CAPTCHA_REQUIRED"
+                        else retry_exc
+                    )
+                    outcome = await self._fallback(
+                        query,
+                        max_results,
+                        retry_error,
+                        progress,
+                    )
+                    outcome.interaction_wait_ms = interaction_wait_ms
+                    return outcome
+            elif exc.code in _FALLBACK_ERROR_CODES:
+                return await self._fallback(query, max_results, exc, progress)
+            else:
+                return ChannelOutcome(
+                    ok=False,
+                    channel="xiaohongshu",
+                    provider=_MCP_PROVIDER,
+                    query=query,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                    resolution=channel_resolution(
+                        status="failed",
+                        primary_provider=_MCP_PROVIDER,
+                        reason_code=exc.code,
+                        message=str(exc),
+                    ),
+                )
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         results: list[ChannelResult] = []
         evidence: list[ChannelEvidence] = []
-        max_details = min(
+        target_evidence_count = min(
             max_results,
             self.config.graph.max_pages_per_call,
         )
@@ -809,10 +1222,14 @@ class XiaohongshuMcpChannel:
                 result_count=result_count,
                 evidence_count=0,
             )
-        for index, candidate in enumerate(visible_candidates):
+        for candidate in visible_candidates:
             detail: XiaohongshuFeedDetail | None = None
             detail_error: XiaohongshuMcpError | None = None
-            if index < max_details and detail_circuit_error is None:
+            should_read_detail = (
+                len(evidence) < target_evidence_count
+                and detail_circuit_error is None
+            )
+            if should_read_detail:
                 remaining_detail_seconds = detail_deadline - time.monotonic()
                 if remaining_detail_seconds <= 0:
                     detail_error = XiaohongshuMcpError(
@@ -837,12 +1254,10 @@ class XiaohongshuMcpChannel:
                         detail_error = exc
                     if detail_error is not None:
                         first_detail_error = first_detail_error or detail_error
-                        # 认证和安全验证属于会话级结论；其余详情错误可能只影响
-                        # 单篇笔记，保留真实候选并在总预算内尝试下一篇。
-                        if detail_error.code in {
-                            "AUTH_REQUIRED",
-                            "CAPTCHA_REQUIRED",
-                        }:
+                        # 基础设施、限频、认证和安全验证属于会话级结论，继续
+                        # 请求只会堆叠浏览器工作。只有单篇正文结构无效等内容级
+                        # 错误才继续尝试后续候选。
+                        if detail_error.code in _DETAIL_CIRCUIT_ERROR_CODES:
                             detail_circuit_error = detail_error
             elif detail_circuit_error is not None:
                 detail_error = detail_circuit_error
@@ -874,8 +1289,8 @@ class XiaohongshuMcpChannel:
                         "登录态详情缺少可用于回答的实质正文"
                         if detail
                         else (
-                            "登录态搜索已发现笔记，但受单轮详情读取上限限制，"
-                            "未读取正文"
+                            "登录态搜索已发现笔记，但已达到本轮详情读取上限，"
+                            "未继续读取正文"
                         )
                     )
                 )
@@ -955,4 +1370,5 @@ class XiaohongshuMcpChannel:
                     primary_provider=_MCP_PROVIDER,
                 )
             ),
+            interaction_wait_ms=interaction_wait_ms,
         )

@@ -80,14 +80,15 @@ export function V2ProcessPanel({
 
   return (
     <section
-      className="conversation-lane mb-2 py-1 text-[15px] leading-6 text-secondary"
+      className="conversation-lane workbench-disclosure-row text-[15px] leading-6 text-secondary"
       data-testid="v2-process-panel"
       data-run-id={preferenceRunId}
       data-source={model.source ?? "unknown"}
     >
       <button
         type="button"
-        className="flex min-h-9 w-full min-w-0 items-center gap-2 text-left text-secondary hover:text-ink"
+        className="workbench-disclosure-trigger flex w-full min-w-0 items-center gap-2 text-left text-secondary hover:text-ink"
+        data-workbench-disclosure-trigger
         aria-expanded={open}
         aria-label={open ? "收起执行过程" : "展开执行过程"}
         onClick={toggle}

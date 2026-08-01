@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from app.config.agent import AgentConfig
-from app.tools.channels.base import ChannelName, ChannelOutcome, ChannelProgressReporter
+from app.tools.channels.base import (
+    ChannelName,
+    ChannelOutcome,
+    ChannelProgressReporter,
+    ChannelVerificationReporter,
+)
 from app.tools.channels.web import WebChannel
 from app.tools.channels.x_public import XPublicChannel
 from app.tools.channels.xiaohongshu_mcp import XiaohongshuMcpChannel
@@ -40,6 +45,8 @@ class ChannelRegistry:
         progress: ChannelProgressReporter | None = None,
         *,
         xiaohongshu_public_only: bool = False,
+        verification_request_key: str | None = None,
+        verification: ChannelVerificationReporter | None = None,
     ) -> ChannelOutcome:
         if not self._enabled.get(channel, False):
             return ChannelOutcome(
@@ -56,5 +63,13 @@ class ChannelRegistry:
                 query,
                 max_results,
                 progress=progress,
+            )
+        if channel == "xiaohongshu":
+            return await adapter.search(
+                query,
+                max_results,
+                progress=progress,
+                verification_request_key=verification_request_key,
+                verification=verification,
             )
         return await adapter.search(query, max_results, progress=progress)

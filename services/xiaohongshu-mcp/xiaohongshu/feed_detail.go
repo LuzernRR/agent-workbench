@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,13 @@ const (
 	maxExpandRounds   = 5                // 最多连续展开而不下滚的轮数
 	maxSearchDuration = 90 * time.Second // 单次查找的墙钟上限
 	detailReadTimeout = 14 * time.Second
+
+	detailNavigationTimeout   = 8 * time.Second
+	detailStateWaitTimeout    = 10 * time.Second
+	detailStatePollInterval   = 350 * time.Millisecond
+	detailStateEvalTimeout    = 900 * time.Millisecond
+	detailDiagnosticAfter     = 4 * time.Second
+	detailContextSafetyMargin = 1200 * time.Millisecond
 )
 
 const (
@@ -108,6 +116,199 @@ func NewFeedDetailAction(page *rod.Page) *FeedDetailAction {
 	return &FeedDetailAction{page: page}
 }
 
+type detailPageSnapshot struct {
+	State           string   `json:"state"`
+	Path            string   `json:"path"`
+	ReadyState      string   `json:"readyState"`
+	HasInitialState bool     `json:"hasInitialState"`
+	HasNoteState    bool     `json:"hasNoteState"`
+	NoteCount       int      `json:"noteCount"`
+	NoteKeys        []string `json:"noteKeys"`
+	ExploreLinks    int      `json:"exploreLinks"`
+	RateLimited     bool     `json:"rateLimited"`
+	LoginVisible    bool     `json:"loginVisible"`
+	Inaccessible    bool     `json:"inaccessible"`
+}
+
+const detailPageSnapshotJS = `() => {
+	const unwrap = (candidate) => {
+		if (!candidate || typeof candidate !== "object") return candidate;
+		if (candidate.value !== undefined) return candidate.value;
+		if (candidate._value !== undefined) return candidate._value;
+		if (candidate._rawValue !== undefined) return candidate._rawValue;
+		return candidate;
+	};
+	const noteContainer = window.__INITIAL_STATE__?.note?.noteDetailMap;
+	const notes = unwrap(noteContainer);
+	const noteKeys = notes && typeof notes === "object" ? Object.keys(notes) : [];
+	const rawUser = window.__INITIAL_STATE__?.user?.userInfo;
+	const user = unwrap(rawUser);
+	const text = document.body?.innerText || "";
+	const loginVisible = Boolean(document.querySelector(
+		'.login-container, [class*="login-container"], [class*="login-modal"]'
+	));
+	const rateLimited = /操作太快|请求过于频繁|访问频繁|稍后再试/.test(text);
+	const inaccessible = Boolean(document.querySelector(
+		'.access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper'
+	));
+	let state = "";
+	if (window.location.pathname.startsWith("/website-login/captcha")) {
+		state = "captcha";
+	} else if (noteKeys.length > 0) {
+		state = "ready";
+	} else if (user?.guest === true || loginVisible) {
+		state = "logged_out";
+	} else if (rateLimited) {
+		state = "rate_limited";
+	} else if (inaccessible) {
+		state = "inaccessible";
+	}
+	return JSON.stringify({
+		state,
+		path: window.location.pathname,
+		readyState: document.readyState,
+		hasInitialState: Boolean(window.__INITIAL_STATE__),
+		hasNoteState: Boolean(window.__INITIAL_STATE__?.note),
+		noteCount: noteKeys.length,
+		noteKeys: noteKeys.slice(0, 8),
+		exploreLinks: document.querySelectorAll('a[href*="/explore/"]').length,
+		rateLimited,
+		loginVisible,
+		inaccessible,
+	});
+}`
+
+func readDetailPageSnapshot(page *rod.Page) (detailPageSnapshot, error) {
+	var snapshot detailPageSnapshot
+	evaluated, err := page.Timeout(detailStateEvalTimeout).Eval(detailPageSnapshotJS)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := json.Unmarshal([]byte(evaluated.Value.String()), &snapshot); err != nil {
+		return snapshot, fmt.Errorf("解析详情页安全状态失败: %w", err)
+	}
+	return snapshot, nil
+}
+
+func logDetailPageSnapshot(stage string, snapshot detailPageSnapshot, evalFailed bool) {
+	// 诊断只包含路径、布尔状态、键名和数量；不记录正文、URL 查询串、Cookie
+	// 或 xsec_token。
+	logrus.WithFields(logrus.Fields{
+		"stage":           stage,
+		"path":            snapshot.Path,
+		"readyState":      snapshot.ReadyState,
+		"hasInitialState": snapshot.HasInitialState,
+		"hasNoteState":    snapshot.HasNoteState,
+		"noteCount":       snapshot.NoteCount,
+		"noteKeys":        snapshot.NoteKeys,
+		"exploreLinks":    snapshot.ExploreLinks,
+		"rateLimited":     snapshot.RateLimited,
+		"loginVisible":    snapshot.LoginVisible,
+		"inaccessible":    snapshot.Inaccessible,
+		"evalFailed":      evalFailed,
+	}).Info("详情页安全诊断")
+}
+
+func waitForDetailPageState(
+	ctx context.Context,
+	evaluate func() (detailPageSnapshot, error),
+	timeout time.Duration,
+	interval time.Duration,
+) (detailPageSnapshot, error) {
+	startedAt := time.Now()
+	deadline := startedAt.Add(timeout)
+	nextDiagnostic := startedAt.Add(detailDiagnosticAfter)
+	diagnosticLogged := false
+	var last detailPageSnapshot
+	var lastEvalErr error
+
+	for {
+		if err := ctx.Err(); err != nil {
+			logDetailPageSnapshot("context_done", last, lastEvalErr != nil)
+			return last, err
+		}
+
+		snapshot, err := evaluate()
+		if err == nil {
+			last = snapshot
+			lastEvalErr = nil
+			if snapshot.State != "" {
+				return snapshot, nil
+			}
+		} else {
+			// renderer 短暂繁忙或一次 CDP 读取超时不应立即丢弃正文；在详情总
+			// 预算内继续轮询，最后仍返回稳定的超时或不可用错误。
+			lastEvalErr = err
+		}
+
+		now := time.Now()
+		if !diagnosticLogged && !now.Before(nextDiagnostic) {
+			logDetailPageSnapshot("waiting", last, lastEvalErr != nil)
+			diagnosticLogged = true
+		}
+		if !now.Before(deadline) {
+			logDetailPageSnapshot("final", last, lastEvalErr != nil)
+			if lastEvalErr != nil {
+				return last, fmt.Errorf("读取详情页状态失败: %w", lastEvalErr)
+			}
+			return last, fmt.Errorf("等待详情正文超时")
+		}
+
+		pause := interval
+		if remaining := time.Until(deadline); pause > remaining {
+			pause = remaining
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			logDetailPageSnapshot("context_done", last, lastEvalErr != nil)
+			return last, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isDetailNavigationTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "deadline exceeded") ||
+		strings.Contains(text, "timeout") ||
+		strings.Contains(text, "timed out") ||
+		strings.Contains(text, "超时")
+}
+
+func waitForDetailPageAfterNavigation(
+	ctx context.Context,
+	navigationErr error,
+	evaluate func() (detailPageSnapshot, error),
+	timeout time.Duration,
+	interval time.Duration,
+) (detailPageSnapshot, error) {
+	if navigationErr != nil && !isDetailNavigationTimeout(navigationErr) {
+		return detailPageSnapshot{}, fmt.Errorf("打开详情页失败: %w", navigationErr)
+	}
+	return waitForDetailPageState(ctx, evaluate, timeout, interval)
+}
+
+func detailStateWaitBudget(ctx context.Context) time.Duration {
+	budget := detailStateWaitTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline) - detailContextSafetyMargin
+		if remaining < budget {
+			budget = remaining
+		}
+	}
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
 // ========== 主要业务逻辑 ==========
 
 func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
@@ -154,30 +355,49 @@ func (f *FeedDetailAction) GetFeedDetailWithConfigAndSource(
 	logrus.Infof("配置: 点击更多=%v, 回复阈值=%d, 最大评论数=%d, 滚动速度=%s",
 		config.ClickMoreReplies, config.MaxRepliesThreshold, config.MaxCommentItems, config.ScrollSpeed)
 
-	if err := page.Timeout(8 * time.Second).Navigate(url); err != nil {
-		return nil, fmt.Errorf("打开详情页失败: %w", err)
+	navigationErr := page.Timeout(detailNavigationTimeout).Navigate(url)
+	if navigationErr != nil && isDetailNavigationTimeout(navigationErr) {
+		logrus.WithField("errorType", fmt.Sprintf("%T", navigationErr)).Warn(
+			"详情页导航超时，继续检查已加载的安全状态",
+		)
 	}
-	const detailReady = `() => {
-		if (window.location.pathname.startsWith("/website-login/captcha")) return true;
-		const raw = window.__INITIAL_STATE__?.note?.noteDetailMap;
-		const notes = raw?.value !== undefined ? raw.value : (raw?._value !== undefined ? raw._value : raw);
-		if (notes && Object.keys(notes).length > 0) return true;
-		return Boolean(document.querySelector(
-			'.access-wrapper, .error-wrapper, .not-found-wrapper, .blocked-wrapper'
-		));
-	}`
-	if err := rod.Try(func() {
-		page.Timeout(10 * time.Second).MustWait(detailReady)
-	}); err != nil {
-		if detailCtx.Err() != nil {
-			return nil, detailCtx.Err()
+	waitBudget := detailStateWaitBudget(detailCtx)
+	if waitBudget <= 0 {
+		if navigationErr != nil {
+			return nil, fmt.Errorf("打开详情页失败: %w", navigationErr)
 		}
-		return nil, fmt.Errorf("等待详情正文超时: %w", err)
+		return nil, context.DeadlineExceeded
 	}
-	if captcha, err := page.Eval(`() => window.location.pathname.startsWith("/website-login/captcha")`); err != nil {
-		return nil, fmt.Errorf("读取详情页状态失败: %w", err)
-	} else if captcha.Value.Bool() {
+	snapshot, err := waitForDetailPageAfterNavigation(
+		detailCtx,
+		navigationErr,
+		func() (detailPageSnapshot, error) { return readDetailPageSnapshot(page) },
+		waitBudget,
+		detailStatePollInterval,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if navigationErr != nil {
+		logrus.WithFields(logrus.Fields{
+			"path":       snapshot.Path,
+			"noteCount":  snapshot.NoteCount,
+			"readyState": snapshot.ReadyState,
+		}).Info("详情页导航超时后已从页面状态恢复")
+	}
+	switch snapshot.State {
+	case "captcha":
 		return nil, fmt.Errorf("小红书要求安全验证")
+	case "logged_out":
+		return nil, fmt.Errorf("小红书未登录")
+	case "rate_limited":
+		return nil, fmt.Errorf("小红书请求过于频繁，请稍后再试")
+	case "inaccessible":
+		return nil, fmt.Errorf("笔记不可访问")
+	case "ready":
+		// 继续读取结构化正文。
+	default:
+		return nil, fmt.Errorf("详情页状态不可用")
 	}
 	if err := checkPageAccessible(page); err != nil {
 		return nil, err
@@ -861,7 +1081,14 @@ func getCommentCount(page *rod.Page) int {
 // interactInfo.commentCount，不依赖评论区文案。取不到返回 0。
 func getTotalCommentCount(page *rod.Page) int {
 	res, err := page.Eval(`() => {
-		const m = window.__INITIAL_STATE__?.note?.noteDetailMap;
+		const raw = window.__INITIAL_STATE__?.note?.noteDetailMap;
+		const m = raw
+			? (raw.value !== undefined
+				? raw.value
+				: (raw._value !== undefined
+					? raw._value
+					: (raw._rawValue !== undefined ? raw._rawValue : raw)))
+			: null;
 		if (!m) return "";
 		for (const v of Object.values(m)) {
 			const c = v?.note?.interactInfo?.commentCount;
@@ -1000,7 +1227,9 @@ func (f *FeedDetailAction) extractFeedDetail(page *rod.Page, feedID string) (*Fe
 				if (raw) {
 					const noteDetailMap = raw.value !== undefined
 						? raw.value
-						: (raw._value !== undefined ? raw._value : raw);
+						: (raw._value !== undefined
+							? raw._value
+							: (raw._rawValue !== undefined ? raw._rawValue : raw));
 					return JSON.stringify(noteDetailMap);
 				}
 				return "";
@@ -1068,8 +1297,8 @@ func makeFeedDetailURL(feedID, xsecToken string) string {
 func makeFeedDetailURLWithSource(feedID, xsecToken, xsecSource string) string {
 	return fmt.Sprintf(
 		"https://www.xiaohongshu.com/explore/%s?xsec_token=%s&xsec_source=%s",
-		feedID,
-		xsecToken,
-		xsecSource,
+		url.PathEscape(feedID),
+		url.QueryEscape(xsecToken),
+		url.QueryEscape(xsecSource),
 	)
 }

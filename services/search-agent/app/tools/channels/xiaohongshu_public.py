@@ -31,6 +31,13 @@ _BLOCK_MARKERS = (
 )
 _GENERIC_TITLES = {"小红书", "小红书 - 你的生活兴趣社区", "rednote", "found."}
 _MAX_READER_BYTES = 1_048_576
+_QUERY_NOISE = (
+    "小红书", "近期", "最近", "最新", "使用笔记", "使用感受", "真实体验",
+    "笔记", "正文", "证据", "来源链接", "来源", "链接", "搜索", "查找",
+    "关于", "归纳", "总结", "测评", "推荐", "经验", "可访问", "只读取",
+)
+_ASCII_QUERY_TERM = re.compile(r"[a-z0-9][a-z0-9.+#_-]{2,}", re.IGNORECASE)
+_CJK_QUERY_CHUNK = re.compile(r"[\u4e00-\u9fff]{2,}")
 
 
 def _allowed_xhs_url(url: str) -> bool:
@@ -69,6 +76,41 @@ def _content_matches(expected: str, content: str) -> bool:
         return compact_expected in compact_content
     probe = compact_expected[: min(12, len(compact_expected))]
     return probe in compact_content
+
+
+def _query_relevance_terms(query: str) -> tuple[set[str], set[str]]:
+    """提取保守的英文词和中文主题片段。
+
+    公开搜索 Provider 对 ``site:xiaohongshu.com`` 查询偶尔返回完全无关的最新
+    索引页。这里不把搜索摘要当证据，只用它做候选准入：英文主题需命中原词；
+    中文长主题至少命中两个二字片段，避免仅因正文里出现一次“通勤”就入选。
+    """
+
+    cleaned = query.casefold()
+    for noise in _QUERY_NOISE:
+        cleaned = cleaned.replace(noise.casefold(), " ")
+    ascii_terms = set(_ASCII_QUERY_TERM.findall(cleaned))
+    cjk_terms: set[str] = set()
+    for chunk in _CJK_QUERY_CHUNK.findall(cleaned):
+        if len(chunk) <= 4:
+            cjk_terms.add(chunk)
+        cjk_terms.update(
+            chunk[index:index + 2]
+            for index in range(len(chunk) - 1)
+        )
+    return ascii_terms, cjk_terms
+
+
+def _hit_matches_query(query: str, hit: SearchHit) -> bool:
+    ascii_terms, cjk_terms = _query_relevance_terms(query)
+    haystack = f"{hit.title}\n{hit.snippet}".casefold()
+    if ascii_terms and not any(term in haystack for term in ascii_terms):
+        return False
+    if not cjk_terms:
+        return bool(ascii_terms)
+    matches = {term for term in cjk_terms if term in haystack}
+    required = 1 if len(cjk_terms) == 1 else 2
+    return len(matches) >= required
 
 
 class XiaohongshuPublicChannel:
@@ -131,13 +173,17 @@ class XiaohongshuPublicChannel:
             return "direct", [SearchHit(url=url, title=url, snippet="", rank=1)]
         outcome = await web_search(
             f"{query} site:xiaohongshu.com/explore",
-            max_results=max_results,
+            max_results=min(max(max_results * 3, max_results), 15),
             default_provider=self.config.search.default_provider,
             allow_duckduckgo_fallback=self.config.search.allow_duckduckgo_fallback,
         )
         if not outcome.ok:
             return outcome, []
-        return outcome.provider, [hit for hit in outcome.hits if _allowed_xhs_url(hit.url)]
+        return outcome.provider, [
+            hit
+            for hit in outcome.hits
+            if _allowed_xhs_url(hit.url) and _hit_matches_query(query, hit)
+        ][:max_results]
 
     async def search(
         self,

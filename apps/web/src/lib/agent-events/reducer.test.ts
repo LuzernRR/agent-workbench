@@ -21,6 +21,42 @@ describe("reduceAgentEvent", () => {
     });
   });
 
+  it("安全验证等待与成功状态保留同一工具调用和受控链接", () => {
+    const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "run.started", {}),
+      event(2, "tool.started", { toolCallId: "xhs-1", name: "小红书搜索", summary: "搜索：油敏皮通勤防晒", channel: "xiaohongshu" }),
+      event(3, "tool.updated", {
+        toolCallId: "xhs-1",
+        status: "waiting",
+        reasonCode: "CAPTCHA_REQUIRED",
+        verificationStatus: "pending",
+        verificationHref: `/workbench/verify/xiaohongshu/run/${challengeId}`,
+        verificationExpiresAt: "2026-07-22T00:04:00.000Z",
+        verificationMessage: "等待扫码"
+      }),
+      event(4, "run.status", { status: "waiting" }),
+      event(5, "tool.updated", {
+        toolCallId: "xhs-1",
+        status: "running",
+        clearReasonCode: true,
+        verificationStatus: "succeeded",
+        verificationMessage: "验证成功"
+      }),
+      event(6, "run.status", { status: "running" })
+    ]);
+
+    expect(state.itemOrder).toEqual(["tool:xhs-1"]);
+    expect(state.items["tool:xhs-1"]).toMatchObject({
+      status: "running",
+      reasonCode: undefined,
+      verificationStatus: "succeeded",
+      verificationHref: `/workbench/verify/xiaohongshu/run/${challengeId}`,
+      verificationMessage: "验证成功"
+    });
+    expect(state.runStatus).toBe("running");
+  });
+
   it("从 started/completed 事件时间推导真实工具耗时，不把终态显示为执行中", () => {
     const started = event(1, "tool.started", { toolCallId: "search-duration", name: "网页搜索", summary: "搜索中" });
     const completed = {

@@ -51,6 +51,9 @@ describe("V2ProcessPanel", () => {
   it("opens active runs by default and displays only persisted public paragraphs", () => {
     renderPanel(projectS01ProcessFixture("active"));
 
+    expect(screen.getByTestId("v2-process-panel")).toHaveClass("workbench-disclosure-row");
+    expect(screen.getByTestId("v2-process-panel")).not.toHaveClass("mb-2");
+    expect(screen.getByRole("button", { name: "收起执行过程" })).toHaveClass("workbench-disclosure-trigger");
     expect(screen.getByRole("button", { name: "收起执行过程" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("执行中")).toBeInTheDocument();
     expect(screen.getByText("已根据问题范围完成处理路径选择。")).toBeInTheDocument();

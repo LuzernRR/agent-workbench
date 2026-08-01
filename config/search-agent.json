@@ -2,7 +2,7 @@
   "version": 1,
   "service": {
     "origin": "http://127.0.0.1:8100",
-    "requestTimeoutMs": 300000
+    "requestTimeoutMs": 450000
   },
   "graph": {
     "defaultDepth": "balanced",
@@ -39,7 +39,9 @@
         "requestTimeoutMs": 30000,
         "detailTimeoutMs": 16000,
         "maxAttempts": 1,
-        "readPublicDetails": true
+        "readPublicDetails": true,
+        "verificationTimeoutMs": 240000,
+        "verificationPollMaxMs": 5000
       }
     }
   },

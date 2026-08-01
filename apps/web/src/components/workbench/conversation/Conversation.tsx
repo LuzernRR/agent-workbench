@@ -89,6 +89,23 @@ function timelineMessageLike(item: TimelineItem): ThreadMessageLike {
   return { id: item.id, role: "assistant", content: item.label, createdAt: new Date(item.createdAt), status: { type: "incomplete", reason: "error", error: item.label } };
 }
 
+type ReplyCopyMessage = Pick<MessageItem, "text" | "citations">;
+
+export function formatAssistantReply(messages: ReplyCopyMessage[]) {
+  return messages.flatMap((message) => {
+    if (!message.text) return [];
+    const sourceLines = (message.citations || []).flatMap((citation, index) => {
+      const href = safeWorkbenchHref(citation.url);
+      if (!href) return [];
+      const label = safeLinkLabel(citation.label, `来源 ${index + 1}`);
+      return [`[${index + 1}] ${label}：${href}`];
+    });
+    return [sourceLines.length
+      ? `${message.text}\n\n来源链接\n${sourceLines.join("\n")}`
+      : message.text];
+  }).join("\n\n");
+}
+
 type V2ProcessPlacement = {
   readonly anchorRunId: string | null;
   readonly preferenceRunId: string;
@@ -257,7 +274,7 @@ function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, o
         interaction={previewInteraction}
       />
     : null;
-  return <MessageEntry item={item} timing={isFirstAssistant ? state.runTimings[item.runId] : undefined} editable={canEdit} onResubmit={onStartRun} assistantReply={isLastAssistant && runComplete ? runMessages.map((message) => message.text).filter(Boolean).join("\n\n") : undefined} after={processAfter} />;
+  return <MessageEntry item={item} timing={isFirstAssistant ? state.runTimings[item.runId] : undefined} editable={canEdit} onResubmit={onStartRun} assistantReply={isLastAssistant && runComplete ? formatAssistantReply(runMessages) : undefined} after={processAfter} />;
 }
 
 function MessageEntry({ item, timing, editable, onResubmit, assistantReply, after }: { item: MessageItem; timing?: RunTiming; editable: boolean; onResubmit: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; assistantReply?: string; after?: React.ReactNode }) {
@@ -305,12 +322,12 @@ export function ThinkingResult({ item, timing, isCurrentStep = false }: { item: 
       : item.status === "error"
         ? verification ? "核验未完成" : "思考未完成"
         : verification ? "核验结束" : "思考结束";
-  return <div className="conversation-lane mb-2 text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"} data-activity-status={item.status}>
+  return <div className="conversation-lane workbench-disclosure-row text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"} data-activity-status={item.status}>
     {timing ? <RunElapsed timing={timing} /> : null}
     <button type="button" aria-expanded={expanded} onClick={() => {
       if (settledKey === null || isCurrentStep) return;
       setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
-    }} className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" title={`${expanded ? "收起" : "展开"}${verification ? "核验" : "思考"}结果`}>
+    }} className="workbench-disclosure-trigger flex max-w-full items-center gap-1.5 rounded-md px-0 text-left font-medium text-secondary hover:text-ink" data-workbench-disclosure-trigger title={`${expanded ? "收起" : "展开"}${verification ? "核验" : "思考"}结果`}>
       {expanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
       <span>{label}</span>
       {item.paragraphs.length > 1 ? <span className="tabular-nums text-[13px] font-normal text-tertiary">{item.paragraphs.length} 条</span> : null}
@@ -322,14 +339,17 @@ export function ThinkingResult({ item, timing, isCurrentStep = false }: { item: 
 }
 
 function MessageCitations({ citations }: { citations: NonNullable<MessageItem["citations"]> }) {
-  return <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[14px] leading-5 text-secondary">
-    {citations.map((citation, index) => {
-      const href = safeWorkbenchHref(citation.url);
-      if (!href) return null;
-      const label = safeLinkLabel(citation.label, `来源 ${index + 1}`);
-      return <a key={`${citation.url}:${index}`} href={href} target="_blank" rel="noopener noreferrer" className="whitespace-normal break-words underline decoration-line underline-offset-2 hover:text-ink" title={label}>{`[${index + 1}] ${label}`}</a>;
-    })}
-  </div>;
+  return <section className="mt-2 text-[14px] leading-5 text-secondary" aria-label="来源链接" data-message-citations>
+    <p className="mb-1 font-medium text-ink">来源链接</p>
+    <div className="flex flex-wrap gap-x-3 gap-y-1">
+      {citations.map((citation, index) => {
+        const href = safeWorkbenchHref(citation.url);
+        if (!href) return null;
+        const label = safeLinkLabel(citation.label, `来源 ${index + 1}`);
+        return <a key={`${citation.url}:${index}`} href={href} target="_blank" rel="noopener noreferrer" className="whitespace-normal break-words underline decoration-line underline-offset-2 hover:text-ink" title={label}>{`[${index + 1}] ${label}`}</a>;
+      })}
+    </div>
+  </section>;
 }
 
 function RunElapsed({ timing }: { timing: RunTiming }) {

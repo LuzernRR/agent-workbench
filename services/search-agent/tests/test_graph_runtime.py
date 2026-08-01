@@ -14,7 +14,7 @@ import pytest
 from app.config.agent import agent_config
 from app.events.runtime import begin_event_scope, end_event_scope
 from app.graph import nodes
-from app.graph.build import build_graph
+from app.graph.build import _novel_public_summary, build_graph
 from app.graph.context import RunContext
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
@@ -35,6 +35,7 @@ from app.llm.deepseek import (
 from app.persistence.tool_ledger import LedgerDecision
 from app.tools.channels.base import (
     ChannelProgress,
+    ChannelVerificationUpdate,
     SourceProvenance,
     channel_resolution,
 )
@@ -43,6 +44,7 @@ from app.tools.search_tool import (
     SearchEvidence,
     SearchExecutionResult,
 )
+from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
 
 
 def test_remaining_run_seconds_preserves_finalization_budget_signal() -> None:
@@ -67,6 +69,83 @@ def test_xiaohongshu_tool_requires_a_meaningful_window_before_finalization() -> 
     web_timeout = nodes.tool_timeout_seconds(state, "web")
     assert web_timeout is not None
     assert 29 <= web_timeout <= 30
+
+
+def test_explicit_output_contract_requires_every_field_in_each_numbered_item() -> None:
+    question = (
+        "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记。"
+        "只读取可访问正文，按“肤质与场景 / 使用感受 / 防晒产品类型 / "
+        "可能不适合的人群 / 来源链接”归纳 3–5 条经验。"
+    )
+    invalid_answer = (
+        "1. **肤质与场景**：高温通勤 [来源1]。\n"
+        "2. **使用感受**：肤感清爽 [来源1]。\n"
+        "3. **防晒产品类型**：物化结合 [来源2]。\n"
+        "4. **可能不适合的人群**：香精敏感者 [来源2]。"
+    )
+    valid_answer = "\n".join(
+        f"{index}. 肤质与场景：高温通勤\n"
+        "使用感受：肤感清爽\n"
+        "防晒产品类型：物化结合\n"
+        "可能不适合的人群：香精敏感者\n"
+        f"来源链接：[来源{1 if index < 3 else 2}]"
+        for index in range(1, 4)
+    )
+
+    issue = nodes._explicit_output_issue(question, invalid_answer)
+
+    assert issue is not None
+    assert "每个编号条目都必须按顺序包含" in issue
+    assert nodes._explicit_output_issue(question, valid_answer) is None
+    instruction = nodes._explicit_output_instruction(question)
+    assert instruction is not None
+    assert "输出 3 个编号一级列表项" in instruction
+    assert "禁止把不同字段拆成不同编号项" in instruction
+    assert "总回答不超过 680 字" in instruction
+    assert "非医疗建议" not in instruction
+
+
+def test_explicit_output_contract_requires_requested_non_medical_boundary() -> None:
+    question = "请归纳使用体验，不得把个人体验写成医疗建议。"
+
+    assert nodes._explicit_output_issue(question, "这是个人体验。") is not None
+    assert nodes._explicit_output_issue(
+        question,
+        "这是个人体验，非医疗建议。",
+    ) is None
+    instruction = nodes._explicit_output_instruction(question)
+    assert instruction is not None
+    assert "以上为个人使用体验，非医疗建议" in instruction
+
+
+def test_public_summary_requires_model_step_and_recorded_model_call() -> None:
+    assert nodes._step(
+        "plan_research",
+        "deterministic",
+        "本地固定计划",
+        "test",
+    )[0]["summary"] == ""
+    assert _novel_public_summary(
+        "plan_research",
+        "本地固定计划",
+        "deterministic",
+        True,
+        [],
+    ) is None
+    assert _novel_public_summary(
+        "plan_research",
+        "伪装成模型但没有调用记录",
+        "model",
+        False,
+        [],
+    ) is None
+    assert _novel_public_summary(
+        "plan_research",
+        "真实模型生成的公开计划",
+        "model",
+        True,
+        [],
+    ) == "真实模型生成的公开计划"
 
 
 @pytest.mark.asyncio
@@ -97,12 +176,70 @@ async def test_xiaohongshu_mcp_failure_opens_public_strategy_for_later_query(
 
 
 @pytest.mark.asyncio
+async def test_xiaohongshu_verification_events_keep_same_tool_and_pause_sla(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    challenge_id = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789"
+    base_update = {
+        "challenge_id": challenge_id,
+        "expires_at": "2099-08-01T00:04:00Z",
+        "retry_after_ms": 2000,
+    }
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        channels_by_query={"query one": "xiaohongshu"},
+        verification_updates=[
+            ChannelVerificationUpdate(
+                **base_update,
+                status="pending",
+                message="等待使用小红书 App 扫码验证工具账号",
+            ),
+            ChannelVerificationUpdate(
+                **base_update,
+                status="pending",
+                message="等待使用小红书 App 扫码验证工具账号",
+            ),
+            ChannelVerificationUpdate(
+                **base_update,
+                status="succeeded",
+                message="小红书工具账号验证成功",
+            ),
+        ],
+        interaction_wait_ms=120_000,
+    )
+
+    output, events = await run_scenario(
+        monkeypatch,
+        scenario,
+        question="只在小红书搜索油敏皮夏季通勤防晒",
+        verification_registry=True,
+    )
+
+    verification_events = [
+        event for event in events if event["type"].startswith("tool.verification.")
+    ]
+    assert [event["type"] for event in verification_events] == [
+        "tool.verification.required",
+        "tool.verification.heartbeat",
+        "tool.verification.resolved",
+    ]
+    assert len({event["toolCallId"] for event in verification_events}) == 1
+    assert scenario.verification_request_keys == [
+        f"{output['run_id']}:{verification_events[0]['toolCallId']}"
+    ]
+    assert output["external_wait_seconds"] == 120.0
+    assert "qrcode" not in json.dumps(verification_events).lower()
+    assert "xiaohongshu-mcp:18060" not in json.dumps(verification_events)
+
+
+@pytest.mark.asyncio
 async def test_zero_evidence_platform_round_keeps_web_fallback_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(
         supervisor_channels=["xiaohongshu"],
         plans=[["xhs query"], ["official web query"]],
+        writer_answer="现有 web 补充证据不能代表小红书近期使用笔记 [来源1]。",
         reflects=[
             {
                 "sufficient": False,
@@ -147,7 +284,9 @@ async def test_zero_evidence_platform_round_keeps_web_fallback_partial(
     assert output["verification_passed"] is False
     assert output["stop_reason"] == "MAX_ITERATIONS"
     assert "Evidence：xiaohongshu" in output["verification_issue"]
-    assert "MISSING_CHANNEL_EVIDENCE:xiaohongshu" in output["answer"]
+    assert output["answer"] == scenario.writer_answer
+    assert output["answer_source"] == "model"
+    assert "MISSING_CHANNEL_EVIDENCE" not in output["answer"]
     assert scenario.structured_calls.get("source_curator", 0) == 1
     presented = [event for event in events if event["type"] == "tool.presented"]
     assert len(presented) == 1
@@ -209,6 +348,7 @@ class Scenario:
     )
     verifier_actions: list[str] = field(default_factory=lambda: ["pass"])
     writer_answer: str | None = None
+    writer_answers: list[str] = field(default_factory=list)
     researcher_mode: str = "valid"
     include_reasoning: bool = False
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
@@ -233,6 +373,9 @@ class Scenario:
     tool_completion_order: list[str] = field(default_factory=list)
     tool_call_index: int = 0
     checkpoint_values: dict[str, Any] = field(default_factory=dict)
+    verification_updates: list[ChannelVerificationUpdate] = field(default_factory=list)
+    verification_request_keys: list[str] = field(default_factory=list)
+    interaction_wait_ms: int = 0
 
     async def structured(
         self,
@@ -294,9 +437,14 @@ class Scenario:
                 presentation.setdefault("include_in_details", True)
             result = ReflectResult(summary="已评估证据覆盖", **data)
         elif role == "writer":
+            writer_answer = (
+                self.writer_answers[min(index, len(self.writer_answers) - 1)]
+                if self.writer_answers
+                else self.writer_answer
+            )
             result = ComposeResult(
                 answer_markdown=(
-                    self.writer_answer
+                    writer_answer
                     or ("可核验回答 [来源1]" if self.need_search else "直接回答")
                 ),
                 summary="已组织回答",
@@ -400,6 +548,8 @@ class Scenario:
         progress: Any = None,
         *,
         xiaohongshu_public_only: bool = False,
+        verification_request_key: str | None = None,
+        verification: Any = None,
     ) -> SearchExecutionResult:
         query = arguments.query
         self.tool_executions.append(query)
@@ -408,6 +558,11 @@ class Scenario:
             {"query": query, "channel": arguments.channel}
         )
         self.tool_execution_public_only.append(xiaohongshu_public_only)
+        if verification_request_key is not None:
+            self.verification_request_keys.append(verification_request_key)
+        if verification is not None:
+            for update in self.verification_updates:
+                verification(update)
         self.active_tool_calls += 1
         self.max_active_tool_calls = max(
             self.max_active_tool_calls,
@@ -486,6 +641,7 @@ class Scenario:
                 reason_code=reason_code,
                 message="受控降级" if reason_code else None,
             ),
+            interaction_wait_ms=self.interaction_wait_ms,
         )
 
 
@@ -494,6 +650,7 @@ async def run_scenario(
     scenario: Scenario,
     *,
     question: str | None = None,
+    verification_registry: bool = False,
     **state_overrides: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     monkeypatch.setattr(nodes, "invoke_structured", scenario.structured)
@@ -506,7 +663,12 @@ async def run_scenario(
         **state_overrides,
     )
     graph = build_graph()
-    context = RunContext(agent_config(), MemoryLedger(), None)
+    context = RunContext(
+        agent_config(),
+        MemoryLedger(),
+        None,
+        XiaohongshuVerificationRegistry() if verification_registry else None,
+    )
     graph_config = {
         "configurable": {"thread_id": f"thread_{uuid.uuid4().hex}"},
         "recursion_limit": 48,
@@ -570,6 +732,34 @@ def test_answer_compaction_uses_complete_markdown_and_citation_boundaries() -> N
     assert not re.search(r"\[来源\d*$", compacted)
 
 
+def test_answer_citations_publish_only_referenced_sources_and_renumber_gaps() -> None:
+    evidence = [
+        {
+            "channel": "xiaohongshu",
+            "provider": "xiaohongshu-mcp",
+            "query": "油敏皮防晒",
+            "url": f"https://www.xiaohongshu.com/explore/note_{index}",
+            "title": f"来源 {index}",
+            "text": "已读取正文",
+            "extractor": "xiaohongshu-mcp-authenticated",
+            "captured_at": "2026-08-01T00:00:00Z",
+        }
+        for index in range(1, 7)
+    ]
+
+    answer, citations = nodes._answer_citations(
+        "第一条 [来源2]，第二条 [来源6]，再次引用 [来源2]。",
+        evidence,
+    )
+
+    assert answer == "第一条 [来源1]，第二条 [来源2]，再次引用 [来源1]。"
+    assert [citation["label"] for citation in citations] == ["来源 2", "来源 6"]
+    assert [citation["url"] for citation in citations] == [
+        "https://www.xiaohongshu.com/explore/note_2",
+        "https://www.xiaohongshu.com/explore/note_6",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_oversized_writer_answer_is_compacted_before_verification(
     monkeypatch: pytest.MonkeyPatch,
@@ -593,7 +783,7 @@ async def test_oversized_writer_answer_is_compacted_before_verification(
 
 
 @pytest.mark.asyncio
-async def test_writer_output_invalid_returns_controlled_partial_result(
+async def test_writer_output_invalid_returns_structured_failure_without_template_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = Scenario(invalid_structured_roles={"writer"})
@@ -603,7 +793,8 @@ async def test_writer_output_invalid_returns_controlled_partial_result(
     assert output["response_status"] == "partial"
     assert output["stop_reason"] == "OUTPUT_INVALID"
     assert output["verification_passed"] is False
-    assert "OUTPUT_INVALID" in output["answer"]
+    assert output["answer"] is None
+    assert output["answer_source"] == "none"
     assert scenario.structured_calls.get("verifier", 0) == 0
 
 
@@ -632,6 +823,137 @@ async def test_force_search_runs_real_tool_even_when_supervisor_suggests_direct(
         "tool.completed",
         "tool.presented",
     ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_xiaohongshu_topic_uses_real_planner_model_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    topic = "油敏皮夏季通勤防晒"
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        plans=[[topic]],
+        evidence_by_query={topic: True},
+        channels_by_query={topic: "xiaohongshu"},
+    )
+
+    output, events = await run_scenario(
+        monkeypatch,
+        scenario,
+        question=(
+            "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记。"
+            "只读取可访问正文。"
+        ),
+    )
+
+    assert scenario.structured_calls.get("planner", 0) == 1
+    assert scenario.tool_execution_searches == [
+        {"query": topic, "channel": "xiaohongshu"},
+    ]
+    plan_step = next(
+        step for step in output["steps"] if step["node"] == "plan_research"
+    )
+    assert plan_step["kind"] == "model"
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "node.completed" and event["node"] == "plan_research"
+    )
+    assert completed["publicSummary"] == "已形成检索计划"
+    assert completed["publicSummarySource"] == "model"
+
+
+def test_presented_xiaohongshu_sources_stop_synonym_search_at_requested_minimum() -> None:
+    question = (
+        "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记，"
+        "按“肤质与场景 / 使用感受 / 防晒产品类型 / 可能不适合的人群 / "
+        "来源链接”归纳 3–5 条经验。"
+    )
+    evidence = [
+        {
+            "channel": "xiaohongshu",
+            "url": f"https://www.xiaohongshu.com/explore/note_{index}",
+        }
+        for index in range(1, 4)
+    ]
+    presented = {item["url"] for item in evidence}
+
+    assert nodes._presented_sources_satisfy_contract(
+        question,
+        evidence,  # type: ignore[arg-type]
+        presented,
+        ["xiaohongshu"],
+        "还可补充更多同类描述",
+    )
+    assert not nodes._presented_sources_satisfy_contract(
+        question,
+        evidence[:2],  # type: ignore[arg-type]
+        {item["url"] for item in evidence[:2]},
+        ["xiaohongshu"],
+        "条目不足",
+    )
+    assert not nodes._presented_sources_satisfy_contract(
+        question,
+        evidence,  # type: ignore[arg-type]
+        presented,
+        ["xiaohongshu"],
+        "来源结论互相冲突",
+    )
+
+
+def test_ineffective_source_text_rejects_short_or_missing_dimension_copy() -> None:
+    assert nodes._effective_source_text("正文过短，未展开通勤场景与适用人群。") is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    topic = "油敏皮夏季通勤防晒"
+    invalid_answer = (
+        "1. 肤质与场景：高温通勤 [来源1]。\n"
+        "2. 使用感受：肤感清爽 [来源1]。\n"
+        "3. 防晒产品类型：物化结合 [来源1]。\n"
+        "4. 可能不适合的人群：香精敏感者 [来源1]。"
+    )
+    valid_answer = "\n\n".join(
+        f"{index}. 肤质与场景：高温通勤\n"
+        "使用感受：肤感清爽\n"
+        "防晒产品类型：物化结合\n"
+        "可能不适合的人群：香精敏感者\n"
+        "来源链接：[来源1]"
+        for index in range(1, 4)
+    ) + "\n\n以上为个人使用体验，非医疗建议。"
+    scenario = Scenario(
+        supervisor_channels=["xiaohongshu"],
+        plans=[[topic]],
+        evidence_by_query={topic: True},
+        channels_by_query={topic: "xiaohongshu"},
+        writer_answers=[invalid_answer, valid_answer],
+        verifier_actions=["pass", "pass"],
+    )
+
+    output, _events = await run_scenario(
+        monkeypatch,
+        scenario,
+        question=(
+            "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记。"
+            "只读取可访问正文，按“肤质与场景 / 使用感受 / 防晒产品类型 / "
+            "可能不适合的人群 / 来源链接”归纳 3–5 条经验；"
+            "不得把个人体验写成医疗建议，正文不可读时不展示为证据。"
+        ),
+    )
+
+    assert output["response_status"] == "completed"
+    assert output["stop_reason"] == "VERIFIED"
+    assert output["answer"] == valid_answer
+    assert output["answer_source"] == "model"
+    assert output["answer_model_calls"] == 1
+    assert scenario.structured_calls["writer"] == 2
+    assert scenario.structured_calls["verifier"] == 2
+    first_writer_prompt = scenario.structured_messages["writer"][0][-1].content
+    assert "输出格式硬约束" in first_writer_prompt
+    assert "每个编号项代表一条完整经验" in first_writer_prompt
 
 
 @pytest.mark.asyncio
@@ -1120,12 +1442,17 @@ async def test_model_limit_stops_with_partial_answer_without_overshoot(
     scenario = Scenario(
         reflects=[{"sufficient": False, "missing": "budget", "extra_searches": []}],
         evidence_by_query={},
+        writer_answer="本次没有取得可核验正文，暂时无法可靠归纳。",
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_model_calls=4)
 
     assert output["model_calls"] <= 4
     assert output["response_status"] == "partial"
     assert output["stop_reason"] == "MODEL_CALL_LIMIT"
+    assert output["answer"] == scenario.writer_answer
+    assert output["answer_source"] == "model"
+    assert output["answer_model_calls"] == 1
+    assert scenario.structured_calls["writer"] == 1
 
 
 @pytest.mark.asyncio
@@ -1256,6 +1583,21 @@ async def test_node_run_ids_pair_and_rewrite_runs_are_unique(monkeypatch: pytest
     assert len(verify_ids) == len(set(verify_ids)) == 2
     verification_events = [event for event in events if event["type"] == "verification.completed"]
     assert [event["nodeRunId"] for event in verification_events] == verify_ids
+    assert all(
+        event["publicSummarySource"] == "model"
+        for event in completions
+        if event.get("publicSummary")
+    )
+    assert all(
+        event["publicSummarySource"] == "model"
+        for event in verification_events
+        if event.get("publicSummary")
+    )
+    assert all(
+        event["presentationSource"] == "model"
+        for event in events
+        if event["type"] == "tool.presented"
+    )
     assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
     assert len({event["eventId"] for event in events}) == len(events)
 

@@ -1,10 +1,89 @@
 package xiaohongshu
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestWaitForDetailPageAfterNavigation(t *testing.T) {
+	t.Run("导航超时但正文状态已加载时继续读取", func(t *testing.T) {
+		calls := 0
+		snapshot, err := waitForDetailPageAfterNavigation(
+			context.Background(),
+			errors.New("context deadline exceeded"),
+			func() (detailPageSnapshot, error) {
+				calls++
+				return detailPageSnapshot{
+					State: "ready", Path: "/explore/note-id", NoteCount: 1,
+				}, nil
+			},
+			100*time.Millisecond,
+			time.Millisecond,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "ready", snapshot.State)
+		require.Equal(t, 1, calls)
+	})
+
+	t.Run("非超时导航故障立即返回且不访问失联页面", func(t *testing.T) {
+		calls := 0
+		_, err := waitForDetailPageAfterNavigation(
+			context.Background(),
+			errors.New("websocket disconnected"),
+			func() (detailPageSnapshot, error) {
+				calls++
+				return detailPageSnapshot{}, nil
+			},
+			100*time.Millisecond,
+			time.Millisecond,
+		)
+		require.ErrorContains(t, err, "打开详情页失败")
+		require.Zero(t, calls)
+	})
+
+	t.Run("一次 renderer 读取失败不会提前终止", func(t *testing.T) {
+		calls := 0
+		snapshot, err := waitForDetailPageAfterNavigation(
+			context.Background(),
+			nil,
+			func() (detailPageSnapshot, error) {
+				calls++
+				if calls == 1 {
+					return detailPageSnapshot{}, errors.New("temporary cdp timeout")
+				}
+				return detailPageSnapshot{
+					State: "captcha", Path: "/website-login/captcha",
+				}, nil
+			},
+			100*time.Millisecond,
+			time.Millisecond,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "captcha", snapshot.State)
+		require.Equal(t, 2, calls)
+	})
+
+	t.Run("预算结束时保留最后一次安全状态", func(t *testing.T) {
+		snapshot, err := waitForDetailPageAfterNavigation(
+			context.Background(),
+			nil,
+			func() (detailPageSnapshot, error) {
+				return detailPageSnapshot{
+					Path: "/explore/note-id", ReadyState: "interactive", NoteCount: 0,
+				}, nil
+			},
+			8*time.Millisecond,
+			2*time.Millisecond,
+		)
+		require.EqualError(t, err, "等待详情正文超时")
+		require.Equal(t, "interactive", snapshot.ReadyState)
+	})
+}
 
 // TestIsExpandRepliesButton 两种文案都要认：带数字的，以及点开一次后不带数字的。
 func TestIsExpandRepliesButton(t *testing.T) {

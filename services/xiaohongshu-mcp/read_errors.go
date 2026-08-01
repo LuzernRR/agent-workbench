@@ -88,6 +88,7 @@ func classifyReadFailure(err error) readFailure {
 		strings.Contains(text, "没有捕获到") ||
 		strings.Contains(text, "无法获取初始状态") ||
 		strings.Contains(text, "not found in notedetailmap") ||
+		strings.Contains(text, "笔记不可访问") ||
 		strings.Contains(text, "没有可用正文") {
 		return readFailure{
 			Code:       "MCP_OUTPUT_INVALID",

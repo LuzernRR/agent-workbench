@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig, publicModelDefinitions } from "@/server/config/runtime-config";
 import { ImageInputError } from "@/server/media/image-input";
+import {
+  cancelXiaohongshuVerification,
+  requestXiaohongshuVerificationQrcode,
+  requestXiaohongshuVerificationStatus,
+  SearchAgentVerificationError
+} from "@/server/search-agent/client";
 import { resolveVisitor, VisitorSessionError } from "@/server/session/visitor";
 import { ensureLiveRecovery, startLiveRun, stopLiveRun, subscribeLiveRun } from "./engine";
 import {
@@ -210,6 +216,37 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
     }
 
     if (segments[0] === "runs" && segments[1]) {
+      if (segments[2] === "xiaohongshu-verifications" && segments[3]) {
+        const runId = segments[1];
+        const challengeId = segments[3];
+        const owned = await liveRun(visitor.id, runId);
+        if (!owned || owned.run.agentId !== "search-agent") return fail("验证会话不存在", 404, "VERIFICATION_NOT_FOUND");
+        try {
+          if (segments.length === 4 && method === "GET") {
+            return json(await requestXiaohongshuVerificationStatus(runId, challengeId));
+          }
+          if (segments.length === 5 && segments[4] === "qrcode" && method === "GET") {
+            const image = await requestXiaohongshuVerificationQrcode(runId, challengeId);
+            return new Response(image, {
+              headers: {
+                "content-type": "image/png",
+                "cache-control": "no-store",
+                "content-disposition": "inline",
+                "x-content-type-options": "nosniff"
+              }
+            });
+          }
+          if (segments.length === 4 && method === "DELETE") {
+            await cancelXiaohongshuVerification(runId, challengeId);
+            return json({ version: 1, runId, challengeId, status: "cancelled" });
+          }
+        } catch (error) {
+          if (error instanceof SearchAgentVerificationError) {
+            return fail(error.message, error.status, error.code);
+          }
+          throw error;
+        }
+      }
       if (segments[2] === "events" && method === "GET") {
         const queryAfter = Number(new URLSearchParams(search || "").get("after") || 0);
         const headerAfter = Number(request.headers.get("last-event-id") || 0);

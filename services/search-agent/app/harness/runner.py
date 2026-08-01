@@ -28,6 +28,7 @@ from app.run_control import RunRegistry, StopDecision
 if TYPE_CHECKING:
     from app.memory.milvus_store import MilvusEvidenceStore
     from app.persistence.tool_ledger import LedgerDecision
+    from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
 
 type AgentEvent = dict[str, Any]
 type DisconnectProbe = Callable[[], Awaitable[bool]]
@@ -80,6 +81,7 @@ class HarnessDependencies:
     ledger: HarnessLedger
     milvus: MilvusEvidenceStore | None
     run_registry: RunRegistry
+    xiaohongshu_verifications: XiaohongshuVerificationRegistry | None = None
 
 
 class ResumeScopeError(RuntimeError):
@@ -202,6 +204,7 @@ class HarnessRunner:
             config=config,
             ledger=dependencies.ledger,  # type: ignore[arg-type]
             milvus=dependencies.milvus,
+            xiaohongshu_verifications=dependencies.xiaohongshu_verifications,
         )
         graph_config = {
             "configurable": {"thread_id": f"run:{payload.run_id}"},
@@ -219,7 +222,9 @@ class HarnessRunner:
         last_state: dict[str, Any] | None = None
         try:
             graph_input = await self._resolve_graph_input(payload, graph_config)
-            async with self._timeout_factory(config.graph.max_run_seconds + 10):
+            timeout_context = self._timeout_factory(config.graph.max_run_seconds + 10)
+            verification_waits: dict[str, tuple[float, float]] = {}
+            async with timeout_context:
                 async for part in graph.astream(
                     graph_input,
                     config=graph_config,
@@ -230,7 +235,39 @@ class HarnessRunner:
                     if await is_disconnected():
                         raise asyncio.CancelledError("CLIENT_DISCONNECTED")
                     if part["type"] == "custom":
-                        yield part["data"]
+                        event = part["data"]
+                        event_type = event.get("type")
+                        challenge_id = event.get("challengeId")
+                        if (
+                            event_type == "tool.verification.required"
+                            and isinstance(challenge_id, str)
+                            and challenge_id not in verification_waits
+                        ):
+                            extension = (
+                                config.search.channels.xiaohongshu.verification_timeout_ms
+                                / 1000
+                                + 10
+                            )
+                            verification_waits[challenge_id] = (
+                                asyncio.get_running_loop().time(),
+                                extension,
+                            )
+                            self._shift_timeout(timeout_context, extension)
+                        elif (
+                            event_type == "tool.verification.resolved"
+                            and isinstance(challenge_id, str)
+                            and challenge_id in verification_waits
+                        ):
+                            waiting_at, extension = verification_waits.pop(challenge_id)
+                            waited = max(
+                                0.0,
+                                asyncio.get_running_loop().time() - waiting_at,
+                            )
+                            self._shift_timeout(
+                                timeout_context,
+                                -max(0.0, extension - waited),
+                            )
+                        yield event
                     elif part["type"] == "values":
                         last_state = part["data"]
             if payload.resume and not last_state:
@@ -285,23 +322,50 @@ class HarnessRunner:
         finally:
             await dependencies.run_registry.finish(payload.run_id, task)
 
-        if not last_state or not last_state.get("answer"):
+        model_calls = int((last_state or {}).get("model_calls") or 0)
+        answer_model_calls = int((last_state or {}).get("answer_model_calls") or 0)
+        if (
+            not last_state
+            or not last_state.get("answer")
+            or last_state.get("answer_source") != "model"
+            or answer_model_calls <= 0
+            or model_calls < answer_model_calls
+        ):
+            if last_state and last_state.get("answer"):
+                reason_code = "NON_MODEL_OUTPUT"
+            else:
+                reason_code = str((last_state or {}).get("stop_reason") or "EMPTY_OUTPUT")
+            if not reason_code.replace("_", "").isalnum() or not reason_code.isupper():
+                reason_code = "EMPTY_OUTPUT"
             yield runtime_event(
                 "run.failed",
-                reasonCode="EMPTY_OUTPUT",
-                message="Agent 没有生成可交付结果",
+                reasonCode=reason_code,
+                message="Agent 没有生成可交付的模型回答",
             )
             return
         yield runtime_event(
             "run.completed",
             answerMarkdown=last_state["answer"],
+            answerSource="model",
+            answerModelCalls=answer_model_calls,
             promptVersion=last_state.get("prompt_version") or PROMPT_VERSION,
             responseStatus=last_state.get("response_status") or "partial",
             citations=last_state.get("citations") or [],
             verificationPassed=bool(last_state.get("verification_passed")),
             stopReason=last_state.get("stop_reason") or "UNKNOWN",
             usage=last_state.get("usage") or {},
-            modelCalls=int(last_state.get("model_calls") or 0),
+            modelCalls=model_calls,
             toolCalls=int(last_state.get("tool_calls") or 0),
             evidenceCount=len(last_state.get("evidence") or []),
         )
+
+    @staticmethod
+    def _shift_timeout(timeout_context: Any, seconds: float) -> None:
+        """仅在真实安全验证等待期间平移 asyncio 的硬截止时间。"""
+        when = getattr(timeout_context, "when", None)
+        reschedule = getattr(timeout_context, "reschedule", None)
+        if not callable(when) or not callable(reschedule):
+            return
+        deadline = when()
+        if deadline is not None:
+            reschedule(deadline + seconds)

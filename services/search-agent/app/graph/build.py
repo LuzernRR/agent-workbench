@@ -55,9 +55,16 @@ _PUBLIC_SUMMARY_NODES = frozenset({"plan_research", "reflect", "verify"})
 def _novel_public_summary(
     name: str,
     summary: str | None,
+    source: str | None,
+    model_call_recorded: bool,
     prior_steps: list[dict[str, Any]],
 ) -> str | None:
-    if name not in _PUBLIC_SUMMARY_NODES or not summary:
+    if (
+        name not in _PUBLIC_SUMMARY_NODES
+        or source != "model"
+        or not model_call_recorded
+        or not summary
+    ):
         return None
     normalized = "".join(summary.split()).casefold()
     if not normalized:
@@ -98,10 +105,16 @@ def _evented(name: str, function: Node) -> Node:
             ))
             raise
         steps = patch.get("steps") or []
-        raw_summary = steps[-1].get("summary") if steps else None
+        latest_step = steps[-1] if steps else {}
+        raw_summary = latest_step.get("summary")
+        prior_model_calls = int(state.get("model_calls") or 0)
+        current_model_calls = int(patch.get("model_calls", prior_model_calls) or 0)
+        model_call_recorded = current_model_calls > prior_model_calls
         public_summary = _novel_public_summary(
             name,
             raw_summary,
+            latest_step.get("kind"),
+            model_call_recorded,
             list(state.get("steps") or []),
         )
         writer(runtime_event(
@@ -112,12 +125,18 @@ def _evented(name: str, function: Node) -> Node:
             iteration=iteration,
             durationMs=round((time.perf_counter() - started) * 1000),
             publicSummary=public_summary or None,
+            publicSummarySource="model" if public_summary else None,
         ))
-        if name == "plan_research" and patch.get("pending_queries"):
+        if (
+            name == "plan_research"
+            and patch.get("pending_queries")
+            and model_call_recorded
+        ):
             writer(runtime_event(
                 "plan.updated",
                 iteration=patch.get("round", iteration),
                 queries=patch["pending_queries"],
+                planSource="model",
             ))
         if name == "verify":
             writer(runtime_event(
@@ -126,6 +145,7 @@ def _evented(name: str, function: Node) -> Node:
                 passed=bool(patch.get("verification_passed")),
                 action=patch.get("verification_action") or "research_more",
                 publicSummary=public_summary or None,
+                publicSummarySource="model" if public_summary else None,
             ))
         return patch
 

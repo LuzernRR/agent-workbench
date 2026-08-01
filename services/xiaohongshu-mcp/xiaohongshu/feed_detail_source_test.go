@@ -34,3 +34,16 @@ func TestMakeFeedDetailURLUsesExplicitAllowlistedSource(t *testing.T) {
 		url,
 	)
 }
+
+func TestMakeFeedDetailURLEncodesSignedToken(t *testing.T) {
+	actual := makeFeedDetailURLWithSource(
+		"feed123",
+		"signed+/=&token",
+		FeedDetailSourcePCSearch,
+	)
+	assert.Equal(
+		t,
+		"https://www.xiaohongshu.com/explore/feed123?xsec_token=signed%2B%2F%3D%26token&xsec_source=pc_search",
+		actual,
+	)
+}

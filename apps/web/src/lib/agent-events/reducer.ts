@@ -56,6 +56,13 @@ function numberValue(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function verificationHrefValue(value: unknown, fallback?: string) {
+  if (typeof value !== "string") return fallback;
+  return /^\/workbench\/verify\/xiaohongshu\/[A-Za-z0-9_.:-]+\/[A-Za-z0-9_-]{43}$/u.test(value)
+    ? value
+    : fallback;
+}
+
 function attachmentsValue(value: unknown): MessageAttachment[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const attachments = value.filter((item): item is MessageAttachment => {
@@ -424,7 +431,9 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
             provider: stringValue(payload.provider, current.provider) || undefined,
             primaryProvider: stringValue(payload.primaryProvider, current.primaryProvider) || undefined,
             effectiveProvider: stringValue(payload.effectiveProvider, current.effectiveProvider) || undefined,
-            reasonCode: stringValue(payload.reasonCode, current.reasonCode) || undefined,
+            reasonCode: payload.clearReasonCode === true
+              ? undefined
+              : stringValue(payload.reasonCode, current.reasonCode) || undefined,
             resolutionMessage: stringValue(payload.resolutionMessage, current.resolutionMessage) || undefined,
             nextAction: ["none", "use_fallback", "use_alternative_channel", "reconnect_account", "retry_later", "stop"].includes(stringValue(payload.nextAction))
               ? stringValue(payload.nextAction) as ToolItem["nextAction"]
@@ -437,6 +446,14 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
               : current.sourcePresentationActive,
             cached: typeof payload.cached === "boolean" ? payload.cached : current.cached,
             retryable: typeof payload.retryable === "boolean" ? payload.retryable : current.retryable,
+            verificationStatus: ["pending", "succeeded", "expired", "account_mismatch", "failed", "cancelled"].includes(stringValue(payload.verificationStatus))
+              ? stringValue(payload.verificationStatus) as ToolItem["verificationStatus"]
+              : current.verificationStatus,
+            verificationHref: verificationHrefValue(payload.verificationHref, current.verificationHref),
+            verificationExpiresAt: typeof payload.verificationExpiresAt === "string" && Number.isFinite(Date.parse(payload.verificationExpiresAt))
+              ? payload.verificationExpiresAt
+              : current.verificationExpiresAt,
+            verificationMessage: stringValue(payload.verificationMessage, current.verificationMessage).slice(0, 300) || undefined,
             progress,
             output: stringValue(payload.output, current.output),
             rawResult: payload.rawResult ?? current.rawResult,

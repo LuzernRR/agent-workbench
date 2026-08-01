@@ -39,7 +39,7 @@ class ThinkStep(TypedDict):
 
     node: NodeName
     kind: Literal["model", "deterministic"]
-    summary: str  # 显示在对话框的思考摘要
+    summary: str  # 仅 model step 可非空；显示在对话框的公开摘要
     detail: str  # 内部细节，可含结构化数据，不发给前端 publicText
 
 
@@ -172,10 +172,13 @@ class SearchState(TypedDict, total=False):
     max_total_tokens: int
     max_cost_usd: float
     no_progress_limit: int
+    external_wait_seconds: float
     usage: UsageTotals
 
     # 最终产出
     answer: str | None
+    answer_source: Literal["model", "none"]
+    answer_model_calls: int
     response_status: Literal["completed", "partial"]
 
 
@@ -245,6 +248,7 @@ def initial_state(
         max_total_tokens=min(max_total_tokens, 500_000),
         max_cost_usd=min(max_cost_usd, 5.0),
         no_progress_limit=min(max(no_progress_limit, 1), 3),
+        external_wait_seconds=0.0,
         no_progress_count=0,
         replan_required=False,
         verification_passed=False,
@@ -254,5 +258,7 @@ def initial_state(
         schema_repair_count=0,
         usage=UsageTotals(input_tokens=0, output_tokens=0, total_tokens=0, cost_usd=0.0),
         answer=None,
+        answer_source="none",
+        answer_model_calls=0,
         response_status="partial",
     )

@@ -1,7 +1,10 @@
 package xiaohongshu
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +55,64 @@ func TestCollectFilters(t *testing.T) {
 		_, err := collectFilters([]FilterOption{{SortBy: "视频"}})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "排序依据")
+	})
+}
+
+func TestWaitForSearchPageState(t *testing.T) {
+	t.Run("轮询到结构化结果后立即返回", func(t *testing.T) {
+		calls := 0
+		snapshot, err := waitForSearchPageState(
+			context.Background(),
+			func() (searchPageSnapshot, error) {
+				calls++
+				if calls < 3 {
+					return searchPageSnapshot{Path: "/search_result", FeedCount: 0}, nil
+				}
+				return searchPageSnapshot{
+					State: "ready", Path: "/search_result", FeedCount: 20,
+				}, nil
+			},
+			100*time.Millisecond,
+			time.Millisecond,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "ready", snapshot.State)
+		require.Equal(t, 20, snapshot.FeedCount)
+		require.Equal(t, 3, calls)
+	})
+
+	t.Run("一次 renderer 读取失败不会提前终止", func(t *testing.T) {
+		calls := 0
+		snapshot, err := waitForSearchPageState(
+			context.Background(),
+			func() (searchPageSnapshot, error) {
+				calls++
+				if calls == 1 {
+					return searchPageSnapshot{}, errors.New("temporary cdp timeout")
+				}
+				return searchPageSnapshot{State: "rate_limited", RateLimited: true}, nil
+			},
+			100*time.Millisecond,
+			time.Millisecond,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "rate_limited", snapshot.State)
+		require.Equal(t, 2, calls)
+	})
+
+	t.Run("预算结束时返回最后一次安全状态", func(t *testing.T) {
+		snapshot, err := waitForSearchPageState(
+			context.Background(),
+			func() (searchPageSnapshot, error) {
+				return searchPageSnapshot{
+					Path: "/search_result", ExploreLinks: 7, FeedCount: -1,
+				}, nil
+			},
+			8*time.Millisecond,
+			2*time.Millisecond,
+		)
+		require.EqualError(t, err, "等待搜索结果超时")
+		require.Equal(t, 7, snapshot.ExploreLinks)
 	})
 }
 

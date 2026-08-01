@@ -52,6 +52,8 @@ const completedEvent = {
   version: 1,
   type: "run.completed",
   answerMarkdown: "基于来源的回答",
+  answerSource: "model",
+  answerModelCalls: 1,
   promptVersion: "2026-07-28.v2",
   responseStatus: "completed",
   citations: [{ label: "官方来源", url: "https://example.com/source" }],
@@ -89,7 +91,7 @@ describe("live Search Agent engine", () => {
   it("把真实 Agent 流白名单映射、持久化并原子结算最终回答", async () => {
     searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
       yield { ...sourceEnvelope, type: "node.started", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 0 };
-      yield { ...sourceEnvelope, type: "node.completed", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 0, durationMs: 20, publicSummary: "将检索官方来源并核对最新信息" };
+      yield { ...sourceEnvelope, type: "node.completed", node: "plan_research", nodeRunId: "plan_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "planner", iteration: 0, durationMs: 20, publicSummary: "将检索官方来源并核对最新信息", publicSummarySource: "model" };
       yield { ...sourceEnvelope, type: "tool.started", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", cached: false };
       yield { ...sourceEnvelope, type: "tool.completed", toolCallId: "call_one", toolName: "web_search", query: "最新 LangGraph", channel: "web", provider: "tavily", summary: "找到 1 条结果", resultCount: 1, evidenceCount: 1, results: [{ channel: "web", provider: "tavily", query: "最新 LangGraph", title: "官方来源", url: "https://example.com/source", snippet: "不得持久化", verified: true, author: null, published_at: null, metrics: {}, limitation: null, provenance: { discovery_provider: "tavily", detail_provider: "trafilatura", source_kind: "public_page", observed_at: "2026-07-28T00:00:00Z", confidence: "high" } }], cached: false };
       yield completedEvent;

@@ -37,6 +37,57 @@ export function summarizeSearchActivity(items: readonly ToolItem[]) {
   return "未找到相关结果，读取 0 个来源";
 }
 
+type SearchRecoveryNotice = {
+  key: "xiaohongshu-captcha" | "xiaohongshu-auth";
+  message: string;
+  href?: string;
+  linkLabel?: string;
+};
+
+function searchRecoveryNotice(item: Pick<ToolItem, "channel" | "reasonCode" | "verificationStatus" | "verificationHref">): SearchRecoveryNotice | null {
+  if (item.channel !== "xiaohongshu") return null;
+  if (item.verificationStatus === "pending" && item.verificationHref) {
+    return {
+      key: "xiaohongshu-captcha",
+      message: "小红书工具账号需要安全验证。打开验证页并用小红书 App 扫码；成功后当前搜索会自动继续。",
+      href: item.verificationHref,
+      linkLabel: "立即验证"
+    };
+  }
+  if (item.verificationStatus === "expired") {
+    return { key: "xiaohongshu-captcha", message: "小红书工具账号验证已超时，当前运行已停止等待并进入受控降级。" };
+  }
+  if (item.verificationStatus === "account_mismatch") {
+    return { key: "xiaohongshu-captcha", message: "扫码账号与当前工具账号不一致，登录会话未被更新。" };
+  }
+  if (item.verificationStatus === "cancelled") {
+    return { key: "xiaohongshu-captcha", message: "小红书工具账号验证已取消，当前运行将按可用证据继续。" };
+  }
+  if (item.verificationStatus === "failed") {
+    return { key: "xiaohongshu-captcha", message: "小红书工具账号验证未完成，当前运行将返回结构化降级结果。" };
+  }
+  if (item.reasonCode === "CAPTCHA_REQUIRED") {
+    return {
+      key: "xiaohongshu-captcha",
+      message: "小红书要求安全验证，但工具账号验证入口未能建立；当前运行不会打开普通小红书页面。"
+    };
+  }
+  if (item.reasonCode === "AUTH_REQUIRED") {
+    return {
+      key: "xiaohongshu-auth",
+      message: "小红书工具账号登录状态已失效，当前无法安全确认原账号；Workbench 不会打开无关页面或收集登录凭据。"
+    };
+  }
+  return null;
+}
+
+function SearchRecoveryNoticeView({ notice, className }: { notice: SearchRecoveryNotice; className: string }) {
+  return <p className={className}>
+    {notice.message}
+    {notice.href && notice.linkLabel ? <> <a href={notice.href} target="_blank" rel="noopener noreferrer" className="font-medium text-link underline decoration-line underline-offset-2 hover:text-ink">{notice.linkLabel}</a></> : null}
+  </p>;
+}
+
 function sourceLine(source: NonNullable<ToolItem["sources"]>[number], fallback: string) {
   const platform = source.channel === "x" ? "X" : source.channel === "xiaohongshu" ? "小红书" : source.channel === "web" ? "网页" : "";
   const author = source.author ? source.author.replace(/^@/u, "").trim() : "";
@@ -54,6 +105,11 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
   const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
   if (!items.length) return null;
   const expanded = active || isCurrentStep || (settledKey !== null && manuallyOpenedKey === settledKey);
+  const recoveryNotices = new Map<SearchRecoveryNotice["key"], SearchRecoveryNotice>();
+  for (const item of items) {
+    const notice = searchRecoveryNotice(item);
+    if (notice) recoveryNotices.set(notice.key, notice);
+  }
   const sources = new Map<string, NonNullable<ToolItem["sources"]>[number]>();
   for (const item of items) {
     for (const source of item.sources || []) {
@@ -65,7 +121,7 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
     }
   }
   return <div
-    className="conversation-lane my-2 text-[15px] leading-6 text-tertiary"
+    className="conversation-lane workbench-disclosure-row text-[15px] leading-6 text-tertiary"
     data-search-activity-summary
     data-tool-call-id={items[0].toolCallId}
     data-tool-call-count={items.length}
@@ -73,7 +129,8 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
   >
     <button
       type="button"
-      className="flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-0 text-left text-tertiary hover:text-secondary"
+      className="workbench-disclosure-trigger flex max-w-full items-center gap-1.5 rounded-md px-0 text-left text-tertiary hover:text-secondary"
+      data-workbench-disclosure-trigger
       aria-expanded={expanded}
       aria-label={`${expanded ? "收起" : "展开"}搜索详情`}
       onClick={() => {
@@ -84,6 +141,9 @@ export function SearchActivitySummary({ items, isCurrentStep = false }: { items:
       <ChevronRight className={cn("size-4 shrink-0 transition-transform duration-150", expanded && "rotate-90")} />
       <span>搜索记录</span>
     </button>
+    {recoveryNotices.size ? <div className="ml-5 mt-1 space-y-1 text-[14px] leading-5 text-warning" role="status" aria-live="polite" data-search-safety-notice>
+      {[...recoveryNotices.values()].map((notice) => <SearchRecoveryNoticeView key={notice.key} notice={notice} className="break-words" />)}
+    </div> : null}
     {expanded ? <div className="ml-2 mt-1 space-y-1 border-l border-line pl-4 text-secondary" data-search-activity-details>
       {items.filter((item) => !["preparing", "running", "waiting"].includes(item.status)).map((item) => <p key={`settled:${item.toolCallId}`} className="break-words" data-search-settlement>
         {item.query ? `${item.query}：` : ""}{item.outcomeStatus === "degraded" ? "受控降级，" : ""}{summarizeSearchActivity([item])}
@@ -107,9 +167,10 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
   const summary = commandTool
     ? item.status === "completed" ? "运行了多个命令" : item.status === "failed" ? "命令执行失败" : "正在运行命令"
     : genericSummary ? item.name : item.summary || item.name;
+  const recoveryNotice = searchRecoveryNotice(item);
   return (
-    <div className="conversation-lane my-2" data-tool-call-id={item.toolCallId}>
-      <button type="button" className="group flex min-h-9 w-full min-w-0 items-start gap-2 rounded-lg px-0.5 py-1 text-left text-tertiary transition-colors duration-150 hover:text-secondary" onClick={() => {
+    <div className="conversation-lane workbench-disclosure-row" data-tool-call-id={item.toolCallId}>
+      <button type="button" className="workbench-disclosure-trigger group flex w-full min-w-0 items-start gap-2 rounded-lg px-0.5 text-left text-tertiary transition-colors duration-150 hover:text-secondary" data-workbench-disclosure-trigger onClick={() => {
         if (settledKey === null || isCurrentStep) return;
         setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
       }} aria-expanded={expanded} aria-label={`${expanded ? "收起" : "展开"}工具调用：${item.name}`} title={summary}>
@@ -118,6 +179,7 @@ export function ActivityRow({ item, isCurrentStep = false }: { item: ToolItem; i
         <span className="mt-0.5 shrink-0 text-[15px] tabular-nums text-tertiary">{duration || status}</span>
         <ChevronRight className={cn("mt-1 size-4 shrink-0 transition-transform duration-150", expanded && "rotate-90")} />
       </button>
+      {recoveryNotice ? <div role="status" aria-live="polite" data-search-safety-notice><SearchRecoveryNoticeView notice={recoveryNotice} className="ml-7 mt-1 break-words text-[14px] leading-5 text-warning" /></div> : null}
       {expanded ? (
         <div className="ml-2 mt-1 grid gap-x-8 gap-y-2 border-l border-line py-1.5 pl-5 text-[15px] leading-6 text-secondary md:grid-cols-2">
           <Detail label="状态">{status}</Detail>

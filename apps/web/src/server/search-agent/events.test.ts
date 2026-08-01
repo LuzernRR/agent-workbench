@@ -94,6 +94,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       ...sourceEnvelope,
       type: "run.completed",
       answerMarkdown: "回答",
+      answerSource: "model",
+      answerModelCalls: 1,
       promptVersion: "2026-07-28.v2",
       responseStatus: "completed",
       verificationPassed: true,
@@ -121,6 +123,8 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       ...sourceEnvelope,
       type: "run.completed",
       answerMarkdown: "带来源回答",
+      answerSource: "model",
+      answerModelCalls: 1,
       promptVersion: "2026-07-28.v2",
       responseStatus: "partial",
       citations: [],
@@ -139,7 +143,7 @@ describe("Search Agent 严格 NDJSON 边界", () => {
 
   it("允许上限内 60 条安全引用和固定 unknown_tool 防御事件", () => {
     const citations = Array.from({ length: 60 }, (_, index) => ({ label: `来源 ${index + 1}`, url: `https://example.com/${index + 1}` }));
-    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.completed", answerMarkdown: "回答", promptVersion: "2026-07-28.v2", responseStatus: "completed", citations, verificationPassed: true, stopReason: "VERIFIED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 1, toolCalls: 1, evidenceCount: 60 }).type).toBe("run.completed");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.completed", answerMarkdown: "回答", answerSource: "model", answerModelCalls: 1, promptVersion: "2026-07-28.v2", responseStatus: "completed", citations, verificationPassed: true, stopReason: "VERIFIED", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 1, toolCalls: 1, evidenceCount: 60 }).type).toBe("run.completed");
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_unknown", toolName: "unknown_tool", query: "原计划查询", channel: "web", provider: "none", reasonCode: "UNKNOWN_TOOL", message: "Researcher 请求了未注册工具", retryable: false, durationMs: 0 }).type).toBe("tool.failed");
     expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "tool.failed", toolCallId: "call_partial", toolName: "web_search", query: "LangGraph", channel: "xiaohongshu", provider: "xiaohongshu-mcp", reasonCode: "RUN_TIME_RESERVE", message: "为核验保留时间", retryable: false, resultCount: 5, evidenceCount: 1, durationMs: 18001 }).type).toBe("tool.failed");
   });
@@ -149,6 +153,7 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       ...sourceEnvelope,
       type: "tool.presented",
       toolCallId: "call_one",
+      presentationSource: "model",
       sources: [{ url: "https://example.com/source", text: "该来源说明了 LangGraph 的状态图用法。" }]
     });
     expect(event.type).toBe("tool.presented");
@@ -156,7 +161,65 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       ...sourceEnvelope,
       type: "tool.presented",
       toolCallId: "call_one",
+      presentationSource: "model",
       sources: [{ url: "javascript:alert(1)", text: "危险来源" }]
+    })).toThrow();
+  });
+
+  it("拒绝缺少真实模型来源凭据或来源字段不一致的生成性内容", () => {
+    const completed = {
+      ...sourceEnvelope,
+      type: "run.completed",
+      answerMarkdown: "模型回答",
+      answerSource: "model",
+      answerModelCalls: 1,
+      promptVersion: "2026-08-01.v25-model-origin-public-output",
+      responseStatus: "completed",
+      citations: [],
+      verificationPassed: true,
+      stopReason: "VERIFIED",
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 },
+      modelCalls: 1,
+      toolCalls: 0,
+      evidenceCount: 0
+    };
+    expect(() => parseSearchAgentEvent({ ...completed, answerSource: undefined })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...completed, answerSource: "template" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...completed, answerModelCalls: 0 })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...completed, answerModelCalls: 2 })).toThrow(/Writer 模型调用数/u);
+
+    const nodeCompleted = {
+      ...sourceEnvelope,
+      type: "node.completed",
+      node: "plan_research",
+      nodeRunId: "plan_model_origin",
+      agent: "planner",
+      iteration: 1,
+      durationMs: 12,
+      publicSummary: "由模型生成的计划摘要",
+      publicSummarySource: "model"
+    };
+    expect(parseSearchAgentEvent(nodeCompleted).type).toBe("node.completed");
+    expect(() => parseSearchAgentEvent({ ...nodeCompleted, publicSummarySource: null })).toThrow(/同时存在/u);
+    expect(() => parseSearchAgentEvent({ ...nodeCompleted, publicSummary: null })).toThrow(/同时存在/u);
+    expect(() => parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "plan.updated",
+      iteration: 1,
+      queries: ["真实模型查询"]
+    })).toThrow();
+    expect(parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "plan.updated",
+      iteration: 1,
+      queries: ["真实模型查询"],
+      planSource: "model"
+    }).type).toBe("plan.updated");
+    expect(() => parseSearchAgentEvent({
+      ...sourceEnvelope,
+      type: "tool.presented",
+      toolCallId: "call_one",
+      sources: [{ url: "https://example.com/source", text: "正文支持这一结论。" }]
     })).toThrow();
   });
 
@@ -185,6 +248,32 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       evidenceCount: 1,
       source: webResult({ verified: true, limitation: null })
     }).type).toBe("tool.progress");
+  });
+
+  it("只接受不含二维码和内部地址的工具账号验证事件", () => {
+    const required = {
+      ...sourceEnvelope,
+      type: "tool.verification.required",
+      toolCallId: "call_xhs",
+      challengeId: "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789",
+      status: "pending",
+      expiresAt: "2026-07-28T00:04:00Z",
+      retryAfterMs: 2000,
+      reasonCode: null,
+      message: "等待使用小红书 App 扫码验证工具账号"
+    };
+    expect(parseSearchAgentEvent(required).type).toBe("tool.verification.required");
+    expect(parseSearchAgentEvent({ ...required, type: "tool.verification.heartbeat" }).type).toBe("tool.verification.heartbeat");
+    expect(parseSearchAgentEvent({
+      ...required,
+      type: "tool.verification.resolved",
+      status: "succeeded",
+      reasonCode: null,
+      message: "小红书工具账号验证成功"
+    }).type).toBe("tool.verification.resolved");
+    expect(() => parseSearchAgentEvent({ ...required, qrcode: "data:image/png;base64,secret" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...required, internalUrl: "http://xiaohongshu-mcp:18060" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...required, challengeId: "short" })).toThrow();
   });
 
   it("接受隔离登录态读取的来源类型，但公开事件仍不允许凭据字段", () => {

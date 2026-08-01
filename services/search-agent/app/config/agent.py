@@ -69,6 +69,18 @@ class XiaohongshuChannelConfig(BaseModel):
     )
     max_attempts: int = Field(default=2, alias="maxAttempts", ge=1, le=3)
     read_public_details: bool = Field(alias="readPublicDetails")
+    verification_timeout_ms: int = Field(
+        default=240_000,
+        alias="verificationTimeoutMs",
+        ge=60_000,
+        le=300_000,
+    )
+    verification_poll_max_ms: int = Field(
+        default=5_000,
+        alias="verificationPollMaxMs",
+        ge=500,
+        le=10_000,
+    )
 
 
 class SearchChannelsConfig(BaseModel):

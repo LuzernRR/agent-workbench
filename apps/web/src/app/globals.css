@@ -93,6 +93,12 @@ button:focus-visible { color: var(--text-primary); }
   .primary-button {
     @apply inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-ink bg-ink px-3 text-[15px] font-medium text-white shadow-sm transition-all duration-150 hover:bg-black hover:border-black active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50;
   }
+  .workbench-disclosure-row {
+    @apply mb-1;
+  }
+  .workbench-disclosure-trigger {
+    @apply min-h-8 py-0;
+  }
   .status-dot {
     @apply size-1.5 shrink-0 rounded-full bg-tertiary;
   }

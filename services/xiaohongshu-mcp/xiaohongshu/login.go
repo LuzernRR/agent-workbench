@@ -78,8 +78,16 @@ func (a *LoginAction) CurrentUser(ctx context.Context) (*CurrentUser, error) {
 	res, err := pp.Eval(`() => {
 		const u = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user;
 		const info = u && u.userInfo && u.userInfo.value !== undefined ? u.userInfo.value : (u && u.userInfo);
-		if (!info || info.guest) return "";
-		return JSON.stringify({nickname: info.nickname, userId: info.userId || info.user_id});
+		if (info && !info.guest) {
+			const userId = info.userId || info.user_id;
+			if (userId) return JSON.stringify({nickname: info.nickname || "", userId});
+		}
+		const anchor = document.querySelector('a[href*="/user/profile/"]');
+		const href = anchor && anchor.getAttribute("href") || "";
+		const match = href.match(/\/user\/profile\/([^/?#]+)/);
+		if (!match) return "";
+		const nickname = (anchor.getAttribute("title") || anchor.textContent || "").trim();
+		return JSON.stringify({nickname, userId: decodeURIComponent(match[1])});
 	}`)
 	if err != nil {
 		return nil, errors.Wrap(err, "read current user state failed")
@@ -136,6 +144,70 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	}
 
 	return *src, false, nil
+}
+
+// FetchCurrentVerificationQrcode 只读取当前工具会话已经触发的安全验证页。
+// 它不会导航到首页，也不会创建或切换账号，因此返回的二维码与原搜索会话绑定。
+func (a *LoginAction) FetchCurrentVerificationQrcode(
+	ctx context.Context,
+) (string, bool, error) {
+	pp := a.page.Context(ctx)
+	const qrcodeReady = `() => {
+		if (!window.location.pathname.startsWith("/website-login/captcha")) return false;
+		const image = document.querySelector(
+			'.qrcode-img, .qrcode-container img, [class*="qrcode"] img, img[src^="data:image/png;base64,"]'
+		);
+		const src = image && image.getAttribute("src") || "";
+		return src.startsWith("data:image/png;base64,");
+	}`
+	if err := rod.Try(func() {
+		pp.Timeout(8 * time.Second).MustWait(qrcodeReady)
+	}); err != nil {
+		return "", false, errors.Wrap(err, "current verification qrcode unavailable")
+	}
+	result, err := pp.Timeout(3 * time.Second).Eval(`() => {
+		const image = document.querySelector(
+			'.qrcode-img, .qrcode-container img, [class*="qrcode"] img, img[src^="data:image/png;base64,"]'
+		);
+		return image && image.getAttribute("src") || "";
+	}`)
+	if err != nil {
+		return "", false, errors.Wrap(err, "read current verification qrcode failed")
+	}
+	src := result.Value.String()
+	if src == "" {
+		return "", false, errors.New("current verification qrcode is empty")
+	}
+	return src, false, nil
+}
+
+// WaitForVerification 等待当前 CAPTCHA 页完成并回到正常业务页面。
+func (a *LoginAction) WaitForVerification(ctx context.Context) bool {
+	pp := a.page.Context(ctx)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			result, err := pp.Timeout(2 * time.Second).Eval(`() => {
+				const path = window.location.pathname;
+				if (path.startsWith("/website-login/captcha")) return "pending";
+				if (path.startsWith("/website-login/error")) return "failed";
+				return "resolved";
+			}`)
+			if err == nil {
+				switch result.Value.String() {
+				case "resolved":
+					return true
+				case "failed":
+					return false
+				}
+			}
+		}
+	}
 }
 
 func (a *LoginAction) WaitForLogin(ctx context.Context) bool {

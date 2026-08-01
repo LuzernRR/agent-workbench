@@ -5,7 +5,8 @@
 才能进入证据链。因此本模块只返回候选 URL 列表。
 
 Provider 策略：
-- 配置了 Tavily API Key 时走 Tavily（项目文档指定的首选）。
+- 配置了 Tavily API Key 池时走 Tavily（项目文档指定的首选）。
+- 当前 Key 认证失败、限流、额度耗尽或不可用时，按配置顺序切换下一把 Key。
 - 未配置 Key 时回退到 DuckDuckGo HTML 端点，保证链路无 Key 也能真实运行。
 
 回退不是「假搜索」：它发出真实 HTTP 请求并解析真实结果。
@@ -20,6 +21,7 @@ import json
 import os
 import pathlib
 import re
+import threading
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -36,6 +38,14 @@ _TAVILY_ENDPOINT = "https://api.tavily.com/search"
 _UA = "Mozilla/5.0 (compatible; AgentWorkbench-SearchAgent/0.1)"
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+
+_TAVILY_CREDENTIAL_FAILURES = frozenset(
+    {"auth_required", "rate_limited", "quota_exhausted"}
+)
+_TAVILY_PROVIDER_FAILURE_KEY_LIMIT = 2
+_TAVILY_KEY_STATE_LOCK = threading.Lock()
+_tavily_key_state_signature: tuple[str, ...] = ()
+_tavily_key_state_index = 0
 
 
 @dataclass(frozen=True)
@@ -68,34 +78,113 @@ class SearchOutcome:
         return [hit.url for hit in self.hits]
 
 
-def _tavily_key() -> str | None:
-    """读取 Tavily Key。
+def _deduplicate_keys(values: list[object]) -> tuple[str, ...]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        key = value.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return tuple(keys)
 
-    优先级：环境变量 TAVILY_API_KEY（便于临时覆盖）> config/search.local.json。
+
+def _split_env_keys(value: str) -> list[str]:
+    return re.split(r"[,;\r\n]+", value)
+
+
+def _tavily_keys_from_config(data: object) -> tuple[str, ...]:
+    """按优先池、旧单 Key、末级备用池的顺序解析私密配置。"""
+    if not isinstance(data, dict):
+        return ()
+    search = data.get("search")
+    if not isinstance(search, dict):
+        return ()
+    providers = search.get("providers")
+    if not isinstance(providers, dict):
+        return ()
+    tavily = providers.get("tavily")
+    if not isinstance(tavily, dict):
+        return ()
+
+    priority = tavily.get("apiKeys")
+    fallback = tavily.get("fallbackApiKeys")
+    values: list[object] = []
+    if isinstance(priority, list):
+        values.extend(priority)
+    values.append(tavily.get("apiKey"))
+    if isinstance(fallback, list):
+        values.extend(fallback)
+    return _deduplicate_keys(values)
+
+
+def _tavily_keys() -> tuple[str, ...]:
+    """读取有序 Tavily Key 池。
+
+    优先级：服务端环境变量 > config/search.local.json。环境变量支持
+    ``TAVILY_API_KEYS``（逗号、分号或换行分隔）、兼容旧
+    ``TAVILY_API_KEY``，以及末级 ``TAVILY_FALLBACK_API_KEYS``。
+
+    本地配置顺序为 ``apiKeys`` 优先池 > 兼容旧 ``apiKey`` >
+    ``fallbackApiKeys`` 末级备用池。
     该配置文件已被 .gitignore（config/*.local.json）忽略；Key 只在进程内持有，
     不写入日志、事件或返回给浏览器的内容。
     """
-    env_key = os.environ.get("TAVILY_API_KEY", "").strip()
-    if env_key:
-        return env_key
+    env_values = [
+        *_split_env_keys(os.environ.get("TAVILY_API_KEYS", "")),
+        os.environ.get("TAVILY_API_KEY", ""),
+        *_split_env_keys(os.environ.get("TAVILY_FALLBACK_API_KEYS", "")),
+    ]
+    env_keys = _deduplicate_keys(env_values)
+    if env_keys:
+        return env_keys
 
     # search-agent/app/tools/web_search.py -> 上溯到仓库根的 config/
     repo_root = pathlib.Path(__file__).resolve().parents[4]
     config_file = repo_root / "config" / "search.local.json"
     if not config_file.is_file():
-        return None
+        return ()
     try:
         data = json.loads(config_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return None
-    key = (
-        (data.get("search") or {})
-        .get("providers", {})
-        .get("tavily", {})
-        .get("apiKey", "")
-    )
-    key = key.strip() if isinstance(key, str) else ""
-    return key or None
+        return ()
+    return _tavily_keys_from_config(data)
+
+
+def _reset_tavily_key_state() -> None:
+    """重置进程内游标，供配置变化和确定性测试使用。"""
+    global _tavily_key_state_index, _tavily_key_state_signature
+    with _TAVILY_KEY_STATE_LOCK:
+        _tavily_key_state_signature = ()
+        _tavily_key_state_index = 0
+
+
+def _tavily_key_candidates(keys: tuple[str, ...]) -> tuple[tuple[int, str], ...]:
+    """从当前进程游标返回剩余 Key，不在请求或日志中暴露索引对应值。"""
+    global _tavily_key_state_index, _tavily_key_state_signature
+    with _TAVILY_KEY_STATE_LOCK:
+        if _tavily_key_state_signature != keys:
+            _tavily_key_state_signature = keys
+            _tavily_key_state_index = 0
+        start = min(_tavily_key_state_index, max(len(keys) - 1, 0))
+    return tuple(enumerate(keys[start:], start=start))
+
+
+def _select_tavily_key(keys: tuple[str, ...], index: int) -> None:
+    """将后续请求游标推进到成功 Key 或当前失败 Key 的下一位。"""
+    global _tavily_key_state_index
+    if not keys:
+        return
+    with _TAVILY_KEY_STATE_LOCK:
+        if _tavily_key_state_signature != keys:
+            return
+        _tavily_key_state_index = min(
+            max(_tavily_key_state_index, index, 0),
+            len(keys) - 1,
+        )
 
 
 def _clean_ddg_url(raw: str) -> str | None:
@@ -145,7 +234,7 @@ async def _search_tavily(query: str, max_results: int, key: str) -> SearchOutcom
     }
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         response = await client.post(_TAVILY_ENDPOINT, json=payload)
-        if response.status_code == 401:
+        if response.status_code in {401, 403}:
             return SearchOutcome(
                 ok=False, query=query, provider="tavily",
                 error="Tavily 认证失败", error_category="auth_required",
@@ -154,6 +243,11 @@ async def _search_tavily(query: str, max_results: int, key: str) -> SearchOutcom
             return SearchOutcome(
                 ok=False, query=query, provider="tavily",
                 error="Tavily 请求过于频繁", error_category="rate_limited",
+            )
+        if response.status_code == 432:
+            return SearchOutcome(
+                ok=False, query=query, provider="tavily",
+                error="Tavily 额度已用尽", error_category="quota_exhausted",
             )
         response.raise_for_status()
         data = response.json()
@@ -238,7 +332,7 @@ async def _search_provider_with_retries(
             if outcome.ok:
                 return outcome
             last_error = outcome
-            if outcome.error_category in {"auth_required", "rate_limited"}:
+            if outcome.error_category in _TAVILY_CREDENTIAL_FAILURES:
                 break
         except httpx.TimeoutException:
             last_error = SearchOutcome(
@@ -258,6 +352,48 @@ async def _search_provider_with_retries(
     return last_error or SearchOutcome(
         ok=False, query=query, provider=provider,
         error="搜索失败", error_category="provider_unavailable",
+    )
+
+
+async def _search_tavily_key_pool(
+    query: str,
+    max_results: int,
+    keys: tuple[str, ...],
+    max_attempts: int,
+) -> SearchOutcome:
+    """按进程内游标尝试 Key；凭据故障可遍历全池，服务故障最多换两把。"""
+    candidates = _tavily_key_candidates(keys)
+    last_error: SearchOutcome | None = None
+    provider_failures = 0
+    attempts_per_key = max_attempts if len(candidates) <= 1 else 1
+
+    for index, key in candidates:
+        outcome = await _search_provider_with_retries(
+            query,
+            max_results,
+            "tavily",
+            key,
+            attempts_per_key,
+        )
+        if outcome.ok:
+            _select_tavily_key(keys, index)
+            return outcome
+
+        last_error = outcome
+        if outcome.error_category in _TAVILY_CREDENTIAL_FAILURES:
+            _select_tavily_key(keys, index + 1)
+            continue
+
+        provider_failures += 1
+        if provider_failures >= min(_TAVILY_PROVIDER_FAILURE_KEY_LIMIT, len(candidates)):
+            break
+
+    return last_error or SearchOutcome(
+        ok=False,
+        query=query,
+        provider="tavily",
+        error="Tavily Key 池不可用",
+        error_category="auth_required",
     )
 
 
@@ -285,13 +421,13 @@ async def web_search(
             error="搜索词为空", error_category="invalid_arguments",
         )
 
-    key = _tavily_key()
     if default_provider == "duckduckgo":
         return await _search_provider_with_retries(
             query, max_results, "duckduckgo", None, max_attempts
         )
 
-    if not key:
+    keys = _tavily_keys()
+    if not keys:
         if not allow_duckduckgo_fallback:
             return SearchOutcome(
                 ok=False,
@@ -304,9 +440,7 @@ async def web_search(
             query, max_results, "duckduckgo", None, max_attempts
         )
 
-    primary = await _search_provider_with_retries(
-        query, max_results, "tavily", key, max_attempts
-    )
+    primary = await _search_tavily_key_pool(query, max_results, keys, max_attempts)
     if primary.ok or not allow_duckduckgo_fallback:
         return primary
     return await _search_provider_with_retries(

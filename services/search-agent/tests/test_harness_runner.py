@@ -41,6 +41,8 @@ def completed_state(answer: str = "完成") -> dict[str, Any]:
         "thread_id": "thread_1",
         "model_id": "deepseek-v4-flash",
         "answer": answer,
+        "answer_source": "model",
+        "answer_model_calls": 1,
         "response_status": "completed",
         "citations": [],
         "verification_passed": True,
@@ -174,6 +176,8 @@ async def test_no_http_runner_is_deterministic_and_injects_runtime_dependencies(
     assert [event["streamSeq"] for event in first] == [1, 2]
     assert {event["createdAt"] for event in first} == {FIXED_TIME}
     assert first[-1]["answerMarkdown"] == "完成"
+    assert first[-1]["answerSource"] == "model"
+    assert first[-1]["answerModelCalls"] == 1
     assert first_graph.inputs[0]["run_id"] == "run_1"
     assert first_graph.configs[0]["configurable"]["thread_id"] == "run:run_1"
     assert first_graph.contexts[0].ledger is first_ledger
@@ -202,6 +206,30 @@ async def test_resume_scope_mismatch_returns_stable_failure_without_running_grap
     assert graph.inputs == []
     assert events[0]["type"] == "run.failed"
     assert events[0]["reasonCode"] == "RESUME_SCOPE_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_non_model_answer_is_rejected_as_structured_failure() -> None:
+    state = completed_state("本地固定回答")
+    state["answer_source"] = "none"
+
+    events = await collect(runner(FakeGraph(state=state)))
+
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "NON_MODEL_OUTPUT"
+    assert "answerMarkdown" not in events[0]
+
+
+@pytest.mark.asyncio
+async def test_answer_without_writer_call_receipt_is_rejected() -> None:
+    state = completed_state("伪装成模型的本地回答")
+    state["answer_model_calls"] = 0
+
+    events = await collect(runner(FakeGraph(state=state)))
+
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "NON_MODEL_OUTPUT"
+    assert "answerMarkdown" not in events[0]
 
 
 @pytest.mark.asyncio

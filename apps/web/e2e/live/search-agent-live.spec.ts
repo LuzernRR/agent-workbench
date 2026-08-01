@@ -26,7 +26,25 @@ async function postWithVisitorRetry(page: Page, url: string, data: Record<string
 function decodeSse(text: string) {
   return text.split(/\r?\n/u)
     .filter((line) => line.startsWith("data: "))
-    .map((line) => JSON.parse(line.slice(6)) as { seq: number; type: string; payload: Record<string, unknown> });
+    .map((line) => JSON.parse(line.slice(6)) as { seq: number; type: string; createdAt: string; payload: Record<string, unknown> });
+}
+
+function userVerificationWaitMs(events: ReturnType<typeof decodeSse>) {
+  let waitingAt: number | null = null;
+  let total = 0;
+  for (const event of events) {
+    if (event.type !== "run.status") continue;
+    const createdAt = Date.parse(event.createdAt);
+    if (!Number.isFinite(createdAt)) continue;
+    if (event.payload.status === "waiting" && waitingAt === null) waitingAt = createdAt;
+    if (event.payload.status === "running" && waitingAt !== null) {
+      total += Math.max(0, createdAt - waitingAt);
+      waitingAt = null;
+    }
+  }
+  const terminal = [...events].reverse().find((event) => ["run.completed", "run.failed", "run.cancelled"].includes(event.type));
+  if (waitingAt !== null && terminal) total += Math.max(0, Date.parse(terminal.createdAt) - waitingAt);
+  return total;
 }
 
 function sourceIdentity(value: string) {
@@ -168,7 +186,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     runtime.__streamFrameObserver = requestAnimationFrame(sampleFrame);
   });
 
-  const question = "请搜索小红书上关于 LangGraph 的笔记，概括大家如何区分 LangChain、LangGraph 和 LangSmith，并引用已读取来源。";
+  const question = "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记。只读取可访问正文，按“肤质与场景 / 使用感受 / 防晒产品类型 / 可能不适合的人群 / 来源链接”归纳 3–5 条经验；不得把个人体验写成医疗建议，正文不可读时不展示为证据。";
   const runResponsePromise = page.waitForResponse((response) => response.request().method() === "POST"
     && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
   await page.getByLabel("任务输入").fill(question);
@@ -182,6 +200,8 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   const firstPublicText = page.locator("[data-thinking-id] p").first();
   await expect(firstPublicText).not.toHaveText("", { timeout: Math.max(1, 5_000 - (Date.now() - runStartedAt)) });
   const firstPublicTextMs = Date.now() - runStartedAt;
+  const firstPublicTextValue = (await firstPublicText.textContent())?.trim() || "";
+  expect(firstPublicTextValue).not.toBe("先检索“油敏皮夏季通勤防晒”的近期正文，再按证据覆盖决定是否补充。");
   const searchSummaries = page.locator("[data-search-activity-summary]");
   await expect(searchSummaries.first()).toBeVisible({ timeout: Math.max(1, 10_000 - (Date.now() - runStartedAt)) });
   const firstToolMs = Date.now() - runStartedAt;
@@ -204,7 +224,25 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   });
   const completedReply = page.getByRole("button", { name: "复制完整回复" });
   const failedReply = page.getByText("Search Agent 运行失败", { exact: true });
-  await expect(completedReply.or(failedReply)).toBeVisible({ timeout: Math.max(1, 90_000 - (Date.now() - runStartedAt)) });
+  const verificationLink = page.getByRole("link", { name: "立即验证" }).first();
+  await expect(completedReply.or(failedReply).or(verificationLink)).toBeVisible({ timeout: Math.max(1, 90_000 - (Date.now() - runStartedAt)) });
+  const verificationTriggered = await verificationLink.isVisible();
+  if (verificationTriggered) {
+    const href = await verificationLink.getAttribute("href");
+    expect(href).toMatch(new RegExp(`^/workbench/verify/xiaohongshu/${runId}/[A-Za-z0-9_-]{43}$`, "u"));
+    expect(href).not.toMatch(/xiaohongshu-mcp|18060|base64|cookie/iu);
+    await testInfo.attach("issue-10-xhs-verification-link.txt", {
+      body: Buffer.from(href || ""),
+      contentType: "text/plain"
+    });
+    const verificationPage = await page.context().newPage();
+    await verificationPage.goto(new URL(href!, page.url()).href);
+    await expect(verificationPage.getByRole("heading", { name: "验证小红书工具账号" })).toBeVisible();
+    await expect(verificationPage.getByRole("img", { name: "小红书工具账号安全验证二维码" })).toBeVisible();
+    await expect(verificationPage.locator("body")).not.toContainText(/xiaohongshu-mcp|18060|base64|cookie/iu);
+    await expect(completedReply.or(failedReply)).toBeVisible({ timeout: 300_000 });
+    await verificationPage.close();
+  }
   await expect(completedReply).toBeVisible();
   const conversation = page.getByTestId("conversation-viewport");
 
@@ -214,6 +252,8 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   const rawEvents = await eventResponse.text();
   expect(rawEvents).not.toMatch(forbiddenPublicText);
   const events = decodeSse(rawEvents);
+  const verificationWaitMs = userVerificationWaitMs(events);
+  const activeTerminalMs = Math.max(0, terminalMs - verificationWaitMs);
   const types = events.map((event) => event.type);
   expect(types).toContain("thinking.started");
   expect(types).toContain("thinking.delta");
@@ -225,20 +265,40 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect(types).toContain("message.delta");
   expect(types).toContain("message.completed");
   expect(types).toContain("run.completed");
+  const generatedThinking = events.filter((event) => event.type === "thinking.delta");
+  expect(generatedThinking.length).toBeGreaterThan(0);
+  expect(generatedThinking.every((event) => event.payload.publicSummarySource === "model")).toBe(true);
+  const generatedSourceDetails = events.filter((event) => event.type === "tool.source.delta");
+  expect(generatedSourceDetails.length).toBeGreaterThan(0);
+  expect(generatedSourceDetails.every((event) => event.payload.presentationSource === "model")).toBe(true);
   const terminalEvent = [...events].reverse().find((event) => event.type === "run.completed");
   expect(terminalEvent).toBeDefined();
+  expect(terminalEvent?.payload.answerSource).toBe("model");
+  expect(Number(terminalEvent?.payload.answerModelCalls || 0)).toBeGreaterThan(0);
+  expect(Number(terminalEvent?.payload.answerModelCalls || 0)).toBeLessThanOrEqual(
+    Number(terminalEvent?.payload.modelCalls || 0)
+  );
   const performanceMetrics = {
     firstPublicTextMs,
     firstToolMs,
     terminalMs,
+    verificationWaitMs,
+    activeTerminalMs,
     modelCalls: Number(terminalEvent?.payload.modelCalls || 0),
     toolCalls: Number(terminalEvent?.payload.toolCalls || 0)
   };
   expect(performanceMetrics.firstPublicTextMs).toBeLessThanOrEqual(5_000);
   expect(performanceMetrics.firstToolMs).toBeLessThanOrEqual(10_000);
-  expect(performanceMetrics.terminalMs).toBeLessThanOrEqual(90_000);
+  expect(performanceMetrics.activeTerminalMs).toBeLessThanOrEqual(90_000);
   expect(performanceMetrics.modelCalls).toBeLessThanOrEqual(10);
   expect(performanceMetrics.toolCalls).toBeLessThanOrEqual(4);
+  if (verificationTriggered) {
+    expect(events.some((event) => event.type === "run.status" && event.payload.status === "waiting")).toBe(true);
+    expect(events.some((event) => event.type === "tool.updated"
+      && event.payload.status === "waiting"
+      && typeof event.payload.verificationHref === "string")).toBe(true);
+    expect(verificationWaitMs).toBeGreaterThan(0);
+  }
   await testInfo.attach("issue-10-performance.json", {
     body: Buffer.from(JSON.stringify(performanceMetrics, null, 2)),
     contentType: "application/json"
@@ -263,7 +323,17 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     && typeof event.payload.reasonCode === "string"
     && typeof event.payload.retryable === "boolean"
     && typeof event.payload.nextAction === "string");
-  expect(xiaohongshuHasEvidence || xiaohongshuUsedControlledFallback).toBe(true);
+  expect(xiaohongshuHasEvidence).toBe(true);
+  const xiaohongshuEvidenceUrls = new Set(xiaohongshuTools.flatMap((event) =>
+    (event.payload.sources as Array<{ url?: string; verified?: boolean }> || [])
+      .filter((source) => source.verified && /xiaohongshu\.com\/explore\//u.test(source.url || ""))
+      .map((source) => sourceIdentity(source.url!))));
+  expect(xiaohongshuEvidenceUrls.size).toBeGreaterThanOrEqual(3);
+  // 若同轮另一条搜索触发平台限制，仍须保留结构化受控降级；但不能用降级
+  // 替代本验收案例要求的三条真实正文。
+  if (xiaohongshuUsedControlledFallback) {
+    expect(xiaohongshuTools.some((event) => event.payload.outcomeStatus === "success")).toBe(true);
+  }
   const xiaohongshuQueryKeys = xiaohongshuTools.map((event) => String(event.payload.query || ""));
   expect(new Set(xiaohongshuQueryKeys).size).toBe(xiaohongshuQueryKeys.length);
   const progressByToolCallId = new Map<string, Array<[number, number]>>();
@@ -443,6 +513,37 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     .reverse()
     .find((event) => event.type === "message.completed" && typeof event.payload.text === "string");
   expect(answerDelta).toBe(String(completedAnswer?.payload.text || ""));
+  for (const requiredField of [
+    "肤质与场景",
+    "使用感受",
+    "防晒产品类型",
+    "可能不适合的人群",
+    "来源链接"
+  ]) {
+    expect(answerDelta).toContain(requiredField);
+  }
+  const experienceMarkers = [...answerDelta.matchAll(/(?:^|\n)\s*[1-5][.)、]\s+/gu)];
+  expect(experienceMarkers.length).toBeGreaterThanOrEqual(3);
+  expect(experienceMarkers.length).toBeLessThanOrEqual(5);
+  const experienceEntries = experienceMarkers.map((marker, index) => {
+    const start = (marker.index || 0) + marker[0].length;
+    const end = experienceMarkers[index + 1]?.index ?? answerDelta.length;
+    return answerDelta.slice(start, end);
+  });
+  for (const entry of experienceEntries) {
+    for (const requiredField of [
+      "肤质与场景",
+      "使用感受",
+      "防晒产品类型",
+      "可能不适合的人群",
+      "来源链接"
+    ]) {
+      expect(entry).toContain(requiredField);
+    }
+    expect(entry).toMatch(/来源链接\s*[：:]\s*\[来源\d+\]/u);
+  }
+  expect(answerDelta).toMatch(/不构成医疗建议|非医疗建议/u);
+  expect(answerDelta).not.toMatch(/仅标题|无正文|未读取|未作为证据|正文不可读/u);
   expect(graphemeCount(answerDelta)).toBeLessThanOrEqual(maxLiveAnswerGraphemes);
   expect(streamObservation.answerLengths.length).toBeGreaterThan(1);
   expect(streamObservation.answerLengths.at(-1)).toBe(Array.from(answerDelta).length);
@@ -483,7 +584,15 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   expect(conversationText).not.toMatch(/但帖子详情\/正文内容未读取|仅发现公开候选|尚未核验/u);
   expect(conversationText).not.toMatch(/正在(?:读取会话上下文|判断任务是否需要搜索|制定搜索计划|调用搜索并观察结果|评估现有证据|基于证据组织回答|核验回答与证据|收口运行结果)/u);
   expect(conversationText).not.toMatch(forbiddenPublicText);
-  await expect(conversation.locator('a[href^="http"]').first()).toBeVisible();
+  const finalCitations = conversation.locator("[data-message-citations]").last();
+  await expect(finalCitations.getByText("来源链接", { exact: true })).toBeVisible();
+  const finalCitationUrls = new Set(await finalCitations.locator('a[href*="xiaohongshu.com/explore/"]')
+    .evaluateAll((links) => links.map((link) => (link as HTMLAnchorElement).href)));
+  expect(finalCitationUrls.size).toBeGreaterThanOrEqual(3);
+  const referencedCitationNumbers = new Set(
+    [...answerDelta.matchAll(/\[来源(\d+)\]/gu)].map((match) => Number(match[1]))
+  );
+  expect(finalCitationUrls.size).toBe(referencedCitationNumbers.size);
 
   const settlementHistory = await page.evaluate(() =>
     (window as typeof window & { __searchSettlementHistory?: string[][] }).__searchSettlementHistory || []);

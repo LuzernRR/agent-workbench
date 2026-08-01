@@ -68,6 +68,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
           thinkingId: id,
           paragraphId: `${id}:detail`,
           delta: oneLine(event.publicSummary),
+          publicSummarySource: event.publicSummarySource,
           agent: event.agent,
           node: event.node,
           iteration: event.iteration,
@@ -105,6 +106,50 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
           sources: source ? [source] : []
         }
       }]
+    };
+  }
+  if (event.type === "tool.verification.heartbeat") {
+    // 只用于保持 Search Agent 内部事件流活跃；Workbench 不持久化轮询噪声。
+    return { events: [] };
+  }
+  if (event.type === "tool.verification.required") {
+    const verificationHref = `/workbench/verify/xiaohongshu/${encodeURIComponent(runId)}/${encodeURIComponent(event.challengeId)}`;
+    return {
+      events: [
+        {
+          type: "tool.updated",
+          payload: {
+            toolCallId: event.toolCallId,
+            status: "waiting",
+            reasonCode: "CAPTCHA_REQUIRED",
+            verificationStatus: event.status,
+            verificationHref,
+            verificationExpiresAt: event.expiresAt,
+            verificationMessage: oneLine(event.message, 300)
+          }
+        },
+        { type: "run.status", payload: { status: "waiting", reasonCode: "CAPTCHA_REQUIRED" } }
+      ]
+    };
+  }
+  if (event.type === "tool.verification.resolved") {
+    const verificationHref = `/workbench/verify/xiaohongshu/${encodeURIComponent(runId)}/${encodeURIComponent(event.challengeId)}`;
+    return {
+      events: [
+        {
+          type: "tool.updated",
+          payload: {
+            toolCallId: event.toolCallId,
+            status: "running",
+            clearReasonCode: event.status === "succeeded",
+            verificationStatus: event.status,
+            verificationHref,
+            verificationExpiresAt: event.expiresAt,
+            verificationMessage: oneLine(event.message, 300)
+          }
+        },
+        { type: "run.status", payload: { status: "running", verificationStatus: event.status } }
+      ]
     };
   }
   if (event.type === "tool.completed") {
@@ -152,7 +197,8 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
               payload: {
                 toolCallId: event.toolCallId,
                 url: source.url,
-                delta: source.text
+                delta: source.text,
+                presentationSource: event.presentationSource
               }
             })),
             {
@@ -205,6 +251,7 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
           thinkingId: id,
           paragraphId: `${id}:detail`,
           delta: oneLine(event.publicSummary),
+          publicSummarySource: event.publicSummarySource,
           agent: "verifier",
           node: "verify"
         }
@@ -246,6 +293,8 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
         stopReason: event.stopReason,
         partial,
         summary: terminalSummary,
+        answerSource: event.answerSource,
+        answerModelCalls: event.answerModelCalls,
         usage: event.usage,
         modelCalls: event.modelCalls,
         toolCalls: event.toolCalls,

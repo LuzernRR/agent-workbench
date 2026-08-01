@@ -40,6 +40,20 @@ func TestClassifyReadFailureUsesStableCodes(t *testing.T) {
 			nextAction: "use_alternative_channel",
 		},
 		{
+			name:       "inaccessible note",
+			err:        errors.New("笔记不可访问"),
+			code:       "MCP_OUTPUT_INVALID",
+			retryable:  false,
+			nextAction: "use_alternative_channel",
+		},
+		{
+			name:       "rate limited",
+			err:        errors.New("小红书请求过于频繁，请稍后再试"),
+			code:       "MCP_RATE_LIMITED",
+			retryable:  true,
+			nextAction: "retry_later",
+		},
+		{
 			name:       "unavailable",
 			err:        errors.New("browser startup failed"),
 			code:       "MCP_UNAVAILABLE",

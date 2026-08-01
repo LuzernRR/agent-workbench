@@ -11,6 +11,7 @@ from app.tools.channels.base import (
     ChannelName,
     ChannelProgressReporter,
     ChannelResolution,
+    ChannelVerificationReporter,
     SourceProvenance,
     channel_resolution,
 )
@@ -72,6 +73,7 @@ class SearchExecutionResult(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     resolution: ChannelResolution | None = None
+    interaction_wait_ms: int = Field(default=0, ge=0, le=600_000)
 
     @model_validator(mode="after")
     def populate_resolution(self) -> SearchExecutionResult:
@@ -135,6 +137,8 @@ async def execute_search_tool(
     progress: ChannelProgressReporter | None = None,
     *,
     xiaohongshu_public_only: bool = False,
+    verification_request_key: str | None = None,
+    verification: ChannelVerificationReporter | None = None,
 ) -> SearchExecutionResult:
     outcome = await ChannelRegistry(config).execute(
         arguments.channel,
@@ -142,6 +146,8 @@ async def execute_search_tool(
         min(arguments.max_results, config.graph.max_results_per_call),
         progress=progress,
         xiaohongshu_public_only=xiaohongshu_public_only,
+        verification_request_key=verification_request_key,
+        verification=verification,
     )
     if not outcome.ok:
         return SearchExecutionResult(
@@ -154,6 +160,7 @@ async def execute_search_tool(
             error_code=outcome.error_code or "PROVIDER_UNAVAILABLE",
             error_message=outcome.error_message or "搜索失败",
             resolution=outcome.resolution,
+            interaction_wait_ms=outcome.interaction_wait_ms,
         )
 
     return SearchExecutionResult(
@@ -166,4 +173,5 @@ async def execute_search_tool(
         error_code=outcome.error_code,
         error_message=outcome.error_message,
         resolution=outcome.resolution,
+        interaction_wait_ms=outcome.interaction_wait_ms,
     )
