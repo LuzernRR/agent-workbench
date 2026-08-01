@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -166,13 +167,24 @@ async def test_xiaohongshu_mcp_failure_opens_public_strategy_for_later_query(
         },
     )
 
-    await run_scenario(
+    _output, events = await run_scenario(
         monkeypatch,
         scenario,
         question="只在小红书搜索这些测试笔记",
     )
 
     assert scenario.tool_execution_public_only == [False, True]
+    assert scenario.max_active_tool_calls == 1
+    assert len([
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "research"
+    ]) == 1
+    assert len([
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "merge_research"
+    ]) == 1
 
 
 @pytest.mark.asyncio
@@ -356,6 +368,7 @@ class Scenario:
     limitations_by_query: dict[str, str] = field(default_factory=dict)
     provider_by_query: dict[str, str] = field(default_factory=dict)
     channels_by_query: dict[str, str] = field(default_factory=dict)
+    depends_on_by_query: dict[str, list[str]] = field(default_factory=dict)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
     structured_repair_permissions: list[tuple[str, bool]] = field(default_factory=list)
@@ -371,6 +384,8 @@ class Scenario:
     active_tool_calls: int = 0
     max_active_tool_calls: int = 0
     tool_completion_order: list[str] = field(default_factory=list)
+    tool_started_at_by_query: dict[str, float] = field(default_factory=dict)
+    tool_finished_at_by_query: dict[str, float] = field(default_factory=dict)
     tool_call_index: int = 0
     checkpoint_values: dict[str, Any] = field(default_factory=dict)
     verification_updates: list[ChannelVerificationUpdate] = field(default_factory=list)
@@ -429,7 +444,7 @@ class Scenario:
                         "objective": f"检索 {query}",
                         "query": query,
                         "channel": self.channels_by_query.get(query, "web"),
-                        "depends_on": [],
+                        "depends_on": self.depends_on_by_query.get(query, []),
                         "priority": 100 - position,
                         "evidence_needed": 0,
                         "can_parallelize": True,
@@ -565,6 +580,7 @@ class Scenario:
             {"query": query, "channel": arguments.channel}
         )
         self.tool_execution_public_only.append(xiaohongshu_public_only)
+        self.tool_started_at_by_query[query] = time.perf_counter()
         if verification_request_key is not None:
             self.verification_request_keys.append(verification_request_key)
         if verification is not None:
@@ -588,6 +604,7 @@ class Scenario:
         finally:
             self.active_tool_calls -= 1
             self.tool_completion_order.append(query)
+            self.tool_finished_at_by_query[query] = time.perf_counter()
         has_evidence = self.evidence_by_query.get(query, False)
         result_count = self.result_count_by_query.get(query, 1)
         limitation = self.limitations_by_query.get(query)
@@ -1064,17 +1081,22 @@ async def test_independent_searches_run_concurrently_and_merge_in_plan_order(
         supervisor_channels=["web", "x"],
         channels_by_query={"slow web": "web", "fast x": "x"},
         evidence_by_query={"slow web": True, "fast x": True},
-        tool_delay_by_query={"slow web": 0.08, "fast x": 0.01},
+        tool_delay_by_query={"slow web": 0.25, "fast x": 0.05},
     )
 
-    output, _events = await run_scenario(
+    output, events = await run_scenario(
         monkeypatch,
         scenario,
         question="同时搜索官网网页和 X/Twitter 的最新信息",
     )
+    tool_span = (
+        max(scenario.tool_finished_at_by_query.values())
+        - min(scenario.tool_started_at_by_query.values())
+    )
 
     assert scenario.max_active_tool_calls == 2
     assert scenario.tool_completion_order[:2] == ["fast x", "slow web"]
+    assert tool_span < 0.29
     assert [item["query"] for item in output["candidates"][:2]] == [
         "slow web",
         "fast x",
@@ -1083,6 +1105,65 @@ async def test_independent_searches_run_concurrently_and_merge_in_plan_order(
         "slow web",
         "fast x",
     ]
+    assert "research_work_item" not in output
+    assert output["research_results"] == []
+    assert len(output["merged_research_result_ids"]) == 2
+    research_starts = [
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "research"
+    ]
+    research_completions = [
+        event
+        for event in events
+        if event["type"] == "node.completed" and event["node"] == "research"
+    ]
+    merge_starts = [
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "merge_research"
+    ]
+    assert len(research_starts) == 2
+    assert len(research_completions) == 2
+    assert len(merge_starts) == 1
+    assert max(event["seq"] for event in research_completions) < merge_starts[0]["seq"]
+
+
+@pytest.mark.asyncio
+async def test_dependent_batch_is_dispatched_only_after_prior_merge_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["definition", "comparison"]],
+        channels_by_query={"definition": "web", "comparison": "web"},
+        depends_on_by_query={"comparison": ["search_1"]},
+        evidence_by_query={"definition": True, "comparison": True},
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert scenario.tool_executions == ["definition", "comparison"]
+    merge_completions = [
+        event
+        for event in events
+        if event["type"] == "node.completed" and event["node"] == "merge_research"
+    ]
+    mark_starts = [
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "mark_plan_running"
+    ]
+    research_starts = [
+        event
+        for event in events
+        if event["type"] == "node.started" and event["node"] == "research"
+    ]
+    assert len(merge_completions) == 2
+    assert len(mark_starts) == 2
+    assert len(research_starts) == 2
+    assert merge_completions[0]["seq"] < mark_starts[1]["seq"]
+    assert [step["status"] for step in output["plan"]["steps"]] == ["done", "done"]
+    assert output["plan"]["revision"] == 5
 
 
 @pytest.mark.asyncio

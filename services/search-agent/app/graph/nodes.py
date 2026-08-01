@@ -37,6 +37,11 @@ from app.graph.state import (
     Candidate,
     Citation,
     Evidence,
+    ResearchBranchResult,
+    ResearchExecution,
+    ResearchResultConflictError,
+    ResearchTarget,
+    ResearchWorkItem,
     SearchRequest,
     SearchState,
     SearchTrace,
@@ -1441,163 +1446,241 @@ def _xiaohongshu_circuit_is_open(traces: list[SearchTrace]) -> bool:
     )
 
 
-def _settle_pending_plan(
-    state: SearchState,
-    reason_code: str,
-) -> dict[str, Any]:
-    plan = state.get("plan")
-    step_ids = list(state.get("pending_plan_step_ids") or [])
-    if not plan or not step_ids:
-        return {"pending_plan_step_ids": []}
-    revision = state.get("plan_revision", plan["revision"]) + 1
-    settled = settle_running_steps(
-        plan,
-        revision=revision,
-        outcomes={step_id: reason_code for step_id in step_ids},
-    )
-    return {
-        "plan": settled,
-        "plan_revision": revision,
-        "pending_plan_step_ids": [],
-    }
+def _research_batch_id(state: SearchState) -> str:
+    plan = state.get("plan") or {}
+    material = "|".join((
+        state.get("run_id", "local-run"),
+        str(state.get("round", 0)),
+        str(plan.get("plan_id") or "legacy-plan"),
+        str(plan.get("revision") or state.get("plan_revision", 0)),
+        ",".join(state.get("pending_plan_step_ids") or []),
+    ))
+    return f"research_batch_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
 
 
-async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
-    """直接执行 Planner 已批准的严格搜索，不再用模型复述固定参数。
+def _research_result_id(batch_id: str, branch_key: str) -> str:
+    material = f"{batch_id}|{branch_key}"
+    return f"research_result_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
 
-    非小红书目标同轮并发；小红书目标在一个串行组内执行，以便首个结构化
-    故障立即打开本运行熔断。所有结果最终按 Planner 原顺序归并。
-    """
+
+def build_research_work_items(state: SearchState) -> list[ResearchWorkItem]:
+    """把当前计划批次编译为真实 LangGraph 分支输入。"""
 
     pending_searches = _pending_searches(state)
     if not pending_searches:
-        return {
-            "no_progress_count": state.get("no_progress_count", 0),
-            "replan_required": False,
-            "steps": _step("research", "deterministic", None, "no_pending_searches"),
-        }
-
+        return []
+    batch_id = _research_batch_id(state)
     remaining = max(0, state.get("max_tool_calls", 6) - state.get("tool_calls", 0))
-    if remaining <= 0:
-        return {
-            "pending_searches": [],
-            "pending_queries": [],
-            "stop_reason": state.get("stop_reason") or "TOOL_CALL_LIMIT",
-            **_settle_pending_plan(state, "TOOL_CALL_LIMIT"),
-            "steps": _step("research", "deterministic", None, "tool_budget_exhausted"),
-        }
-    if _remaining_model_calls(state) < 4:
-        return {
-            "pending_searches": [],
-            "pending_queries": [],
-            "stop_reason": state.get("stop_reason") or "MODEL_CALL_LIMIT",
-            "no_progress_count": state.get("no_progress_count", 0) + 1,
-            "replan_required": False,
-            **_settle_pending_plan(state, "MODEL_CALL_LIMIT"),
-            "steps": _step("research", "deterministic", None, "finalization_budget_reserved"),
-        }
-
-    targets = pending_searches[:remaining]
-    projected_limit: str | None = (
-        "TOOL_CALL_LIMIT" if len(targets) < len(pending_searches) else None
-    )
-    scheduled: list[
-        tuple[int, str | None, str, SearchToolInput, float | None]
-    ] = []
-    for index, target in enumerate(targets):
+    model_reserve_exhausted = remaining > 0 and _remaining_model_calls(state) < 4
+    targets: list[ResearchTarget] = []
+    for index, target in enumerate(pending_searches):
         channel = target["channel"]
-        if channel not in _RESEARCH_CHANNELS:
-            projected_limit = projected_limit or "INVALID_CHANNEL_PLAN"
-            continue
-        timeout_seconds = tool_timeout_seconds(state, channel)
-        if timeout_seconds is not None and timeout_seconds <= 0:
-            projected_limit = projected_limit or "RUN_TIME_RESERVE"
-            continue
-        scheduled.append((
-            index,
-            target.get("step_id"),
-            _planned_tool_call_id(state, index, target),
-            SearchToolInput(query=target["query"], channel=channel, max_results=5),
-            timeout_seconds,
+        blocked_reason: str | None = None
+        timeout_seconds: float | None = None
+        if remaining <= 0 or index >= remaining:
+            blocked_reason = "TOOL_CALL_LIMIT"
+        elif model_reserve_exhausted:
+            blocked_reason = "MODEL_CALL_LIMIT"
+        elif channel not in _RESEARCH_CHANNELS:
+            blocked_reason = "INVALID_CHANNEL_PLAN"
+        else:
+            timeout_seconds = tool_timeout_seconds(state, channel)
+            if timeout_seconds is not None and timeout_seconds <= 0:
+                blocked_reason = "RUN_TIME_RESERVE"
+        targets.append(ResearchTarget(
+            order=index,
+            plan_step_id=target.get("step_id"),
+            tool_call_id=_planned_tool_call_id(state, index, target),
+            query=target["query"],
+            channel=channel,
+            timeout_seconds=timeout_seconds,
+            blocked_reason=blocked_reason,
         ))
 
-    indexed_results: dict[
-        int,
-        tuple[str | None, str, SearchExecutionResult, SearchTrace],
-    ] = {}
+    work_items: list[ResearchWorkItem] = []
+    xiaohongshu_targets = [
+        target for target in targets if target["channel"] == "xiaohongshu"
+    ]
+    for target in targets:
+        if target["channel"] == "xiaohongshu":
+            continue
+        branch_key = target["plan_step_id"] or f"legacy-{target['order']}"
+        work_items.append(ResearchWorkItem(
+            batch_id=batch_id,
+            result_id=_research_result_id(batch_id, branch_key),
+            order=target["order"],
+            targets=[target],
+        ))
+    if xiaohongshu_targets:
+        branch_key = "xiaohongshu:" + ",".join(
+            target["plan_step_id"] or f"legacy-{target['order']}"
+            for target in xiaohongshu_targets
+        )
+        work_items.append(ResearchWorkItem(
+            batch_id=batch_id,
+            result_id=_research_result_id(batch_id, branch_key),
+            order=xiaohongshu_targets[0]["order"],
+            targets=xiaohongshu_targets,
+        ))
+    return sorted(work_items, key=lambda item: (item["order"], item["result_id"]))
 
-    async def execute_one(
-        index: int,
-        plan_step_id: str | None,
-        tool_call_id: str,
-        arguments: SearchToolInput,
-        timeout_seconds: float | None,
-        *,
-        xiaohongshu_public_only: bool = False,
-    ) -> None:
+
+async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
+    """执行一个 Send 分支，只返回 branch-local ``ResearchBranchResult``。"""
+
+    work_item = state.get("research_work_item")
+    if not work_item:
+        raise ResearchResultConflictError("research work item is missing")
+    executions: list[ResearchExecution] = []
+    public_only = _xiaohongshu_circuit_is_open(
+        list(state.get("tool_traces") or [])
+    )
+    for target in work_item["targets"]:
+        reason_code = target["blocked_reason"]
+        if reason_code:
+            executions.append(ResearchExecution(
+                order=target["order"],
+                plan_step_id=target["plan_step_id"],
+                tool_call_id=target["tool_call_id"],
+                query=target["query"],
+                channel=target["channel"],
+                result=None,
+                trace=None,
+                reason_code=reason_code,
+            ))
+            continue
+        arguments = SearchToolInput(
+            query=target["query"],
+            channel=target["channel"],
+            max_results=5,
+        )
         result, trace = await _run_one_search(
             state,
             runtime,
-            tool_call_id,
+            target["tool_call_id"],
             arguments,
-            plan_step_id=plan_step_id,
-            timeout_seconds=timeout_seconds,
-            xiaohongshu_public_only=xiaohongshu_public_only,
+            plan_step_id=target["plan_step_id"],
+            timeout_seconds=target["timeout_seconds"],
+            xiaohongshu_public_only=(
+                public_only if target["channel"] == "xiaohongshu" else False
+            ),
         )
-        indexed_results[index] = (plan_step_id, tool_call_id, result, trace)
+        executions.append(ResearchExecution(
+            order=target["order"],
+            plan_step_id=target["plan_step_id"],
+            tool_call_id=target["tool_call_id"],
+            query=target["query"],
+            channel=target["channel"],
+            result=result.public_dict(),
+            trace=trace,
+            reason_code=None,
+        ))
+        if (
+            target["channel"] == "xiaohongshu"
+            and _xiaohongshu_circuit_is_open([trace])
+        ):
+            public_only = True
+    branch_result = ResearchBranchResult(
+        batch_id=work_item["batch_id"],
+        result_id=work_item["result_id"],
+        order=work_item["order"],
+        executions=executions,
+    )
+    return {"research_results": [branch_result]}
 
-    xiaohongshu_targets = [
-        item for item in scheduled if item[3].channel == "xiaohongshu"
-    ]
-    other_targets = [
-        item for item in scheduled if item[3].channel != "xiaohongshu"
-    ]
 
-    async def execute_xiaohongshu_group() -> None:
-        public_only = _xiaohongshu_circuit_is_open(
-            list(state.get("tool_traces") or [])
+async def merge_research(
+    state: SearchState,
+    runtime: Runtime[RunContext],
+) -> dict[str, Any]:
+    """唯一 fan-in：按计划顺序一次性提交全部全局研究状态。"""
+
+    del runtime
+    batch_id = _research_batch_id(state)
+    merged_result_ids = list(state.get("merged_research_result_ids") or [])
+    already_merged = set(merged_result_ids)
+    all_results = list(state.get("research_results") or [])
+    stale = [
+        item["result_id"]
+        for item in all_results
+        if item["batch_id"] != batch_id and item["result_id"] not in already_merged
+    ]
+    if stale:
+        raise ResearchResultConflictError(
+            f"stale research results: {','.join(sorted(stale))}"
         )
-        for (
-            index,
-            plan_step_id,
-            tool_call_id,
-            arguments,
-            timeout_seconds,
-        ) in xiaohongshu_targets:
-            await execute_one(
-                index,
-                plan_step_id,
-                tool_call_id,
-                arguments,
-                timeout_seconds,
-                xiaohongshu_public_only=public_only,
-            )
-            trace = indexed_results[index][3]
-            if _xiaohongshu_circuit_is_open([trace]):
-                public_only = True
-
-    concurrent: list[asyncio.Task[None]] = [
-        asyncio.create_task(execute_one(*item)) for item in other_targets
+    branch_results = [
+        item
+        for item in all_results
+        if item["batch_id"] == batch_id and item["result_id"] not in already_merged
     ]
-    if xiaohongshu_targets:
-        concurrent.append(asyncio.create_task(execute_xiaohongshu_group()))
-    if concurrent:
-        await asyncio.gather(*concurrent)
+    branch_results.sort(key=lambda item: (item["order"], item["result_id"]))
+    executions: list[ResearchExecution] = []
+    seen_orders: set[int] = set()
+    for branch_result in branch_results:
+        for execution in sorted(
+            branch_result["executions"],
+            key=lambda item: (item["order"], item["tool_call_id"]),
+        ):
+            if execution["order"] in seen_orders:
+                raise ResearchResultConflictError(
+                    f"duplicate research order: {execution['order']}"
+                )
+            seen_orders.add(execution["order"])
+            executions.append(execution)
+    executions.sort(key=lambda item: (item["order"], item["tool_call_id"]))
 
-    new_candidates: list[Candidate] = []
-    new_evidence: list[Evidence] = []
-    traces: list[SearchTrace] = []
     outcomes: dict[str, str | None] = {
-        step_id: projected_limit or "PLAN_STEP_NOT_EXECUTED"
+        step_id: "PLAN_STEP_NOT_EXECUTED"
         for step_id in state.get("pending_plan_step_ids") or []
     }
     evidence_targets = {
         step["step_id"]: step["evidence_needed"]
         for step in (state.get("plan") or {}).get("steps", [])
     }
-    for index in sorted(indexed_results):
-        plan_step_id, tool_call_id, result, trace = indexed_results[index]
-        traces.append(trace)
+    existing_traces = list(state.get("tool_traces") or [])
+    trace_by_call = {item["tool_call_id"]: item for item in existing_traces}
+    traces: list[SearchTrace] = []
+    new_candidates: list[Candidate] = []
+    new_evidence: list[Evidence] = []
+    executed_tool_calls = 0
+    interaction_wait_seconds = 0.0
+    projected_limit: str | None = None
+    for execution in executions:
+        plan_step_id = execution["plan_step_id"]
+        reason_code = execution["reason_code"]
+        if reason_code:
+            if plan_step_id:
+                outcomes[plan_step_id] = reason_code
+            projected_limit = projected_limit or reason_code
+            continue
+        result_payload = execution["result"]
+        trace = execution["trace"]
+        if result_payload is None or trace is None:
+            raise ResearchResultConflictError(
+                f"incomplete research execution: {execution['tool_call_id']}"
+            )
+        result = SearchExecutionResult.model_validate(result_payload)
+        tool_call_id = execution["tool_call_id"]
+        if (
+            trace["tool_call_id"] != tool_call_id
+            or trace["query"] != execution["query"]
+            or trace["channel"] != execution["channel"]
+        ):
+            raise ResearchResultConflictError(
+                f"research trace mismatch: {tool_call_id}"
+            )
+        prior_trace = trace_by_call.get(tool_call_id)
+        if prior_trace is not None:
+            if prior_trace != trace:
+                raise ResearchResultConflictError(
+                    f"conflicting research trace: {tool_call_id}"
+                )
+        else:
+            trace_by_call[tool_call_id] = trace
+            traces.append(trace)
+            executed_tool_calls += 1
+            interaction_wait_seconds += result.interaction_wait_ms / 1000
         if plan_step_id:
             if trace["status"] not in {"completed", "cached"}:
                 outcomes[plan_step_id] = trace.get("error_code") or "SEARCH_FAILED"
@@ -1653,30 +1736,34 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             seen_evidence.add(item["url"])
             evidence.append(item)
 
-    executed_tool_calls = len(indexed_results)
-    interaction_wait_seconds = sum(
-        result.interaction_wait_ms
-        for _plan_step_id, _tool_call_id, result, _trace in indexed_results.values()
-    ) / 1000
     gained = len(evidence) - len(state.get("evidence") or [])
     plan_patch: dict[str, Any] = {"pending_plan_step_ids": []}
     current_plan = state.get("plan")
     if current_plan and state.get("pending_plan_step_ids"):
         revision = state.get("plan_revision", current_plan["revision"]) + 1
-        settled = settle_running_steps(
-            current_plan,
-            revision=revision,
-            outcomes=outcomes,
-        )
         plan_patch = {
-            "plan": settled,
+            "plan": settle_running_steps(
+                current_plan,
+                revision=revision,
+                outcomes=outcomes,
+            ),
             "plan_revision": revision,
             "pending_plan_step_ids": [],
         }
+    merged_result_ids.extend(
+        item["result_id"]
+        for item in branch_results
+        if item["result_id"] not in already_merged
+    )
+    had_pending = bool(
+        state.get("pending_plan_step_ids") or _pending_searches(state)
+    )
     return {
+        "research_results": [],
+        "merged_research_result_ids": merged_result_ids,
         "candidates": candidates,
         "evidence": evidence,
-        "tool_traces": list(state.get("tool_traces") or []) + traces,
+        "tool_traces": existing_traces + traces,
         "tool_calls": state.get("tool_calls", 0) + executed_tool_calls,
         "external_wait_seconds": (
             float(state.get("external_wait_seconds") or 0.0)
@@ -1686,13 +1773,22 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         "pending_queries": [],
         **plan_patch,
         "stop_reason": state.get("stop_reason") or projected_limit,
-        "no_progress_count": 0 if gained else state.get("no_progress_count", 0) + 1,
+        "no_progress_count": (
+            0
+            if gained
+            else (
+                state.get("no_progress_count", 0) + 1
+                if had_pending
+                else state.get("no_progress_count", 0)
+            )
+        ),
         "replan_required": False,
         "steps": _step(
-            "research",
+            "merge_research",
             "deterministic",
             None,
-            f"executed_searches={executed_tool_calls} new_evidence={gained}",
+            f"branches={len(branch_results)} executed_searches={executed_tool_calls} "
+            f"new_evidence={gained}",
         ),
     }
 

@@ -31,7 +31,7 @@ const base = {
   createdAt,
   type: z.string()
 };
-const node = z.enum(["load_context", "classify_intent", "plan_research", "mark_plan_running", "research", "reflect", "compose", "verify", "finalize"]);
+const node = z.enum(["load_context", "classify_intent", "plan_research", "mark_plan_running", "research", "merge_research", "reflect", "compose", "verify", "finalize"]);
 const agent = z.enum(["supervisor", "planner", "researcher", "reflector", "writer", "verifier"]);
 const publicToolName = z.enum(["web_search", "unknown_tool"]);
 const searchChannel = z.enum(["web", "x", "xiaohongshu"]);

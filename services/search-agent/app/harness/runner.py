@@ -313,9 +313,16 @@ class HarnessRunner:
             )
             return
         except Exception as exc:  # noqa: BLE001 - 只返回稳定错误，不泄露 Provider body
+            reason_code = str(getattr(exc, "code", "") or "").strip()
+            if (
+                not reason_code
+                or not reason_code.replace("_", "").isalnum()
+                or not reason_code.isupper()
+            ):
+                reason_code = type(exc).__name__.upper()[:80]
             yield runtime_event(
                 "run.failed",
-                reasonCode=type(exc).__name__.upper()[:80],
+                reasonCode=reason_code,
                 message="Search Agent 运行失败",
             )
             return

@@ -1,5 +1,35 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #13 LangGraph 图级 fan-out/fan-in 已完成）
+
+- 本轮唯一功能为
+  [#13](https://github.com/LuzernRR/agent-workbench/issues/13)“LangGraph 图级 fan-out
+  fan-in 与确定性归并”，`Execution Gate: allowed`。用户已明确授权按一 Issue、一 feature
+  连续开发，因此完整门禁通过后直接执行受控收口。
+- `mark_plan_running` 后不再进入单个内部并发 Research 协调器，而是为每个普通原子步骤
+  生成真实 LangGraph `Send("research", branch_state)`；同批小红书步骤合并为一个有序
+  分支，保留工具账号单会话和首错熔断语义。
+- Research worker 只返回 branch-local `ResearchBranchResult`，不写 candidates、evidence、
+  tool traces、tool calls、external wait 或 plan。自定义 reducer 按计划顺序稳定排序，同值
+  resultId 幂等，冲突内容以 `RESEARCH_RESULT_CONFLICT` fail-closed。
+- 唯一 `merge_research` fan-in 一次性提交全局研究状态、结算计划并记录已归并 resultId；
+  临时 branch results 随后清空。反向完成、checkpoint replay 和重复结果不会重复累计计数，
+  依赖下一批只在上一批 merge/checkpoint 后调度。
+- 两个普通查询现在产生两个 Research 节点生命周期和一个 merge 生命周期；Web Zod 与
+  `/v1/graph` 已接受并公开真实安全节点状态，但 mapper 不为确定性节点生成自然语言思考。
+  HarnessRunner 会优先使用异常的稳定 `code`，不把 reducer 异常正文写入公开事件。
+- 门禁：共享合同 `6 passed`；Search Agent 定向 `67 passed`、全量 `216 passed`、Ruff、
+  compileall；Web `379 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。
+- 旧镜像已保留为 `agent-workbench/{search-agent,web}:pre-issue-13-5f5026b`；只滚动替换
+  Search Agent/Web，Compose 七服务 healthy，3000、8080 和
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。
+- 部署后真实 Provider smoke 在 `plan_research` 处收到既有 `invalid_request_error`，尚未进入
+  fan-out 且未调用工具；不能把它冒充线上并行成功证据。下一独立 Issue 应优先修复生产
+  Planner 结构化模型兼容与错误归一化，再继续通用 ToolGateway、完整工具账本与 Evidence
+  状态机。完整记录见
+  `docs/development/2026-08-01-019-issue-13-langgraph-fanout-fanin.md`。
+
 ## 当前结论（2026-08-01，Issue #12 结构化任务计划已完成）
 
 - 当前唯一活动功能为

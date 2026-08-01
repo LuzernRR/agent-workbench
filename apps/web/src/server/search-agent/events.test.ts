@@ -64,6 +64,15 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     expect(events).toEqual([nodeStarted]);
   });
 
+  it("接受图级 fan-in 的 merge_research 节点事件", () => {
+    const event = {
+      ...nodeStarted,
+      node: "merge_research",
+      nodeRunId: "merge_research_0123456789abcdef0123456789abcdef"
+    };
+    expect(parseSearchAgentEvent(event)).toEqual(event);
+  });
+
   it("拒绝未知事件与任何额外字段", () => {
     expect(() => parseSearchAgentEvent({ ...nodeStarted, type: "provider.raw" })).toThrow();
     expect(() => parseSearchAgentEvent({ ...nodeStarted, rawProviderBody: {} })).toThrow(/禁止字段/u);

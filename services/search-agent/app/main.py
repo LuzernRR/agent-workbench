@@ -163,13 +163,15 @@ async def graph_definition(
             "load_context",
             "classify_intent",
             "plan_research",
+            "mark_plan_running",
             "research",
+            "merge_research",
             "reflect",
             "compose",
             "verify",
             "finalize",
         ],
-        "flow": "classify -> plan -> researcher(search+observe) -> reflect -> replan|compose -> verify -> research_more|rewrite|finalize",
+        "flow": "classify -> plan -> mark_running -> Send(research fan-out) -> merge_research fan-in -> reflect -> replan|compose -> verify -> research_more|rewrite|finalize",
     }
 
 

@@ -264,15 +264,21 @@ async def test_timeout_marks_started_tools_unknown_and_returns_stable_failure() 
 
 @pytest.mark.asyncio
 async def test_recursion_empty_output_and_unexpected_error_are_stable() -> None:
+    class StableGraphError(RuntimeError):
+        code = "RESEARCH_RESULT_CONFLICT"
+
     recursion = await collect(runner(FakeGraph(error=GraphRecursionError("limit"))))
     empty = await collect(runner(FakeGraph(state={"answer": ""})))
     unexpected = await collect(runner(FakeGraph(error=ValueError("private body"))))
+    structured = await collect(runner(FakeGraph(error=StableGraphError("private body"))))
 
     assert recursion[0]["reasonCode"] == "RECURSION_LIMIT"
     assert empty[0]["reasonCode"] == "EMPTY_OUTPUT"
     assert unexpected[0]["reasonCode"] == "VALUEERROR"
     assert unexpected[0]["message"] == "Search Agent 运行失败"
     assert "private body" not in str(unexpected)
+    assert structured[0]["reasonCode"] == "RESEARCH_RESULT_CONFLICT"
+    assert "private body" not in str(structured)
 
 
 @pytest.mark.asyncio

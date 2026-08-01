@@ -10,9 +10,11 @@ State 只保存小型结构化数据：意图、计划、候选、证据摘要�
 
 from __future__ import annotations
 
+import copy
+import json
 import operator
 from datetime import UTC, datetime
-from typing import Annotated, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from app.prompts.agents import PROMPT_VERSION
 from app.tools.channels.base import ChannelName
@@ -24,6 +26,7 @@ NodeName = Literal[
     "plan_research",
     "mark_plan_running",
     "research",
+    "merge_research",
     "reflect",
     "compose",
     "verify",
@@ -109,6 +112,97 @@ class SearchRequest(TypedDict):
     step_id: NotRequired[str]
 
 
+class ResearchTarget(TypedDict):
+    """一个图分支内的原子工具目标。"""
+
+    order: int
+    plan_step_id: str | None
+    tool_call_id: str
+    query: str
+    channel: ChannelName
+    timeout_seconds: float | None
+    blocked_reason: str | None
+
+
+class ResearchWorkItem(TypedDict):
+    """通过 LangGraph ``Send`` 交给 Research worker 的 branch-local 输入。"""
+
+    batch_id: str
+    result_id: str
+    order: int
+    targets: list[ResearchTarget]
+
+
+class ResearchExecution(TypedDict):
+    """分支内一个目标的可 checkpoint 结果，不直接修改全局研究状态。"""
+
+    order: int
+    plan_step_id: str | None
+    tool_call_id: str
+    query: str
+    channel: ChannelName
+    result: dict[str, Any] | None
+    trace: SearchTrace | None
+    reason_code: str | None
+
+
+class ResearchBranchResult(TypedDict):
+    """一个 LangGraph Research 分支的完整、稳定归并单元。"""
+
+    batch_id: str
+    result_id: str
+    order: int
+    executions: list[ResearchExecution]
+
+
+class ResearchResultConflictError(RuntimeError):
+    """同一 resultId 出现不同内容时拒绝继续归并。"""
+
+    code = "RESEARCH_RESULT_CONFLICT"
+
+
+def _canonical_research_result(result: ResearchBranchResult) -> str:
+    return json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def reduce_research_results(
+    current: list[ResearchBranchResult],
+    update: list[ResearchBranchResult],
+) -> list[ResearchBranchResult]:
+    """并行安全归集：稳定排序、同值幂等、冲突 fail-closed。
+
+    ``merge_research`` 返回空列表会清空当前批次的临时分支结果，避免它们在后续
+    checkpoint 中重复膨胀；已归并 resultId 另存于全局状态用于 replay 防重。
+    """
+
+    if not update:
+        return []
+    by_id: dict[str, ResearchBranchResult] = {}
+    canonical: dict[str, str] = {}
+    for item in [*current, *update]:
+        result_id = str(item.get("result_id") or "")
+        if not result_id:
+            raise ResearchResultConflictError("research resultId is missing")
+        encoded = _canonical_research_result(item)
+        prior = canonical.get(result_id)
+        if prior is not None and prior != encoded:
+            raise ResearchResultConflictError(
+                f"conflicting research result: {result_id}"
+            )
+        if prior is None:
+            by_id[result_id] = copy.deepcopy(item)
+            canonical[result_id] = encoded
+    return sorted(
+        by_id.values(),
+        key=lambda item: (int(item["order"]), item["result_id"]),
+    )
+
+
 PlanStepStatus = Literal["todo", "running", "done", "blocked", "skipped"]
 
 
@@ -180,6 +274,12 @@ class SearchState(TypedDict, total=False):
     queries: list[str]  # 兼容审计视图；同一查询可因渠道不同重复出现
     query_channels: dict[str, ChannelName]  # 兼容旧 checkpoint；新流程使用 searches
     pending_queries: list[str]  # 兼容旧 checkpoint；新流程使用 pending_searches
+    research_work_item: ResearchWorkItem  # 仅 Send 分支输入，不由 worker 回写
+    research_results: Annotated[
+        list[ResearchBranchResult],
+        reduce_research_results,
+    ]
+    merged_research_result_ids: list[str]
     candidates: list[Candidate]  # 搜索候选
     evidence: list[Evidence]  # 已读证据
     tool_traces: list[SearchTrace]
@@ -281,6 +381,8 @@ def initial_state(
         queries=[],
         query_channels={},
         pending_queries=[],
+        research_results=[],
+        merged_research_result_ids=[],
         tool_traces=[],
         citations=[],
         model_calls=0,

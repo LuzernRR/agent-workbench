@@ -1,7 +1,8 @@
 """真实搜索 StateGraph 装配。
 
-主图：Supervisor -> Planner -> Researcher(tool loop) -> Reflector ->
-replan|Writer -> Verifier -> research_more|rewrite|finalize。
+主图：Supervisor -> Planner -> mark running -> Send(Research branches) ->
+merge fan-in -> Reflector -> replan|Writer -> Verifier ->
+research_more|rewrite|finalize。
 """
 
 from __future__ import annotations
@@ -17,15 +18,18 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Send
 
 from app.events.runtime import runtime_event
 from app.graph.context import RunContext
 from app.graph.nodes import (
+    build_research_work_items,
     classify_intent,
     compose,
     finalize,
     load_context,
     mark_plan_running,
+    merge_research,
     plan_research,
     reflect,
     research,
@@ -48,6 +52,7 @@ _AGENT_BY_NODE = {
     "plan_research": "planner",
     "mark_plan_running": "planner",
     "research": "researcher",
+    "merge_research": "researcher",
     "reflect": "reflector",
     "compose": "writer",
     "verify": "verifier",
@@ -174,6 +179,18 @@ def _evented(name: str, function: Node) -> Node:
     return wrapped
 
 
+def _dispatch_research(state: SearchState) -> str | list[Send]:
+    """把计划批次 fan-out 为独立图任务；小红书组保持单分支串行。"""
+
+    work_items = build_research_work_items(state)
+    if not work_items:
+        return "merge_research"
+    return [
+        Send("research", {**state, "research_work_item": work_item})
+        for work_item in work_items
+    ]
+
+
 def build_graph(checkpointer: object | None = None):
     graph = StateGraph(SearchState, context_schema=RunContext)
     graph.add_node("load_context", _evented("load_context", load_context))
@@ -184,6 +201,10 @@ def build_graph(checkpointer: object | None = None):
         _evented("mark_plan_running", mark_plan_running),
     )
     graph.add_node("research", _evented("research", research))
+    graph.add_node(
+        "merge_research",
+        _evented("merge_research", merge_research),
+    )
     graph.add_node("reflect", _evented("reflect", reflect))
     graph.add_node("compose", _evented("compose", compose))
     graph.add_node("verify", _evented("verify", verify))
@@ -201,9 +222,10 @@ def build_graph(checkpointer: object | None = None):
         route_after_plan,
         {"mark_plan_running": "mark_plan_running", "reflect": "reflect"},
     )
-    graph.add_edge("mark_plan_running", "research")
+    graph.add_conditional_edges("mark_plan_running", _dispatch_research)
+    graph.add_edge("research", "merge_research")
     graph.add_conditional_edges(
-        "research",
+        "merge_research",
         route_after_research,
         {"mark_plan_running": "mark_plan_running", "reflect": "reflect"},
     )
