@@ -256,11 +256,17 @@ _REQUESTED_ITEM_RANGE = re.compile(
 )
 _REQUESTED_ITEM_COUNT = re.compile(r"(?<![\d–—－~～-])(\d{1,2})\s*条")
 _NUMBERED_ANSWER_ITEM = re.compile(r"(?m)^[ \t]*\d{1,2}[.)、][ \t]+")
+_STRUCTURED_RECORD_HEADING = re.compile(
+    r"(?m)^ {0,3}###\s+(\d{1,2})[.)、][ \t]+([^\r\n]+?)[ \t]*$"
+)
 _NON_MEDICAL_REQUEST = re.compile(
     r"(?:不得|不要|不能).{0,20}(?:个人体验|使用体验|体验).{0,20}医疗建议|"
     r"(?:不得|不要|不能).{0,20}医疗建议",
 )
-_NON_MEDICAL_DISCLAIMER = re.compile(r"不构成医疗建议|非医疗建议")
+_NON_MEDICAL_DISCLAIMER = re.compile(
+    r"(?:不构成|不是|并非).{0,16}医疗(?:或[^。；\r\n]{0,12})?建议|"
+    r"非.{0,8}医疗建议"
+)
 _CONFLICTING_EVIDENCE_GAP = re.compile(r"冲突|矛盾|不一致|相反")
 
 
@@ -453,20 +459,28 @@ def _explicit_output_instruction(question: str) -> str | None:
     if minimum is not None and maximum is not None:
         selected = 3 if minimum <= 3 <= maximum else minimum
         lines.append(
-            f"- 输出 {selected} 个编号一级列表项（用户允许范围为 {minimum}–{maximum} 条）。"
+            f"- 输出 {selected} 个 Markdown 记录小节（用户允许范围为 {minimum}–{maximum} 条）。"
         )
     if fields:
-        lines.append("- 使用真正的 Markdown 编号一级列表；每个编号项代表一条完整记录。")
-        lines.append("- 第一字段写在编号项首行；其余字段写成缩进子列表，字段名加粗且每个字段独占一行。")
-        lines.append("- 相邻编号记录之间保留一个空行；禁止把多个字段挤在同一段，也不要改用表格。")
+        lines.append(
+            "- 每条使用三级 Markdown 标题 `### N. 短标题`；短标题由你依据该条已读证据中的"
+            "具体对象或场景生成，简短可辨认，不得复制字段名、占位文字或加入 [来源N]。"
+        )
+        lines.append(
+            "- 标题后空一行；全部字段都写成无缩进的同级列表，字段名加粗且每个字段独占一行。"
+        )
+        lines.append(
+            "- 相邻记录之间保留一个空行；禁止把多个字段挤在同一段、使用嵌套列表或改用表格。"
+        )
         lines.append("- 严格使用下面由当前问题动态生成的字段顺序与 Markdown 结构：")
-        first, *remaining = fields
-        first_value = "[来源N]" if first == "来源链接" else "<模型依据已读证据生成的字段值>"
-        lines.append(f"  1. **{first}**：{first_value}")
-        for field in remaining:
+        lines.append("  ### 1. <模型依据该条已读证据生成的短标题>")
+        lines.append("")
+        for field in fields:
             value = "[来源N]" if field == "来源链接" else "<模型依据已读证据生成的字段值>"
-            lines.append(f"     - **{field}**：{value}")
-        lines.append("- 后续编号项重复相同结构，但字段值必须分别来自对应证据，不能复制占位文字。")
+            lines.append(f"  - **{field}**：{value}")
+        lines.append(
+            "- 后续记录重复相同结构，但短标题和字段值必须分别来自对应证据，不能复制占位文字。"
+        )
         lines.append(
             "- 每条必须明确它描述的具体对象；若字段列表没有单独的对象名称字段，"
             "把对象名写进最贴近的字段。分类未被正文说明时写“对象名（正文未说明该分类）”，"
@@ -487,7 +501,10 @@ def _explicit_output_instruction(question: str) -> str | None:
             )
         lines.append("- 每条控制在约 220 个 Unicode 字符内，总回答不超过 1000 字。")
     if requires_non_medical:
-        lines.append("- 末尾必须保留一句：以上为个人使用体验，非医疗建议。")
+        lines.append(
+            "- 末尾另起一段，以 Markdown 引用块 `> ...` 写一句针对当前任务的简短边界说明，"
+            "明确个人体验不是医疗建议；由模型自然生成措辞，不得复制固定模板。"
+        )
     return "\n".join(lines)
 
 
@@ -499,9 +516,20 @@ def _explicit_output_issue(question: str, answer: str) -> str | None:
     if not contract and not requires_non_medical:
         return None
     minimum, maximum, fields = contract or (None, None, [])
-    markers = list(_NUMBERED_ANSWER_ITEM.finditer(answer))
+    normalized_answer = answer.replace("\r\n", "\n")
+    markers = list(
+        _STRUCTURED_RECORD_HEADING.finditer(normalized_answer)
+        if fields
+        else _NUMBERED_ANSWER_ITEM.finditer(normalized_answer)
+    )
     blocks = [
-        answer[marker.end() : markers[index + 1].start() if index + 1 < len(markers) else len(answer)]
+        normalized_answer[
+            marker.end() : (
+                markers[index + 1].start()
+                if index + 1 < len(markers)
+                else len(normalized_answer)
+            )
+        ]
         for index, marker in enumerate(markers)
     ]
     problems: list[str] = []
@@ -511,22 +539,54 @@ def _explicit_output_issue(question: str, answer: str) -> str | None:
         invalid_blocks = 0
         missing_citations = 0
         misaligned_citations = 0
-        for block in blocks:
+        heading_numbers = [int(marker.group(1)) for marker in markers]
+        invalid_headings = sum(
+            1
+            for marker in markers
+            if (
+                not 2 <= len(marker.group(2).strip()) <= 60
+                or _CITATION_REFERENCE.search(marker.group(2))
+                or "<模型" in marker.group(2)
+                or marker.group(2).strip(" *`：:") in fields
+            )
+        )
+        if heading_numbers != list(range(1, len(markers) + 1)) or invalid_headings:
+            problems.append(
+                "每条必须使用连续编号的 `### N. 证据对象或场景短标题`，标题不得为空、含引用或占位文字"
+            )
+        for block_index, block in enumerate(blocks):
             positions: list[int] = []
-            for index, field in enumerate(fields):
+            field_lines = re.findall(
+                r"(?m)^- \*\*[^*\r\n]{1,80}\*\*[ \t]*[：:]",
+                block,
+            )
+            nonempty_lines = [line for line in block.splitlines() if line.strip()]
+            allowed_lines = all(
+                re.match(r"^- \*\*[^*\r\n]{1,80}\*\*[ \t]*[：:]", line)
+                or (
+                    requires_non_medical
+                    and block_index == len(blocks) - 1
+                    and line.startswith("> ")
+                )
+                for line in nonempty_lines
+            )
+            valid_shape = (
+                block.startswith("\n\n- ")
+                and len(field_lines) == len(fields)
+                and allowed_lines
+            )
+            for field in fields:
                 escaped = re.escape(field)
-                if index == 0:
-                    field_match = re.match(
-                        rf"\*\*{escaped}\*\*[ \t]*[：:]",
-                        block,
-                    )
-                else:
-                    field_match = re.search(
-                        rf"(?m)^[ \t]+[-*+][ \t]+\*\*{escaped}\*\*[ \t]*[：:]",
-                        block,
-                    )
+                field_match = re.search(
+                    rf"(?m)^- \*\*{escaped}\*\*[ \t]*[：:][ \t]*\S.*$",
+                    block,
+                )
                 positions.append(field_match.start() if field_match else -1)
-            if any(position < 0 for position in positions) or positions != sorted(positions):
+            if (
+                not valid_shape
+                or any(position < 0 for position in positions)
+                or positions != sorted(positions)
+            ):
                 invalid_blocks += 1
                 continue
             if "来源链接" in fields:
@@ -541,7 +601,7 @@ def _explicit_output_issue(question: str, answer: str) -> str | None:
                     misaligned_citations += 1
         if not blocks or invalid_blocks:
             problems.append(
-                "每个编号条目都必须以 Markdown 加粗字段逐行按顺序包含“"
+                "每个三级标题后都必须空一行，并以同级 Markdown 列表逐行按顺序包含“"
                 + " / ".join(fields)
                 + "”"
             )
@@ -550,12 +610,19 @@ def _explicit_output_issue(question: str, answer: str) -> str | None:
         if misaligned_citations:
             problems.append("每条“来源链接”必须列全该条实际使用的全部 [来源N]")
         if len(markers) > 1 and any(
-            not re.search(r"\n[ \t]*\n[ \t]*$", answer[: marker.start()])
+            not re.search(
+                r"\n[ \t]*\n[ \t]*$",
+                normalized_answer[: marker.start()],
+            )
             for marker in markers[1:]
         ):
-            problems.append("相邻编号记录之间必须保留一个空行")
-    if requires_non_medical and not _NON_MEDICAL_DISCLAIMER.search(answer):
-        problems.append("末尾必须明确说明个人体验不构成医疗建议")
+            problems.append("相邻 Markdown 记录之间必须保留一个空行")
+    safety_quote_present = any(
+        line.startswith("> ") and _NON_MEDICAL_DISCLAIMER.search(line)
+        for line in normalized_answer.splitlines()
+    )
+    if requires_non_medical and not safety_quote_present:
+        problems.append("末尾必须用 Markdown 引用块说明个人体验不构成医疗建议")
     if not problems:
         return None
     return "输出格式不符合用户要求：" + "；".join(problems)

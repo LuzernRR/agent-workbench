@@ -80,7 +80,7 @@ def test_xiaohongshu_tool_requires_a_meaningful_window_before_finalization() -> 
     assert 29 <= web_timeout <= 30
 
 
-def test_explicit_output_contract_requires_every_field_in_each_numbered_item() -> None:
+def test_explicit_output_contract_requires_markdown_record_hierarchy() -> None:
     question = (
         "请搜索小红书上关于“油敏皮夏季通勤防晒”的近期使用笔记。"
         "只读取可访问正文，按“肤质与场景 / 使用感受 / 防晒产品类型 / "
@@ -92,12 +92,21 @@ def test_explicit_output_contract_requires_every_field_in_each_numbered_item() -
         "3. **防晒产品类型**：物化结合 [来源2]。\n"
         "4. **可能不适合的人群**：香精敏感者 [来源2]。"
     )
-    valid_answer = "\n\n".join(
+    old_nested_answer = "\n\n".join(
         f"{index}. **肤质与场景**：高温通勤\n"
         "   - **使用感受**：肤感清爽\n"
         "   - **防晒产品类型**：物化结合\n"
         "   - **可能不适合的人群**：香精敏感者\n"
         f"   - **来源链接**：[来源{1 if index < 3 else 2}]"
+        for index in range(1, 4)
+    )
+    valid_answer = "\n\n".join(
+        f"### {index}. 通勤防晒记录 {index}\n\n"
+        "- **肤质与场景**：高温通勤\n"
+        "- **使用感受**：肤感清爽\n"
+        "- **防晒产品类型**：物化结合\n"
+        "- **可能不适合的人群**：香精敏感者\n"
+        f"- **来源链接**：[来源{1 if index < 3 else 2}]"
         for index in range(1, 4)
     )
     inline_answer = "\n\n".join(
@@ -111,21 +120,49 @@ def test_explicit_output_contract_requires_every_field_in_each_numbered_item() -
         "**使用感受**：肤感清爽 [来源2]",
         1,
     )
+    citation_heading = valid_answer.replace(
+        "### 1. 通勤防晒记录 1",
+        "### 1. 通勤防晒记录 1 [来源1]",
+        1,
+    )
+    no_heading_gap = valid_answer.replace(
+        "### 1. 通勤防晒记录 1\n\n-",
+        "### 1. 通勤防晒记录 1\n-",
+        1,
+    )
+    nested_fields = valid_answer.replace(
+        "- **使用感受**：肤感清爽",
+        "   - **使用感受**：肤感清爽",
+        1,
+    )
+    field_name_heading = valid_answer.replace(
+        "### 1. 通勤防晒记录 1",
+        "### 1. 肤质与场景",
+        1,
+    )
+    table_suffix = valid_answer + "\n\n| 字段 | 值 |\n| --- | --- |\n| 额外 | 内容 |"
 
     issue = nodes._explicit_output_issue(question, invalid_answer)
 
     assert issue is not None
-    assert "Markdown 加粗字段逐行按顺序包含" in issue
+    assert "三级标题" in issue
     assert nodes._explicit_output_issue(question, valid_answer) is None
+    assert nodes._explicit_output_issue(question, old_nested_answer) is not None
     assert nodes._explicit_output_issue(question, inline_answer) is not None
     assert nodes._explicit_output_issue(question, incomplete_source_field) is not None
+    assert nodes._explicit_output_issue(question, citation_heading) is not None
+    assert nodes._explicit_output_issue(question, no_heading_gap) is not None
+    assert nodes._explicit_output_issue(question, nested_fields) is not None
+    assert nodes._explicit_output_issue(question, field_name_heading) is not None
+    assert nodes._explicit_output_issue(question, table_suffix) is not None
     instruction = nodes._explicit_output_instruction(question)
     assert instruction is not None
-    assert "输出 3 个编号一级列表项" in instruction
-    assert "真正的 Markdown 编号一级列表" in instruction
+    assert "输出 3 个 Markdown 记录小节" in instruction
+    assert "### N. 短标题" in instruction
+    assert "短标题由你依据该条已读证据" in instruction
     assert "**肤质与场景**" in instruction
-    assert "字段名加粗且每个字段独占一行" in instruction
-    assert "相邻编号记录之间保留一个空行" in instruction
+    assert "无缩进的同级列表" in instruction
+    assert "相邻记录之间保留一个空行" in instruction
     assert "优先选择对指定字段覆盖最完整的来源" in instruction
     assert "不能用于凑条数" in instruction
     assert "来源链接”字段必须列全" in instruction
@@ -148,7 +185,8 @@ def test_explicit_output_contract_uses_current_fields_without_domain_leakage() -
     instruction = nodes._explicit_output_instruction(question)
 
     assert instruction is not None
-    assert "1. **项目名称**" in instruction
+    assert "### 1. <模型依据该条已读证据生成的短标题>" in instruction
+    assert "- **项目名称**" in instruction
     assert "- **申请资格**" in instruction
     assert "- **截止日期**" in instruction
     assert "- **来源链接**：[来源N]" in instruction
@@ -162,11 +200,16 @@ def test_explicit_output_contract_requires_requested_non_medical_boundary() -> N
     assert nodes._explicit_output_issue(question, "这是个人体验。") is not None
     assert nodes._explicit_output_issue(
         question,
-        "这是个人体验，非医疗建议。",
+        "> 这些内容是个人体验，不构成医疗建议。",
+    ) is None
+    assert nodes._explicit_output_issue(
+        question,
+        "> 这些内容来自个人体验，不构成医疗或护肤建议。",
     ) is None
     instruction = nodes._explicit_output_instruction(question)
     assert instruction is not None
-    assert "以上为个人使用体验，非医疗建议" in instruction
+    assert "Markdown 引用块" in instruction
+    assert "不得复制固定模板" in instruction
 
 
 def test_public_summary_requires_model_step_and_recorded_model_call() -> None:
@@ -1104,13 +1147,14 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
         "4. 可能不适合的人群：香精敏感者 [来源1]。"
     )
     valid_answer = "\n\n".join(
-        f"{index}. **肤质与场景**：高温通勤\n"
-        "   - **使用感受**：肤感清爽\n"
-        "   - **防晒产品类型**：物化结合\n"
-        "   - **可能不适合的人群**：香精敏感者\n"
-        "   - **来源链接**：[来源1]"
+        f"### {index}. 高温通勤记录 {index}\n\n"
+        "- **肤质与场景**：高温通勤\n"
+        "- **使用感受**：肤感清爽\n"
+        "- **防晒产品类型**：物化结合\n"
+        "- **可能不适合的人群**：香精敏感者\n"
+        "- **来源链接**：[来源1]"
         for index in range(1, 4)
-    ) + "\n\n以上为个人使用体验，非医疗建议。"
+    ) + "\n\n> 这些内容来自个人使用体验，不构成医疗建议。"
     scenario = Scenario(
         supervisor_channels=["xiaohongshu"],
         plans=[[topic]],
@@ -1140,7 +1184,7 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
     assert scenario.structured_calls["verifier"] == 2
     first_writer_prompt = scenario.structured_messages["writer"][0][-1].content
     assert "输出格式硬约束" in first_writer_prompt
-    assert "真正的 Markdown 编号一级列表" in first_writer_prompt
+    assert "### N. 短标题" in first_writer_prompt
     assert "**肤质与场景**" in first_writer_prompt
 
 

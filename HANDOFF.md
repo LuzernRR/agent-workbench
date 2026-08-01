@@ -1,5 +1,35 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #22 Markdown 信息层级已部署，待小红书重新登录后补终验）
+
+- 当前活动 feature 为
+  [#22](https://github.com/LuzernRR/agent-workbench/issues/22)“优化字段型回答的 Markdown 信息层级”，
+  `Execution Gate: allowed`。字段型回答不再把第一字段作为一级编号项、其余字段做嵌套列表；每条
+  现在由模型依据该条 Evidence 生成 `### N. 对象/场景短标题`，标题后空行，全部用户字段按原顺序
+  使用无缩进同级列表，明确要求的安全边界单独放入 Markdown 引用块。
+- 动态合同只从当前问题提取条数和字段名，不包含防晒对象、产品、体验、结论或固定免责声明。
+  确定性检查会拒绝字段连续堆叠、旧嵌套布局、无/空/重复字段标题、标题带引用或占位、标题后
+  缺空行、嵌套字段、缺字段、乱序、附加表格和来源错位；只触发受控模型改写，不生成模板答案。
+  普通搜索回答和“你是谁”等直接回答不套用该结构，逐 grapheme、append-only 流式边界未修改。
+- 真实生产 Web 运行 `run_dc60cdb14166475ab9eac7250feeade6` 使用 Python 官方文档与动态
+  “主题 / 适用场景 / 核心说明 / 来源链接”字段，两个真实工具调用后以 `VERIFIED / completed`
+  收口；持久回答包含 3 个 h3 标题、12 个同级字段、3 个 Citation，0 个旧嵌套字段，Prompt 为
+  `2026-08-01.v40-markdown-record-hierarchy`，证明没有写死防晒模板。
+- 使用原始防晒问题与生产 `run_755ff83b07a44f7987eb79a6be62d64c` 的 3 条真实已核验小红书
+  Evidence 做当前线上 v40 隔离评测：一次 Writer 生成 3 个标题、15 个同级字段与安全引用块，
+  确定性格式问题为空，Verifier `pass`。该评测不发起新搜索、不写用户会话或长期记忆，不能冒充
+  新的端到端生产运行。
+- 原问题的新生产运行 `run_35d6136fab0b439983acef73d14cbf7f` 真实结算两个工具，但小红书
+  工具账号已返回 `AUTH_REQUIRED`，0 Evidence，以 `RUN_TIME_RESERVE / partial` 诚实降级。工具账号
+  登录二维码端点先 65 秒超时，保留私有会话卷重启工具容器后仍返回 500，当前无法由用户扫码。
+  因此 #22 的“原始小红书问题新生产持久回答”验收项保持未勾选，Issue 不关闭。
+- 门禁：Search Agent `262 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `388 passed, 1 skipped`、typecheck、lint、production build；Playwright
+  `16 passed, 3 skipped`；`git diff --check` 通过。已保留
+  `agent-workbench/search-agent:pre-issue-22-6368e14` 并滚动部署 Search Agent；七服务 healthy，
+  3000、8080 与 [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。
+  完整记录见 `docs/development/2026-08-01-028-issue-22-markdown-record-hierarchy.md`。
+
 ## 当前结论（2026-08-01，Issue #21 已核验证据长期记忆已贯通）
 
 - 本轮唯一功能为

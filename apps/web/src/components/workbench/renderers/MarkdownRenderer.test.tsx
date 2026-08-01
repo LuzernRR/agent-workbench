@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
@@ -11,6 +11,26 @@ describe("MarkdownRenderer", () => {
     const link = screen.getByRole("link", { name: "访问 example.com" });
     expect(link).toHaveAttribute("href", "https://example.com/report");
     expect(screen.queryByText("https://example.com/report")).not.toBeInTheDocument();
+  });
+
+  it("renders evidence records as headings, flat field lists, and a safety quote", () => {
+    const { container } = render(<MarkdownRenderer>{[
+      "### 1. 通勤防晒记录",
+      "",
+      "- **肤质与场景**：高温通勤",
+      "- **使用感受**：成膜快",
+      "- **来源链接**：[来源1]",
+      "",
+      "> 这些内容来自个人体验，不构成医疗建议。"
+    ].join("\n")}</MarkdownRenderer>);
+
+    const record = within(container);
+    expect(record.getByRole("heading", { level: 3, name: "1. 通勤防晒记录" })).toBeVisible();
+    const list = record.getByRole("list");
+    expect(list.parentElement).toBe(container.querySelector(".markdown-body"));
+    expect(list.querySelector("ul, ol")).toBeNull();
+    expect(record.getByText("肤质与场景").tagName).toBe("STRONG");
+    expect(record.getByText(/不构成医疗建议/u).closest("blockquote")).not.toBeNull();
   });
 
   it("does not create executable links or unsafe images", () => {

@@ -154,9 +154,11 @@ def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> N
     assert "用户明确指定条目数量、字段" in WRITER_PROMPT
     assert "条目数量必须位于用户允许范围内" in WRITER_PROMPT
     assert "真实 [来源N]" in WRITER_PROMPT
-    assert "字段名加粗，每个字段独占一行" in WRITER_PROMPT
-    assert "相邻记录之间保留一个空行" in WRITER_PROMPT
-    assert "不得把多个字段挤在同一段" in WRITER_PROMPT
+    assert "`### N. 短标题`" in WRITER_PROMPT
+    assert "无缩进的同级列表" in WRITER_PROMPT
+    assert "相邻记录之间保留空行" in WRITER_PROMPT
+    assert "不得把多个字段" in WRITER_PROMPT
+    assert "挤在同一段" in WRITER_PROMPT
     assert "先按用户指定字段的直接覆盖度筛选" in WRITER_PROMPT
     assert "不能用于凑条目" in WRITER_PROMPT
     assert "每条记录优先对应一个来源" in WRITER_PROMPT
@@ -170,7 +172,9 @@ def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> N
     assert "未作为证据" in WRITER_PROMPT
     assert "条目数量、字段与字段顺序" in VERIFIER_PROMPT
     assert "不能把字段拆成" in VERIFIER_PROMPT
-    assert "Markdown 编号一级列表、加粗字段名、字段逐行与记录间空行" in VERIFIER_PROMPT
+    assert "连续编号的 Markdown 三级标题" in VERIFIER_PROMPT
+    assert "无缩进同级字段列表" in VERIFIER_PROMPT
+    assert "Markdown 引用块" in VERIFIER_PROMPT
     assert "不得以“可以推断”为由" in VERIFIER_PROMPT
     assert "字段首先是输出槽位" in VERIFIER_PROMPT
     assert "次要字段准确写“正文未说明”" in VERIFIER_PROMPT
