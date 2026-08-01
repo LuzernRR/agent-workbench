@@ -9,7 +9,11 @@ from app.events.runtime import (
     runtime_event,
     safe_public_text,
 )
-from app.graph.schemas import ANSWER_MAX_CHARS, ComposeResult
+from app.graph.schemas import (
+    ANSWER_MAX_CHARS,
+    STRUCTURED_ANSWER_MAX_CHARS,
+    ComposeResult,
+)
 from app.llm.deepseek import WRITER_MAX_TOKENS
 from app.prompts.agents import (
     DEGRADED_WRITER_PROMPT,
@@ -141,19 +145,38 @@ def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> N
     # 避免 maxLength 协议漂移把已有真实 Evidence 的运行升级为 run.failed。
     assert len(generated.answer_markdown) == ANSWER_MAX_CHARS + 1
     assert ANSWER_MAX_CHARS == 760
+    assert STRUCTURED_ANSWER_MAX_CHARS == 1100
     assert WRITER_MAX_TOKENS == 2048
-    assert "硬上限 760 个 Unicode 字符" in WRITER_PROMPT
+    assert "默认硬上限 760 个 Unicode 字符" in WRITER_PROMPT
+    assert "绝不超过 1100 个 Unicode" in WRITER_PROMPT
     assert "不能为压缩篇幅删除必要的 [来源N] 引用" in WRITER_PROMPT
     assert "证据不足的具体部分最多用一句说明" in WRITER_PROMPT
     assert "用户明确指定条目数量、字段" in WRITER_PROMPT
     assert "条目数量必须位于用户允许范围内" in WRITER_PROMPT
     assert "真实 [来源N]" in WRITER_PROMPT
+    assert "字段名加粗，每个字段独占一行" in WRITER_PROMPT
+    assert "相邻记录之间保留一个空行" in WRITER_PROMPT
+    assert "不得把多个字段挤在同一段" in WRITER_PROMPT
+    assert "先按用户指定字段的直接覆盖度筛选" in WRITER_PROMPT
+    assert "不能用于凑条目" in WRITER_PROMPT
+    assert "每条记录优先对应一个来源" in WRITER_PROMPT
+    assert "来源链接”字段必须列全" in WRITER_PROMPT
+    assert "每条记录还必须明确它描述的具体对象" in WRITER_PROMPT
+    assert "不能只写裸的“未说明”" in WRITER_PROMPT
+    assert "不得先填入用户筛选词" in WRITER_PROMPT
     assert "领域安全边界与免责声明只能在当前问题明确" in WRITER_PROMPT
     assert "肤质与场景" not in WRITER_PROMPT
     assert "非医疗建议" not in WRITER_PROMPT
     assert "未作为证据" in WRITER_PROMPT
     assert "条目数量、字段与字段顺序" in VERIFIER_PROMPT
     assert "不能把字段拆成" in VERIFIER_PROMPT
+    assert "Markdown 编号一级列表、加粗字段名、字段逐行与记录间空行" in VERIFIER_PROMPT
+    assert "不得以“可以推断”为由" in VERIFIER_PROMPT
+    assert "字段首先是输出槽位" in VERIFIER_PROMPT
+    assert "次要字段准确写“正文未说明”" in VERIFIER_PROMPT
+    assert "不能仅因信息不完整要求删除或改写" in VERIFIER_PROMPT
+    assert "不得要求 Writer" in VERIFIER_PROMPT
+    assert "未被答案引用的 Evidence 不属于答案" in VERIFIER_PROMPT
     assert "不得从其他领域任务迁移规则" in VERIFIER_PROMPT
 
 

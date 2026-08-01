@@ -19,6 +19,7 @@ from app.graph.build import _novel_public_summary, build_graph
 from app.graph.context import RunContext
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
+    STRUCTURED_ANSWER_MAX_CHARS,
     ComposeResult,
     IntentResult,
     PlanResult,
@@ -91,26 +92,68 @@ def test_explicit_output_contract_requires_every_field_in_each_numbered_item() -
         "3. **防晒产品类型**：物化结合 [来源2]。\n"
         "4. **可能不适合的人群**：香精敏感者 [来源2]。"
     )
-    valid_answer = "\n".join(
-        f"{index}. 肤质与场景：高温通勤\n"
-        "使用感受：肤感清爽\n"
-        "防晒产品类型：物化结合\n"
-        "可能不适合的人群：香精敏感者\n"
-        f"来源链接：[来源{1 if index < 3 else 2}]"
+    valid_answer = "\n\n".join(
+        f"{index}. **肤质与场景**：高温通勤\n"
+        "   - **使用感受**：肤感清爽\n"
+        "   - **防晒产品类型**：物化结合\n"
+        "   - **可能不适合的人群**：香精敏感者\n"
+        f"   - **来源链接**：[来源{1 if index < 3 else 2}]"
         for index in range(1, 4)
+    )
+    inline_answer = "\n\n".join(
+        f"{index}. **肤质与场景**：高温通勤。**使用感受**：肤感清爽。"
+        "**防晒产品类型**：物化结合。**可能不适合的人群**：香精敏感者。"
+        f"**来源链接**：[来源{1 if index < 3 else 2}]"
+        for index in range(1, 4)
+    )
+    incomplete_source_field = valid_answer.replace(
+        "**使用感受**：肤感清爽",
+        "**使用感受**：肤感清爽 [来源2]",
+        1,
     )
 
     issue = nodes._explicit_output_issue(question, invalid_answer)
 
     assert issue is not None
-    assert "每个编号条目都必须按顺序包含" in issue
+    assert "Markdown 加粗字段逐行按顺序包含" in issue
     assert nodes._explicit_output_issue(question, valid_answer) is None
+    assert nodes._explicit_output_issue(question, inline_answer) is not None
+    assert nodes._explicit_output_issue(question, incomplete_source_field) is not None
     instruction = nodes._explicit_output_instruction(question)
     assert instruction is not None
     assert "输出 3 个编号一级列表项" in instruction
-    assert "禁止把不同字段拆成不同编号项" in instruction
-    assert "总回答不超过 680 字" in instruction
+    assert "真正的 Markdown 编号一级列表" in instruction
+    assert "**肤质与场景**" in instruction
+    assert "字段名加粗且每个字段独占一行" in instruction
+    assert "相邻编号记录之间保留一个空行" in instruction
+    assert "优先选择对指定字段覆盖最完整的来源" in instruction
+    assert "不能用于凑条数" in instruction
+    assert "来源链接”字段必须列全" in instruction
+    assert "每条必须明确它描述的具体对象" in instruction
+    assert "不能只写裸的“未说明”" in instruction
+    assert "不得先用用户问题中的筛选词" in instruction
+    assert "总回答不超过 1000 字" in instruction
     assert "非医疗建议" not in instruction
+
+
+def test_field_structured_output_gets_markdown_budget_without_expanding_direct_answer() -> None:
+    structured = "请按“项目名称 / 申请资格 / 截止日期 / 来源链接”列出 3 条。"
+
+    assert nodes._answer_delivery_limit(structured) == STRUCTURED_ANSWER_MAX_CHARS
+    assert nodes._answer_delivery_limit("你是谁") == ANSWER_MAX_CHARS
+
+
+def test_explicit_output_contract_uses_current_fields_without_domain_leakage() -> None:
+    question = "请按“项目名称 / 申请资格 / 截止日期 / 来源链接”列出 2 条。"
+    instruction = nodes._explicit_output_instruction(question)
+
+    assert instruction is not None
+    assert "1. **项目名称**" in instruction
+    assert "- **申请资格**" in instruction
+    assert "- **截止日期**" in instruction
+    assert "- **来源链接**：[来源N]" in instruction
+    assert "肤质" not in instruction
+    assert "医疗建议" not in instruction
 
 
 def test_explicit_output_contract_requires_requested_non_medical_boundary() -> None:
@@ -1059,11 +1102,11 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
         "4. 可能不适合的人群：香精敏感者 [来源1]。"
     )
     valid_answer = "\n\n".join(
-        f"{index}. 肤质与场景：高温通勤\n"
-        "使用感受：肤感清爽\n"
-        "防晒产品类型：物化结合\n"
-        "可能不适合的人群：香精敏感者\n"
-        "来源链接：[来源1]"
+        f"{index}. **肤质与场景**：高温通勤\n"
+        "   - **使用感受**：肤感清爽\n"
+        "   - **防晒产品类型**：物化结合\n"
+        "   - **可能不适合的人群**：香精敏感者\n"
+        "   - **来源链接**：[来源1]"
         for index in range(1, 4)
     ) + "\n\n以上为个人使用体验，非医疗建议。"
     scenario = Scenario(
@@ -1095,7 +1138,8 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
     assert scenario.structured_calls["verifier"] == 2
     first_writer_prompt = scenario.structured_messages["writer"][0][-1].content
     assert "输出格式硬约束" in first_writer_prompt
-    assert "每个编号项代表一条完整记录" in first_writer_prompt
+    assert "真正的 Markdown 编号一级列表" in first_writer_prompt
+    assert "**肤质与场景**" in first_writer_prompt
 
 
 @pytest.mark.asyncio
@@ -1900,6 +1944,25 @@ async def test_rewrite_can_finish_after_soft_search_iteration_stop(
     assert output["verification_passed"] is True
     assert output["stop_reason"] == "VERIFIED"
     assert output["repair_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rewrite_can_finish_after_tool_call_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(verifier_actions=["rewrite", "pass"])
+
+    output, _events = await run_scenario(
+        monkeypatch,
+        scenario,
+        max_tool_calls=1,
+    )
+
+    assert output["response_status"] == "completed"
+    assert output["verification_passed"] is True
+    assert output["stop_reason"] == "VERIFIED"
+    assert output["repair_count"] == 1
+    assert output["tool_calls"] == 1
 
 
 @pytest.mark.asyncio

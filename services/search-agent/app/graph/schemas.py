@@ -21,6 +21,7 @@ class StrictModel(BaseModel):
 
 ResearchChannel = Literal["web", "x", "xiaohongshu"]
 ANSWER_MAX_CHARS = 760
+STRUCTURED_ANSWER_MAX_CHARS = 1100
 
 
 class PlannedSearch(StrictModel):

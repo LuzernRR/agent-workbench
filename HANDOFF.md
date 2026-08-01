@@ -1,5 +1,34 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #20 模型 Markdown 字段输出已优化）
+
+- 本轮唯一功能为
+  [#20](https://github.com/LuzernRR/agent-workbench/issues/20)“优化模型结果的 Markdown 字段布局”，
+  `Execution Gate: allowed`。修复前只检查字段出现和顺序，模型把“肤质与场景 / 使用感受 /
+  防晒产品类型 / 可能不适合的人群 / 来源链接”挤在同一段仍会被放行。
+- 当前问题中的引号字段和条数仍由服务端动态提取，不包含防晒答案模板。Writer 现在生成 Markdown
+  编号一级记录，字段名加粗、字段逐行、其余字段为缩进子列表，记录间保留空行；字段对象、值和
+  [来源N] 均来自真实模型与已读 Evidence。确定性检查会拒绝行内堆叠、缺字段、乱序、缺空行以及
+  “来源链接”未列全该条实际引用的输出，并触发最多一次模型改写。
+- Writer/Verifier 增加了领域无关证据规则：优先选择指定字段覆盖更完整的正文；只有标题、类别或
+  场景清单的弱来源不能凑条数；每条必须保留具体对象，分类缺失时可如实说明，不得用用户问题的
+  筛选词、产品名暗示或“可以推断”补写正文没有的事实。次要字段准确写“正文未说明”本身不是
+  拒绝理由。
+- 字段型 Markdown 的交付上限单独调整为 1100 个 Unicode 字符，避免 3–5 条多字段记录被 760 字
+  默认边界截掉来源或必需免责声明；普通检索和“你是谁”等直接回答仍保持 760 字上限。工具调用
+  达到上限后禁止继续搜索，但仍允许唯一一次不调用工具的答案改写，不再错误阻断收尾。
+- 真实小红书运行 `run_issue20_markdown_v38_1785585531370` 在 86.061 秒完成两次真实工具调用，
+  两次均 `success`、各读取 3 条正文，0 node.failed；模型输出 3 条完整 Markdown 记录、3 个字段
+  子项、记录空行、真实 Citation 和非医疗边界，`answerSource=model`。严格 Verifier 对正文未说明
+  字段仍产生 false negative，运行诚实以 `REWRITE_LIMIT / partial` 收口。后续 v39 运行又遇到
+  小红书 MCP 90.180 秒受控降级并以 `RUN_TIME_RESERVE / partial` 收口；未伪报 verified。
+- 门禁：Search Agent `250 passed`、Ruff、compileall；共享合同 `6 passed`；Web
+  `381 passed, 1 skipped`、typecheck、lint、production build；Playwright `16 passed, 3 skipped`；
+  `git diff --check` 通过。已保留 `agent-workbench/search-agent:pre-issue-20-f980ca9`，最终仅滚动
+  部署 Search Agent；七服务 healthy，3000、8080 与
+  [https://luzern.cc.cd/workbench](https://luzern.cc.cd/workbench) 均为 200。完整记录见
+  `docs/development/2026-08-01-025-issue-20-markdown-output.md`。
+
 ## 当前结论（2026-08-01，Issue #18 Web 正文读取延迟与部分成功已优化）
 
 - 本轮唯一功能为

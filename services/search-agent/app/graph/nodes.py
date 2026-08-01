@@ -26,6 +26,7 @@ from app.graph.plan import (
 )
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
+    STRUCTURED_ANSWER_MAX_CHARS,
     ComposeResult,
     IntentResult,
     PlanResult,
@@ -246,7 +247,7 @@ _REQUESTED_ITEM_RANGE = re.compile(
     r"(?<!\d)(\d{1,2})\s*[–—－~～-]\s*(\d{1,2})\s*条",
 )
 _REQUESTED_ITEM_COUNT = re.compile(r"(?<![\d–—－~～-])(\d{1,2})\s*条")
-_NUMBERED_ANSWER_ITEM = re.compile(r"(?m)^\s*\d{1,2}[.)、]\s+")
+_NUMBERED_ANSWER_ITEM = re.compile(r"(?m)^[ \t]*\d{1,2}[.)、][ \t]+")
 _NON_MEDICAL_REQUEST = re.compile(
     r"(?:不得|不要|不能).{0,20}(?:个人体验|使用体验|体验).{0,20}医疗建议|"
     r"(?:不得|不要|不能).{0,20}医疗建议",
@@ -424,12 +425,36 @@ def _explicit_output_instruction(question: str) -> str | None:
             f"- 输出 {selected} 个编号一级列表项（用户允许范围为 {minimum}–{maximum} 条）。"
         )
     if fields:
-        lines.append("- 每个编号项代表一条完整记录；禁止把不同字段拆成不同编号项。")
-        lines.append("- 每个编号项都必须按以下顺序逐行包含这些字面字段：")
-        for field in fields:
-            value = "[来源N]" if field == "来源链接" else "由已读证据直接支持的内容"
-            lines.append(f"  {field}：{value}")
-        lines.append("- 每条控制在约 180 个 Unicode 字符内，总回答不超过 680 字。")
+        lines.append("- 使用真正的 Markdown 编号一级列表；每个编号项代表一条完整记录。")
+        lines.append("- 第一字段写在编号项首行；其余字段写成缩进子列表，字段名加粗且每个字段独占一行。")
+        lines.append("- 相邻编号记录之间保留一个空行；禁止把多个字段挤在同一段，也不要改用表格。")
+        lines.append("- 严格使用下面由当前问题动态生成的字段顺序与 Markdown 结构：")
+        first, *remaining = fields
+        first_value = "[来源N]" if first == "来源链接" else "<模型依据已读证据生成的字段值>"
+        lines.append(f"  1. **{first}**：{first_value}")
+        for field in remaining:
+            value = "[来源N]" if field == "来源链接" else "<模型依据已读证据生成的字段值>"
+            lines.append(f"     - **{field}**：{value}")
+        lines.append("- 后续编号项重复相同结构，但字段值必须分别来自对应证据，不能复制占位文字。")
+        lines.append(
+            "- 每条必须明确它描述的具体对象；若字段列表没有单独的对象名称字段，"
+            "把对象名写进最贴近的字段。分类未被正文说明时写“对象名（正文未说明该分类）”，"
+            "不能只写裸的“未说明”。"
+        )
+        lines.append(
+            "- 某字段缺少正文支持时，只写正文未说明的具体缺口；不得先用用户问题中的"
+            "筛选词或“日常使用”等泛化词补位，再括号承认正文未说明。"
+        )
+        lines.append(
+            "- 已读来源多于条目下限时，优先选择对指定字段覆盖最完整的来源；"
+            "只列标题、类别或场景而没有具体内容的来源，不能用于凑条数。"
+        )
+        if "来源链接" in fields:
+            lines.append(
+                "- 每条记录优先对应一个来源，不要把不同作者的相反体验合并；"
+                "若确需引用多个来源，“来源链接”字段必须列全该条实际使用的全部 [来源N]。"
+            )
+        lines.append("- 每条控制在约 220 个 Unicode 字符内，总回答不超过 1000 字。")
     if requires_non_medical:
         lines.append("- 末尾必须保留一句：以上为个人使用体验，非医疗建议。")
     return "\n".join(lines)
@@ -454,26 +479,64 @@ def _explicit_output_issue(question: str, answer: str) -> str | None:
     if fields:
         invalid_blocks = 0
         missing_citations = 0
+        misaligned_citations = 0
         for block in blocks:
-            positions = [block.find(field) for field in fields]
+            positions: list[int] = []
+            for index, field in enumerate(fields):
+                escaped = re.escape(field)
+                if index == 0:
+                    field_match = re.match(
+                        rf"\*\*{escaped}\*\*[ \t]*[：:]",
+                        block,
+                    )
+                else:
+                    field_match = re.search(
+                        rf"(?m)^[ \t]+[-*+][ \t]+\*\*{escaped}\*\*[ \t]*[：:]",
+                        block,
+                    )
+                positions.append(field_match.start() if field_match else -1)
             if any(position < 0 for position in positions) or positions != sorted(positions):
                 invalid_blocks += 1
                 continue
             if "来源链接" in fields:
                 source_position = positions[fields.index("来源链接")]
-                if not _CITATION_REFERENCE.search(block[source_position:]):
+                block_citations = set(_CITATION_REFERENCE.findall(block))
+                source_citations = set(
+                    _CITATION_REFERENCE.findall(block[source_position:])
+                )
+                if not source_citations:
                     missing_citations += 1
+                elif block_citations != source_citations:
+                    misaligned_citations += 1
         if not blocks or invalid_blocks:
             problems.append(
-                "每个编号条目都必须按顺序包含“" + " / ".join(fields) + "”"
+                "每个编号条目都必须以 Markdown 加粗字段逐行按顺序包含“"
+                + " / ".join(fields)
+                + "”"
             )
         if missing_citations:
             problems.append("每条“来源链接”后都必须使用真实 [来源N] 引用")
+        if misaligned_citations:
+            problems.append("每条“来源链接”必须列全该条实际使用的全部 [来源N]")
+        if len(markers) > 1 and any(
+            not re.search(r"\n[ \t]*\n[ \t]*$", answer[: marker.start()])
+            for marker in markers[1:]
+        ):
+            problems.append("相邻编号记录之间必须保留一个空行")
     if requires_non_medical and not _NON_MEDICAL_DISCLAIMER.search(answer):
         problems.append("末尾必须明确说明个人体验不构成医疗建议")
     if not problems:
         return None
     return "输出格式不符合用户要求：" + "；".join(problems)
+
+
+def _answer_delivery_limit(question: str) -> int:
+    """字段型 Markdown 需要容纳结构标记与必需结尾，普通回答仍保持紧凑。"""
+
+    contract = _explicit_output_contract(question)
+    if contract and contract[2]:
+        return STRUCTURED_ANSWER_MAX_CHARS
+    return ANSWER_MAX_CHARS
 
 
 def _presented_sources_satisfy_contract(
@@ -2242,7 +2305,10 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             ),
         }
     repairing = state.get("verification_action") == "rewrite"
-    answer = _compact_answer_markdown(result.answer_markdown)
+    answer = _compact_answer_markdown(
+        result.answer_markdown,
+        max_chars=_answer_delivery_limit(state["question"]),
+    )
     return {
         "answer": answer,
         "answer_source": "model",
@@ -2317,7 +2383,9 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
                 f"{json.dumps(_verification_tool_feedback(state), ensure_ascii=False)}"
                 f"\n渠道证据覆盖（硬门槛）："
                 f"{json.dumps(channel_coverage, ensure_ascii=False)}"
-                f"\n\n回答：\n{answer}\n\n来源：\n{digest}"
+                f"\n\n回答：\n{answer}\n\n"
+                "可供核验的全部 Evidence（未被回答采用的条目不会进入最终 Citation，"
+                f"不要求全部使用）：\n{digest}"
             )),
         ],
         model_id=state.get("model_id") or None,
@@ -2348,7 +2416,11 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
     )
     extra = [item["query"] for item in extra_searches]
     stop_reason = state.get("stop_reason")
-    soft_search_stop = stop_reason in {"MAX_ITERATIONS", "NO_PROGRESS"}
+    soft_search_stop = stop_reason in {
+        "MAX_ITERATIONS",
+        "NO_PROGRESS",
+        "TOOL_CALL_LIMIT",
+    }
     if passed:
         # 搜索轮次耗尽只禁止继续检索；独立 Verifier 已确认答案受证据支持时，
         # 不应让此前的软停止原因把已核验结果错误降级为 partial。
@@ -2517,9 +2589,12 @@ def route_after_verify(state: SearchState) -> str:
         return "finalize"
     if budget_reason(state, reserve_model_calls=1):
         return "finalize"
-    if state.get("tool_calls", 0) >= state.get("max_tool_calls", 6):
-        return "finalize"
     action = state.get("verification_action")
+    if (
+        state.get("tool_calls", 0) >= state.get("max_tool_calls", 6)
+        and action != "rewrite"
+    ):
+        return "finalize"
     if (
         action == "research_more"
         and (state.get("replan_required") or _pending_searches(state))
