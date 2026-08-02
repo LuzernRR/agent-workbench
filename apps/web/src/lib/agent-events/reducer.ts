@@ -480,7 +480,9 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         outputHash: sha256Value(payload.outputHash),
         usage: toolUsageValue(payload.usage),
         name: stringValue(payload.name, "工具"),
-        summary: stringValue(payload.summary, "正在准备"),
+        // 过程文案只能来自后端事件；上游漏填时留空并由消费方回落到工具名，
+        // 前端不得在此处发明「正在准备」这类过程陈述。
+        summary: stringValue(payload.summary),
         status: "running",
         channel: ["web", "x", "xiaohongshu"].includes(stringValue(payload.channel)) ? stringValue(payload.channel) as ToolItem["channel"] : undefined,
         query: stringValue(payload.query) || undefined,
@@ -741,11 +743,15 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
         runTimings: timing ? { ...settled.runTimings, [event.runId]: { ...timing, completedAt: event.createdAt } } : settled.runTimings
       };
       if (payload.partial !== true && payload.verificationPassed !== false) return completed;
+      // 核验结论只能由后端给出；缺少 summary 时不生成状态行，
+      // 前端不得代替 Agent 断言本次回答是否经过证据核验。
+      const label = stringValue(payload.summary);
+      if (!label) return completed;
       const item: StatusItem = {
         kind: "status",
         id: `status:${event.id}`,
         runId: event.runId,
-        label: stringValue(payload.summary, payload.partial === true ? "本次回答未完全核验，请结合引用来源审阅" : "回答已完成，本任务未使用外部证据核验"),
+        label,
         tone: payload.partial === true ? "warning" : "neutral",
         createdAt: event.createdAt
       };

@@ -316,6 +316,19 @@ describe("reduceAgentEvent", () => {
     expect(state.items["status:event-2"]).toMatchObject({ tone: "neutral", label: "回答已完成，本任务未使用外部证据核验" });
   });
 
+  it("上游漏填过程文案时留空而不发明陈述", () => {
+    const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
+      event(1, "run.started", {}),
+      event(2, "tool.started", { toolCallId: "search-blank", name: "网页搜索" }),
+      event(3, "tool.completed", { toolCallId: "search-blank", settlementSummary: "找到 2 条结果，读取 1 个来源" }),
+      // 缺少 summary 的终态不得由前端补出核验结论。
+      event(4, "run.completed", { partial: true })
+    ]);
+    expect(state.items["tool:search-blank"]).toMatchObject({ name: "网页搜索", summary: "" });
+    expect(state.items["status:event-4"]).toBeUndefined();
+    expect(JSON.stringify(state)).not.toMatch(/正在准备|回答已通过证据核验|本次回答未完全核验/u);
+  });
+
   it("只接收无凭据 HTTP(S) 工具来源", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "tool.started", { toolCallId: "search-safe", name: "网页搜索", summary: "搜索中" }),

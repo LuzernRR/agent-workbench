@@ -333,6 +333,27 @@ describe("Search Agent v1 白名单投影", () => {
     }));
   });
 
+  it("tool.started 与 run.completed 始终自带过程文案，前端无需自撰兜底", () => {
+    const channels = ["web", "x", "xiaohongshu"] as const;
+    for (const channel of channels) {
+      const started = mapSearchAgentEvent(source({ type: "tool.started", toolCallId: "call_one", toolName: "web_search", query: "状态图实践", channel, cached: false }));
+      expect(started.events[0].payload).toEqual(expect.objectContaining({ name: expect.stringMatching(/\S/u), summary: expect.stringMatching(/\S/u) }));
+    }
+    const blocked = mapSearchAgentEvent(source({ type: "tool.started", toolCallId: "call_two", toolName: "unknown_tool", query: "越权请求", channel: "web", cached: false }));
+    expect(blocked.events[0].payload).toEqual(expect.objectContaining({ name: "未知工具请求", summary: "正在拦截未注册工具请求" }));
+
+    const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 };
+    const terminals = [
+      { responseStatus: "partial" as const, verificationPassed: false, stopReason: "SEARCH_UNAVAILABLE" as const },
+      { responseStatus: "completed" as const, verificationPassed: true, stopReason: "VERIFIED" as const },
+      { responseStatus: "completed" as const, verificationPassed: false, stopReason: "DIRECT_COMPLETED" as const }
+    ];
+    for (const terminal of terminals) {
+      const completed = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "回答", answerSource: "model", answerModelCalls: 1, promptVersion: "2026-07-28.v2", citations: [], usage, modelCalls: 2, toolCalls: 1, evidenceCount: 0, ...terminal }));
+      expect(completed.terminal).toEqual(expect.objectContaining({ payload: expect.objectContaining({ summary: expect.stringMatching(/\S/u) }) }));
+    }
+  });
+
   it("把记忆 store/recall 投影为可重放的公开结构化状态", () => {
     const stored = mapSearchAgentEvent(source({
       type: "memory.updated",

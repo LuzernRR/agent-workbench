@@ -1,18 +1,104 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
 import type { AgentEvent } from "@/lib/agent-events/types";
 import { parseSearchAgentEvent } from "@/server/search-agent/events";
 import { mapSearchAgentEvent } from "@/server/search-agent/mapper";
-import { ActivityRow, isPlaceholderTool, SearchActivitySummary, summarizeSearchActivity } from "./ActivityRow";
+import { ActivityRow, SearchActivitySummary } from "./ActivityRow";
 
-describe("isPlaceholderTool", () => {
-  it("filters generic activity placeholders", () => {
-    expect(isPlaceholderTool({ name: "工具", summary: "正在准备" })).toBe(true);
-    expect(isPlaceholderTool({ name: "网页搜索", summary: "正在准备" })).toBe(false);
+describe("ActivityRow 过程文案单一真相源", () => {
+  // 本块内多次渲染同名工具行；不清理会污染后续用例的 screen 查询。
+  afterEach(cleanup);
+
+  const backendSummary = "找到 10 条结果，读取 2 个来源";
+
+  it("单次调用的数字只用后端原文，不用前端去重重算", () => {
+    const { container } = render(createElement(ActivityRow, { item: {
+      kind: "tool",
+      id: "tool:single-source",
+      runId: "run-one",
+      toolCallId: "single-source",
+      name: "网页搜索",
+      summary: "搜索：状态图实践",
+      settlementSummary: backendSummary,
+      status: "completed",
+      resultCount: 10,
+      evidenceCount: 2,
+      // 去重后仅 1 条已核验 URL：前端若自行重算会写出「读取 1 个来源」。
+      sources: [
+        { title: "来源一", url: "https://example.com/one", verified: true },
+        { title: "来源一重复", url: "https://example.com/one/", verified: true }
+      ],
+      createdAt: "2026-08-02T00:00:00.000Z"
+    } }));
+
+    fireEvent.click(within(container).getByRole("button", { name: "展开工具调用：网页搜索" }));
+    expect(container).toHaveTextContent(backendSummary);
+    expect(container).not.toHaveTextContent("读取 1 个来源");
   });
 
+  it("同一次调用不出现两处结果计数文案", () => {
+    const { container } = render(createElement(ActivityRow, { item: {
+      kind: "tool",
+      id: "tool:one-count",
+      runId: "run-one",
+      toolCallId: "one-count",
+      name: "网页搜索",
+      summary: "搜索：状态图实践",
+      settlementSummary: backendSummary,
+      status: "completed",
+      resultCount: 10,
+      evidenceCount: 2,
+      createdAt: "2026-08-02T00:00:00.000Z"
+    } }));
+
+    fireEvent.click(within(container).getByRole("button", { name: "展开工具调用：网页搜索" }));
+    const counted = [...container.querySelectorAll("*")].filter((node) =>
+      node.children.length === 0 && /找到 \d+ 条结果，读取 \d+ 个来源/u.test(node.textContent || ""));
+    expect(counted).toHaveLength(1);
+  });
+
+  it("主文案只取后端 summary 或工具名，不改写为自撰陈述", () => {
+    const base = {
+      kind: "tool" as const,
+      id: "tool:main-text",
+      runId: "run-one",
+      toolCallId: "main-text",
+      name: "网页搜索",
+      status: "completed" as const,
+      createdAt: "2026-08-02T00:00:00.000Z"
+    };
+    const view = render(createElement(ActivityRow, { item: { ...base, summary: "搜索：状态图实践" } }));
+    expect(within(view.container).getByRole("button", { name: /展开工具调用/u })).toHaveAttribute("title", "搜索：状态图实践");
+
+    // summary 缺失时回落到工具名，而不是发明过程文案。
+    view.rerender(createElement(ActivityRow, { item: { ...base, summary: "" } }));
+    expect(within(view.container).getByRole("button", { name: /展开工具调用/u })).toHaveAttribute("title", "网页搜索");
+  });
+
+  it("不再包含终端类工具的自撰过程文案", () => {
+    const { container } = render(createElement(ActivityRow, { item: {
+      kind: "tool",
+      id: "tool:command-like",
+      runId: "run-one",
+      toolCallId: "command-like",
+      // 工具名命中旧 commandTool 正则，但不得触发任何自撰文案。
+      name: "命令执行器",
+      summary: "执行了受控只读检索",
+      status: "completed",
+      error: "Internal Server Error",
+      createdAt: "2026-08-02T00:00:00.000Z"
+    } }));
+
+    fireEvent.click(within(container).getByRole("button", { name: "展开工具调用：命令执行器" }));
+    expect(container).toHaveTextContent("执行了受控只读检索");
+    expect(container).not.toHaveTextContent(/运行了多个命令|命令执行失败|正在运行命令|命令未能完成/u);
+    expect(container).toHaveTextContent("工作台服务发生错误");
+  });
+});
+
+describe("工具过程文案", () => {
   it("does not render raw tool output or internal English errors", () => {
     render(createElement(ActivityRow, { item: {
       kind: "tool",
@@ -166,6 +252,7 @@ describe("SearchActivitySummary", () => {
       toolCallId: "search-live",
       name: "网页搜索",
       summary: "找到 2 条结果",
+      settlementSummary: "找到 2 条结果，读取 1 个来源",
       status: "running" as const,
       resultCount: 2,
       evidenceCount: 1,
@@ -194,6 +281,7 @@ describe("SearchActivitySummary", () => {
       id: "tool:search-next",
       toolCallId: "search-next",
       resultCount: 3,
+      settlementSummary: "找到 3 条结果，读取 1 个来源",
       sources: [{ title: "下一轮来源", url: "https://example.com/next", verified: true, displayText: "下一轮读取了另一条有效来源。" }]
     };
     view.rerender(createElement(SearchActivitySummary, {
@@ -259,6 +347,7 @@ describe("SearchActivitySummary", () => {
         toolCallId: "search-1",
         name: "网页搜索",
         summary: "找到 5 条结果",
+        settlementSummary: "找到 5 条结果，读取 1 个来源",
         status: "completed" as const,
         resultCount: 5,
         evidenceCount: 1,
@@ -275,6 +364,7 @@ describe("SearchActivitySummary", () => {
         toolCallId: "search-2",
         name: "网页搜索",
         summary: "找到 5 条结果",
+        settlementSummary: "找到 5 条结果，读取 2 个来源",
         status: "completed" as const,
         resultCount: 5,
         evidenceCount: 2,
@@ -286,7 +376,6 @@ describe("SearchActivitySummary", () => {
       }
     ];
 
-    expect(summarizeSearchActivity(items)).toBe("找到 10 条结果，读取 2 个来源");
     const { container } = render(createElement(SearchActivitySummary, { items }));
 
     const line = container.querySelector("[data-search-activity-summary]");
@@ -318,6 +407,7 @@ describe("SearchActivitySummary", () => {
       runId: "run-one",
       name: "网页搜索",
       summary: "搜索完成",
+      settlementSummary: "找到 1 条结果，读取 1 个来源",
       status: "completed" as const,
       resultCount: 1,
       evidenceCount: 1,
@@ -364,6 +454,7 @@ describe("SearchActivitySummary", () => {
       toolCallId: "search-1",
       name: "网页搜索",
       summary: "找到 5 条结果",
+      settlementSummary: "找到 5 条结果，读取 1 个来源",
       status: "completed" as const,
       resultCount: 5,
       evidenceCount: 1,
@@ -375,6 +466,7 @@ describe("SearchActivitySummary", () => {
       id: "tool:search-2",
       toolCallId: "search-2",
       evidenceCount: 2,
+      settlementSummary: "找到 5 条结果，读取 2 个来源",
       sources: [
         { title: "来源二", url: "https://example.com/two", verified: true },
         { title: "来源三", url: "https://example.com/three", verified: true }
@@ -385,6 +477,7 @@ describe("SearchActivitySummary", () => {
       id: "tool:search-3",
       toolCallId: "search-3",
       evidenceCount: 2,
+      settlementSummary: "找到 5 条结果，读取 2 个来源",
       sources: [
         { title: "来源三重复", url: "https://example.com/three", verified: true },
         { title: "来源四", url: "https://example.com/four", verified: true }

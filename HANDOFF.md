@@ -1,6 +1,32 @@
 # 项目交接
 
-## 当前结论（2026-08-01，Issue #23 可观测性 / 可选 LangSmith / 完整离线评测已验收关闭）
+## 当前结论（2026-08-02，Issue #24 工具过程文案单一真相源已验收关闭）
+
+- 本轮唯一功能为
+  [#24](https://github.com/LuzernRR/agent-workbench/issues/24)“收敛工具过程文案到单一真相源，移除
+  前端自撰陈述”，`Execution Gate: allowed`。纯前端改动，不动后端事件契约。修正三处违反
+  `AGENTS.md:50`（公开过程文案只能来自版本化 LangGraph Agent 输出）的位置：`ActivityRow.tsx` 的
+  `summarizeSearchActivity` 用前端去重结果重算「找到 N 条结果，读取 M 个来源」，与后端原文可能不
+  一致；`isPlaceholderTool`/`commandTool` 分支为终端类工具发明「运行了多个命令」「命令未能完成」
+  等过程陈述；`reducer.ts` 的 `tool.started` 与 `run.completed` 兜底会在上游漏填时替 Agent 断言
+  「正在准备」与核验结论。现结算行只渲染后端 `settlementSummary` 原文，缺原文即不渲染；主文案取
+  `summary || name`；reducer 兜底改为留空并由消费方回落到工具名，核验结论缺失时不生成状态行。
+- 取证排除（不属于 #24）：`mapper.ts:375-379` 的三条终态文案与 `nodes.py:2750`/`nodes.py:2524` 的
+  `response_status`/`verification_passed` 取值一一对应，自洽且由 BFF 统一投影，不是缺陷；
+  `mapper.ts:142` 与 `mock/engine.ts:44` 证明两条生产路径始终填 `name`+`summary`，所以 reducer 的
+  旧兜底是不可达死默认——修正它是消除潜在风险，不是修 line bug。
+- 新增契约测试锁住这个不变量：`mapper.test.ts` 断言三个渠道与 `unknown_tool` 的 `tool.started`、
+  三种终态组合的 `run.completed` 都自带非空过程文案；`scripts.test.ts` 断言 mock 两条分支的每个
+  工具步骤都有非空 `name`/`summary`；`reducer.test.ts` 断言上游漏填时状态里不出现
+  「正在准备」「回答已通过证据核验」「本次回答未完全核验」。
+- 门禁：Web `394 passed, 1 skipped`；typecheck 0；lint clean；build 成功；Playwright
+  `16 passed, 3 skipped`（3 条 live 用例需真实 Provider）；Search Agent `378 passed`；Ruff 0；
+  compileall 0；`git diff --check` 0。`packages/contracts/python` 因当前 venv 缺 `jsonschema`
+  无法收集，属预存环境问题，本轮未改动该目录。
+- 详见 `docs/development/2026-08-02-030-issue-24-process-text-single-source.md`。
+- 验收：用户 2026-08-02 回复“通过”，#24 已 accepted 并以 completed 关闭，下一功能执行门放行。
+
+## 上一轮结论（2026-08-01，Issue #23 可观测性 / 可选 LangSmith / 完整离线评测已验收关闭）
 
 - 本轮唯一功能为
   [#23](https://github.com/LuzernRR/agent-workbench/issues/23)“实现可观测性、可选 LangSmith
