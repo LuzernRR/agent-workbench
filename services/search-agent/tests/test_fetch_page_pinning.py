@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, Self
 
 import httpx
@@ -101,3 +102,81 @@ async def test_declared_oversized_response_is_rejected_before_buffering(
     monkeypatch.setattr(module.httpx, "AsyncClient", Client)
     with pytest.raises(module.ResponsePolicyError, match="超出上限"):
         await module._pinned_get("https://example.com/large", 5)
+
+
+class _StreamedResponse:
+    """最小响应替身：只暴露 `_read_allowed_body` 依赖的三个成员。
+
+    `consumed` 记录真正被产出的分片，用来断言「不为判类型缓冲整页」。
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict[str, str],
+        chunks: list[bytes],
+    ) -> None:
+        self.status_code = status_code
+        self.headers = httpx.Headers(headers)
+        self._chunks = chunks
+        self.consumed: list[bytes] = []
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            self.consumed.append(chunk)
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_comma_joined_content_type_takes_first_member() -> None:
+    body = b"<html>ok</html>"
+    response = _StreamedResponse(
+        200, {"content-type": "text/html, text/html"}, [body]
+    )
+    assert await module._read_allowed_body(response) == body
+
+
+@pytest.mark.asyncio
+async def test_mislabeled_octet_stream_html_is_accepted_by_sniffing() -> None:
+    body = b"<!DOCTYPE html><title>t</title>" + b"x" * 600
+    response = _StreamedResponse(
+        200, {"content-type": "application/octet-stream"}, [body]
+    )
+    assert await module._read_allowed_body(response) == body
+
+
+@pytest.mark.asyncio
+async def test_short_mislabeled_page_is_sniffed_at_stream_end() -> None:
+    body = "<html>短页面</html>".encode()
+    response = _StreamedResponse(
+        200, {"content-type": "application/octet-stream"}, [body]
+    )
+    assert await module._read_allowed_body(response) == body
+
+
+@pytest.mark.asyncio
+async def test_non_html_mislabeled_body_is_rejected() -> None:
+    body = b"PK\x03\x04not really a zip but binary"
+    response = _StreamedResponse(
+        200, {"content-type": "application/octet-stream"}, [body]
+    )
+    with pytest.raises(module.ResponsePolicyError, match="不支持的响应类型"):
+        await module._read_allowed_body(response)
+
+
+@pytest.mark.asyncio
+async def test_never_sniff_types_are_rejected_without_reading_body() -> None:
+    response = _StreamedResponse(
+        200, {"content-type": "application/pdf"}, [b"%" + b"PDF"]
+    )
+    with pytest.raises(module.ResponsePolicyError, match="不支持的响应类型"):
+        await module._read_allowed_body(response)
+    assert response.consumed == []
+
+
+@pytest.mark.asyncio
+async def test_error_responses_are_not_type_gated() -> None:
+    response = _StreamedResponse(
+        404, {"content-type": "application/octet-stream"}, [b"not found"]
+    )
+    assert await module._read_allowed_body(response) == b"not found"

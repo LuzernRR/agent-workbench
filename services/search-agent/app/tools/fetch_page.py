@@ -44,6 +44,24 @@ _ALLOWED_CONTENT_TYPES = (
     "text/plain",
 )
 
+# 这些 MIME 一定不是可提取正文的网页；对它们不做嗅探，直接拒绝。
+# application/octet-stream 不在此列：它是「服务器没主动标注」的默认值，
+# 实测有站点用它返回 HTML，因此交给嗅探判定。
+_NEVER_SNIFF_CONTENT_TYPES = frozenset({
+    "application/json",
+    "application/pdf",
+    "application/javascript",
+    "application/zip",
+    "application/gzip",
+})
+
+# 前缀匹配的二进制大类，同样不做嗅探。
+_NEVER_SNIFF_PREFIXES = ("image/", "audio/", "video/", "font/")
+
+# 嗅探只看首批字节。判定 HTML 起始标记用不了更多，
+# 且必须远小于 MAX_RESPONSE_BYTES，避免为判类型缓冲整页。
+_SNIFF_BYTES = 512
+
 _HEADERS = {
     # 如实标识自己，便于站点识别与限流，不伪装成普通浏览器。
     "user-agent": "agent-workbench-search/0.1 (+https://github.com/LuzernRR/agent-workbench)",
@@ -165,6 +183,73 @@ async def _fetch_static(url: str, timeout: float) -> FetchResult:
                            error_category="provider_unavailable")
 
 
+def _declared_content_type(response: httpx.Response) -> str:
+    """取 Content-Type 的第一个成员。
+
+    RFC 9110 把 Content-Type 定义为 singleton field，但 §5.2 允许把重复的
+    字段行按逗号合并；部分 CDN（如 Cloudflare Workers）确实会发出
+    ``text/html, text/html``。稳健解析取第一个成员，不因此判为非法类型。
+    """
+    raw = response.headers.get("content-type", "")
+    return raw.split(",", 1)[0].split(";", 1)[0].strip().lower()
+
+
+async def _read_allowed_body(response: httpx.Response) -> bytes:
+    """按类型白名单与体积上限流式读取正文。
+
+    读取顺序是安全前提：先按声明类型拒绝明确的二进制大类，再校验
+    Content-Length，最后边流式读边卡 ``MAX_RESPONSE_BYTES``。嗅探只看首批
+    ``_SNIFF_BYTES`` 字节，绝不为了判类型先把整页读进内存。
+
+    状态码 >= 400 时不做类型门禁：这类响应由 `_fetch_static` 按 HTTP 状态归为
+    not_found / provider_unavailable，在此判类型只会掩盖真实失败原因。
+    """
+    content_type = _declared_content_type(response)
+    enforce_type = response.status_code < 400
+    declared_allowed = content_type in _ALLOWED_CONTENT_TYPES
+    # 部分服务器/CDN 乱标 Content-Type（如 octet-stream 实为 HTML）。
+    # 对明确的二进制大类不留余地；其余未声明类型给一次首字节嗅探的机会。
+    may_sniff = (
+        not declared_allowed
+        and content_type not in _NEVER_SNIFF_CONTENT_TYPES
+        and not content_type.startswith(_NEVER_SNIFF_PREFIXES)
+    )
+    if enforce_type and not declared_allowed and not may_sniff:
+        raise ResponsePolicyError(f"不支持的响应类型：{content_type or 'missing'}")
+
+    declared = response.headers.get("content-length")
+    if declared:
+        try:
+            oversized = int(declared) > MAX_RESPONSE_BYTES
+        except ValueError as exc:
+            raise ResponsePolicyError("Content-Length 格式无效") from exc
+        if oversized:
+            raise ResponsePolicyError("响应体超出上限")
+
+    body = bytearray()
+    sniff_pending = enforce_type and may_sniff
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if sniff_pending and len(body) >= _SNIFF_BYTES:
+            sniff_pending = False
+            if not _looks_like_html(body):
+                raise ResponsePolicyError(
+                    f"不支持的响应类型：{content_type or 'missing'}"
+                )
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise ResponsePolicyError("响应体超出上限")
+    # 正文短于嗅探窗口时在流结束后补判，避免小页面漏过检查。
+    if sniff_pending and not _looks_like_html(body):
+        raise ResponsePolicyError(f"不支持的响应类型：{content_type or 'missing'}")
+    return bytes(body)
+
+
+def _looks_like_html(body: bytes | bytearray) -> bool:
+    """按首批字节判断是否为 HTML 文档。"""
+    head = bytes(body[:_SNIFF_BYTES]).lstrip().lstrip(b"\xef\xbb\xbf").lstrip()
+    return head[:14].lower().startswith((b"<!doctype html", b"<html"))
+
+
 async def _pinned_get(url: str, timeout: float) -> tuple[httpx.Response, str]:
     """校验 DNS 后直接连接固定公网 IP，同时保留原 Host 与 TLS SNI。"""
     target = await asyncio.to_thread(resolve_fetchable, url)
@@ -186,24 +271,7 @@ async def _pinned_get(url: str, timeout: float) -> tuple[httpx.Response, str]:
                     if response.is_redirect:
                         content = b""
                     else:
-                        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                        if response.status_code < 400 and content_type not in _ALLOWED_CONTENT_TYPES:
-                            raise ResponsePolicyError(
-                                f"不支持的响应类型：{content_type or 'missing'}"
-                            )
-                        declared = response.headers.get("content-length")
-                        if declared:
-                            try:
-                                if int(declared) > MAX_RESPONSE_BYTES:
-                                    raise ResponsePolicyError("响应体超出上限")
-                            except ValueError as exc:
-                                raise ResponsePolicyError("Content-Length 格式无效") from exc
-                        body = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            body.extend(chunk)
-                            if len(body) > MAX_RESPONSE_BYTES:
-                                raise ResponsePolicyError("响应体超出上限")
-                        content = bytes(body)
+                        content = await _read_allowed_body(response)
                 finally:
                     await response.aclose()
             return httpx.Response(
@@ -256,8 +324,12 @@ async def fetch_page(url: str, timeout: float = 20.0, allow_dynamic: bool = Fals
         )
 
 
-async def fetch_pages(urls: list[str], concurrency: int = 3, timeout: float = 20.0) -> list[FetchResult]:
-    """并发抓取多页。
+async def fetch_pages(
+    urls: list[str],
+    concurrency: int = 3,
+    timeout: float = 20.0,
+) -> list[FetchResult]:
+    """并发抓取多页，返回结果与 ``urls`` 按索引对齐。
 
     并发上限对应项目文档 21.2 节的单域限制，避免给目标站点造成压力。
     """

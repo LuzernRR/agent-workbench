@@ -1,2 +1,6 @@
 *.local.json
 *.local.env
+# 改密钥前的手工备份（如 search.local.json.bak-20260802-232430）同样含密钥，
+# 上面两条通配符匹配不到带后缀的文件名，必须单独忽略。
+*.local.json.bak-*
+*.local.env.bak-*
