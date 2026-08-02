@@ -1,5 +1,33 @@
 # 项目交接
 
+## 当前结论（2026-08-01，Issue #23 可观测性 / 可选 LangSmith / 完整离线评测已验收关闭）
+
+- 本轮唯一功能为
+  [#23](https://github.com/LuzernRR/agent-workbench/issues/23)“实现可观测性、可选 LangSmith
+  tracing 与完整离线评测体系”，`Execution Gate: allowed`。三项能力正交实现，均复用既有公开事件流
+  与隐私门，不新开第二套运行循环或第二套隐私规则。`#22` 因小红书工具账号 `AUTH_REQUIRED` 需用户
+  扫码重登，属外部平台阻塞，标记 parked 且不关闭。
+- 可观测性：`app/observability/` 新增 `RunTracer` 从公开事件流派生 run/node/tool span；`model`
+  span 因模型层不发事件，改由 contextvar 绑定的 `record_model_call` 上报，不进入 State、
+  checkpoint、事件或日志。tracing 关闭时 `tracing_enabled()` 为假，模型层跳过全部计时开销，
+  NDJSON 事件流逐字节不变（`test_tracing_does_not_change_the_public_event_stream` 断言
+  `traced == untraced`）。span 属性经 `_assert_public` + allowlist 双重门控，自由文本进不了 span；
+  sink 抛错只降级为 `sinkFailures` 计数，绝不影响 run 终态。
+- 可选 LangSmith：`langsmith_sink_from_env` 仅在 `SEARCH_AGENT_LANGSMITH_ENABLED` +
+  `LANGSMITH_API_KEY` 同时存在时启用，缺依赖/缺密钥/客户端构造失败均返回 `None` 静默关闭；导出
+  `inputs={}`，问题原文与 Prompt 不离开本进程；禁止字段导出计数为 0。
+- 完整离线评测：`app/evaluation/` 用 `ReplayGraph` 复用 `HarnessRunner.stream()`（静态断言 runner
+  模块不含 `graph.astream`/`initial_state`/`stream_mode`，仅 1 处 `runner.stream(`）；无 live 图，
+  真实 Provider 路径结构上不存在。9 个确定性 scorer（终态唯一、node 配对、Evidence 迁移、Citation
+  溯源、账本完整、计划合法含依赖环检测、路由/渠道、禁止字段、延迟）每维有正反例，反例真被判 fail。
+  同一 dataset 连续两次运行报告 SHA-256 相同；`evaluation/gold/search-agent.json` 6 用例，密钥
+  扫描仅命中 token 计数字段。
+- 门禁：Search Agent `378 passed`、Ruff 0、compileall 0；评测 CLI 6 用例 × 9 维度全通过 `EXIT=0`；
+  共享合同 `6 passed`；Web 未改动（改动为 Python-only），回归确认 `388 passed, 1 skipped`；
+  `git diff --check` 通过。完整记录见
+  `docs/development/2026-08-01-029-issue-23-observability-langsmith-evaluation.md`。
+- 验收：用户 2026-08-02 回复“通过”，#23 已 `accepted` 并以 completed 关闭，下一功能执行门放行。
+
 ## 当前结论（2026-08-01，Issue #22 Markdown 信息层级已部署，待小红书重新登录后补终验）
 
 - 当前活动 feature 为

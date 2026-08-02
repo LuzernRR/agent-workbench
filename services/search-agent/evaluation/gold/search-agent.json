@@ -1,0 +1,799 @@
+{
+  "version": 1,
+  "name": "search-agent-gold-v1",
+  "cases": [
+    {
+      "caseId": "verified-two-citations",
+      "question": "2025 年中国新能源乘用车渗透率大约是多少？",
+      "depth": "balanced",
+      "tags": ["happy-path", "citations", "evidence-lifecycle"],
+      "transcript": [
+        {
+          "type": "node.started",
+          "payload": {
+            "node": "plan_research",
+            "nodeRunId": "n_plan_1",
+            "agent": "planner",
+            "iteration": 0
+          }
+        },
+        {
+          "type": "plan.updated",
+          "payload": {
+            "planId": "plan_1",
+            "revision": 1,
+            "iteration": 0,
+            "planSource": "model",
+            "steps": [
+              {
+                "stepId": "s1",
+                "facet": "渗透率数据",
+                "objective": "获取权威渗透率统计",
+                "channel": "web",
+                "status": "todo",
+                "priority": 1
+              }
+            ]
+          }
+        },
+        {
+          "type": "node.completed",
+          "payload": {
+            "node": "plan_research",
+            "nodeRunId": "n_plan_1",
+            "agent": "planner",
+            "iteration": 0,
+            "durationMs": 320,
+            "publicSummary": "先查权威机构的渗透率统计口径。",
+            "publicSummarySource": "model"
+          }
+        },
+        {
+          "type": "node.started",
+          "payload": {
+            "node": "research",
+            "nodeRunId": "n_research_1",
+            "agent": "researcher",
+            "iteration": 0
+          }
+        },
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_1",
+            "planStepId": "s1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.completed",
+          "payload": {
+            "toolCallId": "tc_1",
+            "planStepId": "s1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "completed",
+            "outcomeStatus": "success",
+            "primaryProvider": "tavily",
+            "effectiveProvider": "tavily",
+            "reasonCode": "OK",
+            "retryable": false,
+            "nextAction": "continue",
+            "resultCount": 4,
+            "evidenceCount": 2,
+            "cached": false,
+            "durationMs": 1480
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_1",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-a",
+            "title": "年度乘用车统计公报",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_2",
+            "sourceId": "src_2",
+            "contentHash": "hash_2",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-b",
+            "title": "行业协会月度数据",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "type": "node.completed",
+          "payload": {
+            "node": "research",
+            "nodeRunId": "n_research_1",
+            "agent": "researcher",
+            "iteration": 0,
+            "durationMs": 1620
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_1",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-a",
+            "title": "年度乘用车统计公报",
+            "channel": "web",
+            "status": "accepted",
+            "reasonCode": "RELEVANT",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_2",
+            "sourceId": "src_2",
+            "contentHash": "hash_2",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-b",
+            "title": "行业协会月度数据",
+            "channel": "web",
+            "status": "accepted",
+            "reasonCode": "RELEVANT",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
+        },
+        {
+          "type": "node.started",
+          "payload": {
+            "node": "compose",
+            "nodeRunId": "n_compose_1",
+            "agent": "writer",
+            "iteration": 1
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_1",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-a",
+            "title": "年度乘用车统计公报",
+            "channel": "web",
+            "status": "cited",
+            "reasonCode": "CITED_IN_ANSWER",
+            "updatedAt": "2026-01-01T00:00:02Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_2",
+            "sourceId": "src_2",
+            "contentHash": "hash_2",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/report-b",
+            "title": "行业协会月度数据",
+            "channel": "web",
+            "status": "cited",
+            "reasonCode": "CITED_IN_ANSWER",
+            "updatedAt": "2026-01-01T00:00:02Z"
+          }
+        },
+        {
+          "type": "node.completed",
+          "payload": {
+            "node": "compose",
+            "nodeRunId": "n_compose_1",
+            "agent": "writer",
+            "iteration": 1,
+            "durationMs": 900
+          }
+        },
+        {
+          "type": "node.started",
+          "payload": {
+            "node": "verify",
+            "nodeRunId": "n_verify_1",
+            "agent": "verifier",
+            "iteration": 1
+          }
+        },
+        {
+          "type": "verification.completed",
+          "payload": {
+            "nodeRunId": "n_verify_1",
+            "passed": true,
+            "action": "accept",
+            "publicSummary": "两处数据均可回溯到已引用来源。",
+            "publicSummarySource": "model"
+          }
+        },
+        {
+          "type": "node.completed",
+          "payload": {
+            "node": "verify",
+            "nodeRunId": "n_verify_1",
+            "agent": "verifier",
+            "iteration": 1,
+            "durationMs": 640,
+            "publicSummary": "两处数据均可回溯到已引用来源。",
+            "publicSummarySource": "model"
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_verified-two-citations",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-verified-two-citations",
+        "model_id": "deepseek-v4-flash",
+        "answer": "## 结论\n\n渗透率约为四成上下，不同统计口径存在差异。\n\n### 依据\n\n- 年度统计公报给出口径 A\n- 行业协会月度数据给出口径 B",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "response_status": "completed",
+        "prompt_version": "2026-08-01.v40-markdown-record-hierarchy",
+        "citations": [
+          { "label": "年度乘用车统计公报", "url": "https://example.com/report-a" },
+          { "label": "行业协会月度数据", "url": "https://example.com/report-b" }
+        ],
+        "verification_passed": true,
+        "stop_reason": "VERIFIED",
+        "usage": {
+          "input_tokens": 4200,
+          "output_tokens": 700,
+          "total_tokens": 4900,
+          "cost_usd": 0.012
+        },
+        "model_calls": 4,
+        "tool_calls": 1,
+        "evidence": [
+          {
+            "evidence_id": "ev_1",
+            "source_id": "src_1",
+            "content_hash": "hash_1",
+            "status": "cited",
+            "status_reason_code": "CITED_IN_ANSWER",
+            "status_updated_at": "2026-01-01T00:00:02Z",
+            "channel": "web",
+            "tool_call_id": "tc_1",
+            "url": "https://example.com/report-a",
+            "title": "年度乘用车统计公报"
+          },
+          {
+            "evidence_id": "ev_2",
+            "source_id": "src_2",
+            "content_hash": "hash_2",
+            "status": "cited",
+            "status_reason_code": "CITED_IN_ANSWER",
+            "status_updated_at": "2026-01-01T00:00:02Z",
+            "channel": "web",
+            "tool_call_id": "tc_1",
+            "url": "https://example.com/report-b",
+            "title": "行业协会月度数据"
+          }
+        ],
+        "tool_traces": [
+          {
+            "tool_call_id": "tc_1",
+            "plan_step_id": "s1",
+            "idempotency_key": "idem_1",
+            "operation_ref": "op_1",
+            "attempt": 1,
+            "input_hash": "in_1",
+            "output_hash": "out_1",
+            "result_ref": "res_1",
+            "query": "新能源乘用车渗透率",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "completed",
+            "outcome_status": "success",
+            "primary_provider": "tavily",
+            "effective_provider": "tavily",
+            "result_count": 4,
+            "evidence_count": 2,
+            "error_code": null,
+            "retryable": false,
+            "next_action": "continue",
+            "limitation": null,
+            "duration_ms": 1480,
+            "usage": {}
+          }
+        ]
+      },
+      "expect": {
+        "terminalType": "run.completed",
+        "answerSource": "model",
+        "channels": ["web"],
+        "responseStatus": "completed",
+        "verificationPassed": true,
+        "minCitations": 2,
+        "minEvidenceCited": 2
+      }
+    },
+    {
+      "caseId": "rejected-evidence-partial",
+      "question": "某小众框架的最新版本号是多少？",
+      "depth": "quick",
+      "tags": ["evidence-lifecycle", "rejected", "partial"],
+      "transcript": [
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.completed",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "ok",
+            "outcomeStatus": "ok",
+            "reasonCode": "OK",
+            "retryable": false,
+            "nextAction": "continue",
+            "resultCount": 1,
+            "evidenceCount": 1,
+            "cached": false,
+            "durationMs": 1900
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_s",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/stale",
+            "title": "过期发布页",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_s",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/stale",
+            "title": "过期发布页",
+            "channel": "web",
+            "status": "rejected",
+            "reasonCode": "OUTDATED",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_rejected-evidence-partial",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-rejected-evidence-partial",
+        "model_id": "deepseek-v4-flash",
+        "answer": "## 结论\n\n公开来源不足以确认最新版本号。\n\n### 限制\n\n- 唯一命中的发布页已过期，未作为依据采用",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "response_status": "partial",
+        "prompt_version": "2026-08-01.v40-markdown-record-hierarchy",
+        "citations": [],
+        "verification_passed": false,
+        "stop_reason": "INSUFFICIENT_EVIDENCE",
+        "usage": {
+          "input_tokens": 1800,
+          "output_tokens": 260,
+          "total_tokens": 2060,
+          "cost_usd": 0.004
+        },
+        "model_calls": 3,
+        "tool_calls": 1,
+        "evidence": [
+          {
+            "evidence_id": "ev_1",
+            "source_id": "src_1",
+            "content_hash": "hash_s",
+            "status": "rejected",
+            "status_reason_code": "OUTDATED",
+            "status_updated_at": "2026-01-01T00:00:01Z",
+            "channel": "web",
+            "tool_call_id": "tc_1",
+            "url": "https://example.com/stale",
+            "title": "过期发布页"
+          }
+        ]
+      },
+      "expect": {
+        "terminalType": "run.completed",
+        "answerSource": "model",
+        "channels": ["web"],
+        "responseStatus": "partial",
+        "verificationPassed": false,
+        "minCitations": 0
+      }
+    },
+    {
+      "caseId": "degraded-provider-fallback",
+      "question": "近期某消费电子品类的价格走势如何？",
+      "depth": "balanced",
+      "tags": ["tool-ledger", "degraded", "fallback"],
+      "transcript": [
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.completed",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "exa",
+            "status": "degraded",
+            "outcomeStatus": "degraded",
+            "primaryProvider": "tavily",
+            "effectiveProvider": "exa",
+            "reasonCode": "PRIMARY_PROVIDER_UNAVAILABLE",
+            "retryable": false,
+            "nextAction": "continue",
+            "resultCount": 2,
+            "evidenceCount": 1,
+            "cached": false,
+            "durationMs": 2600
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_p",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/prices",
+            "title": "行情汇总",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_p",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/prices",
+            "title": "行情汇总",
+            "channel": "web",
+            "status": "accepted",
+            "reasonCode": "RELEVANT",
+            "updatedAt": "2026-01-01T00:00:01Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_1",
+            "sourceId": "src_1",
+            "contentHash": "hash_p",
+            "toolCallId": "tc_1",
+            "url": "https://example.com/prices",
+            "title": "行情汇总",
+            "channel": "web",
+            "status": "cited",
+            "reasonCode": "CITED_IN_ANSWER",
+            "updatedAt": "2026-01-01T00:00:02Z"
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_degraded-provider-fallback",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-degraded-provider-fallback",
+        "model_id": "deepseek-v4-flash",
+        "answer": "## 结论\n\n可获得的公开数据只覆盖部分时间段。\n\n### 依据\n\n- 备用检索通道返回的行情汇总",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "response_status": "partial",
+        "prompt_version": "2026-08-01.v40-markdown-record-hierarchy",
+        "citations": [
+          { "label": "行情汇总", "url": "https://example.com/prices" }
+        ],
+        "verification_passed": false,
+        "stop_reason": "DEGRADED_COVERAGE",
+        "usage": {
+          "input_tokens": 2600,
+          "output_tokens": 380,
+          "total_tokens": 2980,
+          "cost_usd": 0.007
+        },
+        "model_calls": 3,
+        "tool_calls": 1,
+        "evidence": [
+          {
+            "evidence_id": "ev_1",
+            "source_id": "src_1",
+            "content_hash": "hash_p",
+            "status": "cited",
+            "status_reason_code": "CITED_IN_ANSWER",
+            "status_updated_at": "2026-01-01T00:00:02Z",
+            "channel": "web",
+            "tool_call_id": "tc_1",
+            "url": "https://example.com/prices",
+            "title": "行情汇总"
+          }
+        ],
+        "tool_traces": [
+          {
+            "tool_call_id": "tc_1",
+            "idempotency_key": "idem_1",
+            "operation_ref": "op_1",
+            "attempt": 1,
+            "input_hash": "in_1",
+            "output_hash": "out_1",
+            "result_ref": "res_1",
+            "query": "消费电子价格走势",
+            "channel": "web",
+            "provider": "exa",
+            "status": "completed",
+            "outcome_status": "degraded",
+            "primary_provider": "tavily",
+            "effective_provider": "exa",
+            "result_count": 2,
+            "evidence_count": 1,
+            "error_code": "PRIMARY_PROVIDER_UNAVAILABLE",
+            "retryable": false,
+            "next_action": "continue",
+            "limitation": "主通道不可用，结果来自备用通道",
+            "duration_ms": 2600,
+            "usage": {}
+          }
+        ]
+      },
+      "expect": {
+        "terminalType": "run.completed",
+        "answerSource": "model",
+        "channels": ["web"],
+        "responseStatus": "partial",
+        "verificationPassed": false,
+        "minCitations": 1,
+        "minEvidenceCited": 1
+      }
+    },
+    {
+      "caseId": "tool-unknown-outcome",
+      "question": "某平台今日的公开热榜有哪些条目？",
+      "depth": "quick",
+      "tags": ["tool-ledger", "unknown", "fail-closed"],
+      "transcript": [
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.unknown",
+          "payload": {
+            "toolCallId": "tc_1",
+            "operationRef": "op_1",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "tavily",
+            "reasonCode": "SETTLE_TIMEOUT",
+            "nextAction": "check_operation",
+            "durationMs": 30000
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_tool-unknown-outcome",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-tool-unknown-outcome",
+        "model_id": "deepseek-v4-flash",
+        "answer": "## 结论\n\n本轮检索结果状态未知，不能据此给出热榜条目。\n\n### 限制\n\n- 工具调用结算超时，结果按未知处理",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "response_status": "partial",
+        "prompt_version": "2026-08-01.v40-markdown-record-hierarchy",
+        "citations": [],
+        "verification_passed": false,
+        "stop_reason": "TOOL_OUTCOME_UNKNOWN",
+        "usage": {
+          "input_tokens": 1400,
+          "output_tokens": 220,
+          "total_tokens": 1620,
+          "cost_usd": 0.003
+        },
+        "model_calls": 2,
+        "tool_calls": 1,
+        "evidence": [],
+        "tool_traces": [
+          {
+            "tool_call_id": "tc_1",
+            "idempotency_key": "idem_1",
+            "operation_ref": "op_1",
+            "attempt": 1,
+            "input_hash": "in_1",
+            "output_hash": null,
+            "result_ref": null,
+            "query": "平台热榜",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "unknown",
+            "outcome_status": "failed",
+            "primary_provider": "tavily",
+            "effective_provider": "tavily",
+            "result_count": 0,
+            "evidence_count": 0,
+            "error_code": "SETTLE_TIMEOUT",
+            "retryable": false,
+            "next_action": "check_operation",
+            "limitation": "结算超时，结果未知",
+            "duration_ms": 30000,
+            "usage": {}
+          }
+        ]
+      },
+      "expect": {
+        "terminalType": "run.completed",
+        "answerSource": "model",
+        "channels": ["web"],
+        "responseStatus": "partial",
+        "verificationPassed": false,
+        "minCitations": 0
+      }
+    },
+    {
+      "caseId": "empty-output-rejected",
+      "question": "请给出一个无法从公开来源确认的内部指标。",
+      "depth": "quick",
+      "tags": ["terminal", "fail-closed", "no-fabrication"],
+      "transcript": [
+        {
+          "type": "node.started",
+          "payload": {
+            "node": "compose",
+            "nodeRunId": "n_compose_1",
+            "agent": "writer",
+            "iteration": 1
+          }
+        },
+        {
+          "type": "node.failed",
+          "payload": {
+            "node": "compose",
+            "nodeRunId": "n_compose_1",
+            "agent": "writer",
+            "iteration": 1,
+            "reasonCode": "NO_ANSWERABLE_EVIDENCE"
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_empty-output-rejected",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-empty-output-rejected",
+        "model_id": "deepseek-v4-flash",
+        "answer": null,
+        "answer_source": "none",
+        "answer_model_calls": 0,
+        "response_status": "partial",
+        "citations": [],
+        "verification_passed": false,
+        "stop_reason": "NO_ANSWERABLE_EVIDENCE",
+        "usage": {
+          "input_tokens": 900,
+          "output_tokens": 0,
+          "total_tokens": 900,
+          "cost_usd": 0.001
+        },
+        "model_calls": 2,
+        "tool_calls": 0,
+        "evidence": []
+      },
+      "expect": {
+        "terminalType": "run.failed",
+        "answerSource": "none",
+        "channels": [],
+        "reasonCode": "NO_ANSWERABLE_EVIDENCE"
+      }
+    },
+    {
+      "caseId": "non-model-answer-rejected",
+      "question": "请复述一段由运行时拼装的固定文案。",
+      "depth": "quick",
+      "tags": ["terminal", "non-model-output", "fail-closed"],
+      "transcript": [],
+      "finalState": {
+        "run_id": "eval_non-model-answer-rejected",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-non-model-answer-rejected",
+        "model_id": "deepseek-v4-flash",
+        "answer": "这是运行时拼装的兜底文案，不是模型产出。",
+        "answer_source": "none",
+        "answer_model_calls": 0,
+        "response_status": "partial",
+        "citations": [],
+        "verification_passed": false,
+        "stop_reason": "RUNTIME_FALLBACK",
+        "usage": {
+          "input_tokens": 500,
+          "output_tokens": 40,
+          "total_tokens": 540,
+          "cost_usd": 0.001
+        },
+        "model_calls": 1,
+        "tool_calls": 0,
+        "evidence": []
+      },
+      "expect": {
+        "terminalType": "run.failed",
+        "answerSource": "none",
+        "channels": [],
+        "reasonCode": "NON_MODEL_OUTPUT"
+      }
+    }
+  ]
+}

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.config.agent import agent_config
 from app.config.runtime import runtime_config
+from app.observability.trace import record_model_call, span_now, tracing_enabled
 
 ModelRole = Literal["supervisor", "planner", "reflector", "writer", "verifier"]
 WRITER_MAX_TOKENS = 2048
@@ -172,6 +173,32 @@ def _structured_chat_model(role: ModelRole, model_id: str | None = None) -> Chat
     )
 
 
+def _record_model_span(
+    role: str,
+    model_id: str,
+    started_at: str,
+    status: str,
+    usages: list[ModelUsage],
+) -> None:
+    """把一次模型调用（含全部 attempts）记为 model span；未开启 tracing 时为空操作。"""
+    if not started_at:
+        return
+    record_model_call(
+        role=role,
+        model_id=model_id,
+        started_at=started_at,
+        ended_at=span_now(),
+        status=status,  # type: ignore[arg-type]
+        attributes={
+            "inputTokens": sum(item.input_tokens for item in usages),
+            "outputTokens": sum(item.output_tokens for item in usages),
+            "totalTokens": sum(item.total_tokens for item in usages),
+            "costUsd": round(sum(item.cost_usd for item in usages), 8),
+            "attempts": len(usages),
+        },
+    )
+
+
 async def invoke_structured[SchemaT: BaseModel](
     role: ModelRole,
     schema: type[SchemaT],
@@ -197,16 +224,19 @@ async def invoke_structured[SchemaT: BaseModel](
     usages: list[ModelUsage] = []
     request_messages = list(messages)
     max_attempts = 2 if allow_repair else 1
+    started_at = span_now() if tracing_enabled() else ""
     for attempt in range(max_attempts):
         try:
             result = await runnable.ainvoke(request_messages)
         except BadRequestError as exc:
+            _record_model_span(role, resolved_model, started_at, "error", usages)
             raise StructuredProviderRequestError() from exc
         parsed = result.get("parsed") if isinstance(result, dict) else None
         raw = result.get("raw") if isinstance(result, dict) else None
         parsing_error = result.get("parsing_error") if isinstance(result, dict) else None
         usages.append(_usage_from_langchain(raw, resolved_model))
         if not parsing_error and isinstance(parsed, schema):
+            _record_model_span(role, resolved_model, started_at, "ok", usages)
             return parsed, ModelUsage(
                 input_tokens=sum(item.input_tokens for item in usages),
                 output_tokens=sum(item.output_tokens for item in usages),
@@ -222,6 +252,7 @@ async def invoke_structured[SchemaT: BaseModel](
                     "请只调用已提供的结构化输出函数，并严格满足所有字段、类型与枚举约束。"
                 )),
             ]
+    _record_model_span(role, resolved_model, started_at, "error", usages)
     raise StructuredOutputError(ModelUsage(
         input_tokens=sum(item.input_tokens for item in usages),
         output_tokens=sum(item.output_tokens for item in usages),
@@ -278,9 +309,14 @@ async def invoke_researcher_turn(
         request["parallel_tool_calls"] = False
     if tool_choice is not None:
         request["tool_choice"] = tool_choice
-    response = await _research_client().chat.completions.create(
-        **request,
-    )
+    started_at = span_now() if tracing_enabled() else ""
+    try:
+        response = await _research_client().chat.completions.create(
+            **request,
+        )
+    except Exception:
+        _record_model_span("researcher", resolved_model, started_at, "error", [])
+        raise
     choice = response.choices[0]
     assistant = choice.message.model_dump(exclude_none=True)
     calls = tuple(
@@ -294,16 +330,18 @@ async def invoke_researcher_turn(
     usage = response.usage
     input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    turn_usage = ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=int(getattr(usage, "total_tokens", 0) or (input_tokens + output_tokens)),
+        cost_usd=_cost(resolved_model, input_tokens, output_tokens),
+    )
+    _record_model_span("researcher", resolved_model, started_at, "ok", [turn_usage])
     return ResearcherTurn(
         assistant_message=assistant,
         tool_calls=calls,
         content=choice.message.content or "",
-        usage=ModelUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=int(getattr(usage, "total_tokens", 0) or (input_tokens + output_tokens)),
-            cost_usd=_cost(resolved_model, input_tokens, output_tokens),
-        ),
+        usage=turn_usage,
         finish_reason=choice.finish_reason,
     )
 

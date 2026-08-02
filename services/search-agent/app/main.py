@@ -26,6 +26,8 @@ from app.config.runtime import runtime_config
 from app.graph.build import build_graph
 from app.harness.runner import HarnessDependencies, HarnessRunner
 from app.memory.milvus_store import MilvusEvidenceStore
+from app.observability.sink import sink_from_env
+from app.observability.trace import TracerFactory
 from app.persistence.tool_ledger import ToolOperationLedger
 from app.prompts.agents import PROMPT_VERSION
 from app.run_control import RunRegistry
@@ -70,14 +72,17 @@ async def lifespan(app: FastAPI):
         if xiaohongshu_origin
         else None
     )
-    runner = HarnessRunner(HarnessDependencies(
-        config=config,
-        graph=graph,
-        ledger=ledger,
-        milvus=milvus,
-        run_registry=RunRegistry(),
-        xiaohongshu_verifications=xiaohongshu_verifications,
-    ))
+    runner = HarnessRunner(
+        HarnessDependencies(
+            config=config,
+            graph=graph,
+            ledger=ledger,
+            milvus=milvus,
+            run_registry=RunRegistry(),
+            xiaohongshu_verifications=xiaohongshu_verifications,
+        ),
+        tracer_factory=TracerFactory(sink_from_env()),
+    )
 
     app.state.agent_config = config
     app.state.runtime_config = runtime

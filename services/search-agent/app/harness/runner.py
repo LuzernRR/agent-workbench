@@ -22,6 +22,7 @@ from app.events.runtime import (
 )
 from app.graph.context import RunContext
 from app.graph.state import initial_state
+from app.observability.trace import TracerFactory, bind_tracer, unbind_tracer
 from app.prompts.agents import PROMPT_VERSION
 from app.run_control import RunRegistry, StopDecision
 from app.tools.gateway import ToolGateway
@@ -119,11 +120,13 @@ class HarnessRunner:
         event_clock: EventClock = utc_now,
         stream_id_factory: StreamIdFactory = _new_stream_id,
         timeout_factory: TimeoutFactory = asyncio.timeout,
+        tracer_factory: TracerFactory | None = None,
     ) -> None:
         self._dependencies = dependencies
         self._event_clock = event_clock
         self._stream_id_factory = stream_id_factory
         self._timeout_factory = timeout_factory
+        self._tracer_factory = tracer_factory or TracerFactory()
 
     @property
     def dependencies(self) -> HarnessDependencies:
@@ -150,13 +153,20 @@ class HarnessRunner:
             stream_id=self._stream_id_factory(),
             clock=self._event_clock,
         )
+        tracer = self._tracer_factory(payload.run_id)
+        previous_tracer = bind_tracer(tracer)
         try:
             async for event in self._stream_scoped(
                 payload,
                 is_disconnected=is_disconnected or _never_disconnected,
             ):
+                if tracer is not None:
+                    tracer.observe(event)
                 yield event
         finally:
+            unbind_tracer(previous_tracer)
+            if tracer is not None:
+                tracer.finish()
             end_event_scope(previous)
 
     def _new_state(self, payload: SearchRunRequest) -> dict[str, Any]:

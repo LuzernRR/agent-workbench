@@ -12,6 +12,7 @@ from app.api.schemas import SearchRunRequest
 from app.config.agent import agent_config
 from app.events.runtime import runtime_event
 from app.harness.runner import HarnessDependencies, HarnessRunner
+from app.observability.trace import TracerFactory, record_model_call, tracing_enabled
 from app.run_control import RunRegistry
 
 FIXED_TIME = "2026-08-01T00:00:00Z"
@@ -132,6 +133,7 @@ def runner(
     ledger: RecordingLedger | None = None,
     registry: RunRegistry | None = None,
     timeout_factory: Any | None = None,
+    tracer_factory: Any | None = None,
 ) -> HarnessRunner:
     options: dict[str, Any] = {
         "event_clock": lambda: FIXED_TIME,
@@ -139,6 +141,8 @@ def runner(
     }
     if timeout_factory is not None:
         options["timeout_factory"] = timeout_factory
+    if tracer_factory is not None:
+        options["tracer_factory"] = tracer_factory
     return HarnessRunner(
         HarnessDependencies(
             config=agent_config(),
@@ -182,6 +186,123 @@ async def test_no_http_runner_is_deterministic_and_injects_runtime_dependencies(
     assert first_graph.configs[0]["configurable"]["thread_id"] == "run:run_1"
     assert first_graph.contexts[0].tool_gateway.ledger is first_ledger
     assert first_graph.contexts[0].config is agent_config()
+
+
+@pytest.mark.asyncio
+async def test_tracing_does_not_change_the_public_event_stream() -> None:
+    class RecordingSink:
+        def __init__(self) -> None:
+            self.spans: list[Any] = []
+
+        def emit(self, span: Any) -> None:
+            self.spans.append(span)
+
+        def flush(self) -> None:
+            pass
+
+    untraced = await collect(runner(FakeGraph(state=completed_state(), emit_public_event=True)))
+
+    sink = RecordingSink()
+    traced = await collect(
+        runner(
+            FakeGraph(state=completed_state(), emit_public_event=True),
+            tracer_factory=TracerFactory(sink),
+        )
+    )
+
+    # 开启 tracing 后事件流必须逐字节一致。
+    assert traced == untraced
+    # 且确实派生出了 span：1 个 node span + 1 个 run root span。
+    assert [span.kind for span in sink.spans] == ["node", "run"]
+    assert sink.spans[-1].attributes["stopReason"] == "VERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_tracer_failure_never_breaks_the_run() -> None:
+    class ExplodingTracerSink:
+        def emit(self, span: Any) -> None:
+            raise RuntimeError("sink unavailable")
+
+        def flush(self) -> None:
+            raise RuntimeError("flush unavailable")
+
+    events = await collect(
+        runner(
+            FakeGraph(state=completed_state(), emit_public_event=True),
+            tracer_factory=TracerFactory(ExplodingTracerSink()),
+        )
+    )
+
+    assert [event["type"] for event in events] == ["node.started", "run.completed"]
+    assert events[-1]["answerMarkdown"] == "完成"
+
+
+@pytest.mark.asyncio
+async def test_runner_binds_the_tracer_for_the_model_layer_and_unbinds_after() -> None:
+    """节点内的模型层必须能经 contextvar 找到 tracer，run 结束后必须解绑。"""
+    class ModelCallingGraph(FakeGraph):
+        def __init__(self) -> None:
+            super().__init__(state=completed_state(), emit_public_event=True)
+            self.tracing_seen: bool | None = None
+
+        async def astream(self, graph_input: Any, **kwargs: Any):
+            self.tracing_seen = tracing_enabled()
+            record_model_call(
+                role="planner",
+                model_id="deepseek-v4-flash",
+                started_at=FIXED_TIME,
+                ended_at=FIXED_TIME,
+                status="ok",
+                attributes={"inputTokens": 7, "attempts": 1},
+            )
+            async for chunk in super().astream(graph_input, **kwargs):
+                yield chunk
+
+    class RecordingSink:
+        def __init__(self) -> None:
+            self.spans: list[Any] = []
+
+        def emit(self, span: Any) -> None:
+            self.spans.append(span)
+
+        def flush(self) -> None:
+            pass
+
+    assert tracing_enabled() is False
+    graph = ModelCallingGraph()
+    sink = RecordingSink()
+    events = await collect(runner(graph, tracer_factory=TracerFactory(sink)))
+
+    assert graph.tracing_seen is True
+    model_spans = [span for span in sink.spans if span.kind == "model"]
+    assert len(model_spans) == 1
+    assert model_spans[0].name == "model:planner"
+    assert model_spans[0].attributes["inputTokens"] == 7
+    # model span 挂在 run root 之下，与 node/tool span 同源。
+    assert model_spans[0].trace_id == "run_1"
+    # 事件流不因 model span 增加任何事件。
+    assert [event["type"] for event in events] == ["node.started", "run.completed"]
+    # run 结束后 contextvar 必须复位，避免泄漏到下一个 run。
+    assert tracing_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_model_layer_records_nothing_when_tracing_is_off() -> None:
+    class ModelCallingGraph(FakeGraph):
+        def __init__(self) -> None:
+            super().__init__(state=completed_state(), emit_public_event=True)
+            self.tracing_seen: bool | None = None
+
+        async def astream(self, graph_input: Any, **kwargs: Any):
+            self.tracing_seen = tracing_enabled()
+            async for chunk in super().astream(graph_input, **kwargs):
+                yield chunk
+
+    graph = ModelCallingGraph()
+    events = await collect(runner(graph))
+
+    assert graph.tracing_seen is False
+    assert [event["type"] for event in events] == ["node.started", "run.completed"]
 
 
 @pytest.mark.asyncio

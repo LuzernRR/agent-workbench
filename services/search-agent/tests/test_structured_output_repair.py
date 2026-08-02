@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
 
 from app.llm import deepseek
+from app.observability.trace import RunTracer, bind_tracer, unbind_tracer
 
 
 class DemoResult(BaseModel):
@@ -118,3 +119,101 @@ async def test_structured_output_does_not_retry_without_run_budget(
         cost_usd=0.0,
         attempts=1,
     )
+
+
+class RecordingSink:
+    def __init__(self) -> None:
+        self.spans: list[Any] = []
+
+    def emit(self, span: Any) -> None:
+        self.spans.append(span)
+
+    def flush(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_structured_call_emits_one_model_span_covering_all_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一次 invoke_structured 只产生一个 model span，repair 的 attempts 合并计入。"""
+    runnable = FakeRunnable([
+        {"parsed": None, "raw": RawMessage(10, 2), "parsing_error": ValueError("bad")},
+        {"parsed": DemoResult(value="ok"), "raw": RawMessage(20, 3), "parsing_error": None},
+    ])
+    install_fake_model(monkeypatch, runnable)
+    sink = RecordingSink()
+    tracer = RunTracer("run_1", sink=sink)
+    previous = bind_tracer(tracer)
+    try:
+        await deepseek.invoke_structured(
+            "supervisor",
+            DemoResult,
+            [HumanMessage(content="q")],
+            allow_repair=True,
+        )
+    finally:
+        unbind_tracer(previous)
+
+    model_spans = [span for span in sink.spans if span.kind == "model"]
+    assert len(model_spans) == 1
+    span = model_spans[0]
+    assert span.name == "model:supervisor"
+    assert span.status == "ok"
+    assert span.attributes["modelId"] == "test-model"
+    assert span.attributes["inputTokens"] == 30
+    assert span.attributes["outputTokens"] == 5
+    assert span.attributes["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_structured_call_emits_an_error_model_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runnable = FakeRunnable([
+        {"parsed": None, "raw": RawMessage(10, 2), "parsing_error": ValueError("bad")},
+    ])
+    install_fake_model(monkeypatch, runnable)
+    sink = RecordingSink()
+    previous = bind_tracer(RunTracer("run_1", sink=sink))
+    try:
+        with pytest.raises(deepseek.StructuredOutputError):
+            await deepseek.invoke_structured(
+                "supervisor",
+                DemoResult,
+                [HumanMessage(content="q")],
+                allow_repair=False,
+            )
+    finally:
+        unbind_tracer(previous)
+
+    span = next(item for item in sink.spans if item.kind == "model")
+    assert span.status == "error"
+    assert span.attributes["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_call_produces_no_span_when_tracing_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未绑定 tracer 时模型层不取时间戳、不记录 span，行为与开启前完全一致。"""
+    runnable = FakeRunnable([
+        {"parsed": DemoResult(value="ok"), "raw": RawMessage(10, 2), "parsing_error": None},
+    ])
+    install_fake_model(monkeypatch, runnable)
+    calls: list[object] = []
+    monkeypatch.setattr(deepseek, "record_model_call", lambda **kw: calls.append(kw))
+
+    previous = bind_tracer(None)
+    try:
+        result, usage = await deepseek.invoke_structured(
+            "supervisor",
+            DemoResult,
+            [HumanMessage(content="q")],
+        )
+    finally:
+        unbind_tracer(previous)
+
+    assert result == DemoResult(value="ok")
+    assert usage.attempts == 1
+    assert calls == []
