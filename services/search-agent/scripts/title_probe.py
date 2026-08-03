@@ -9,8 +9,6 @@ from __future__ import annotations
 import asyncio
 import sys
 
-import trafilatura
-
 from app.tools import fetch_page as module
 
 URLS = [

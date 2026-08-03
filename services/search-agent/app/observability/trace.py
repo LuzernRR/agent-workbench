@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.events.runtime import _EVENT_SCOPE, _assert_public, utc_now
 from app.observability.sink import NoopSink, SpanSink
@@ -64,11 +65,37 @@ _MODEL_ATTRIBUTE_KEYS = frozenset(
         "inputTokens",
         "modelId",
         "outputTokens",
+        "provider",
         "reasonCode",
         "role",
         "totalTokens",
     }
 )
+
+# OTel GenAI 约定的 gen_ai.system 已知取值。Provider 由配置决定（base_url 可换），
+# 因此按 host 后缀判定；不在名单内按约定记为 _OTHER，不猜测、不硬编码单一厂商。
+_KNOWN_GEN_AI_SYSTEMS: tuple[tuple[str, str], ...] = (
+    ("deepseek.com", "deepseek"),
+    ("openai.com", "openai"),
+    ("anthropic.com", "anthropic"),
+    ("mistral.ai", "mistral_ai"),
+    ("groq.com", "groq"),
+    ("perplexity.ai", "perplexity"),
+    ("x.ai", "xai"),
+    ("cohere.com", "cohere"),
+)
+# OTel 约定的未知 Provider 取值；调用方取不到配置时也降级用它。
+OTHER_GEN_AI_SYSTEM = "_OTHER"
+
+
+def gen_ai_system(base_url: str) -> str:
+    """按 OTel GenAI 约定从 base_url 判定 gen_ai.system；未知 Provider 记 _OTHER。"""
+    host = urlsplit(base_url if "//" in base_url else f"//{base_url}").hostname or ""
+    host = host.lower()
+    for suffix, system in _KNOWN_GEN_AI_SYSTEMS:
+        if host == suffix or host.endswith(f".{suffix}"):
+            return system
+    return OTHER_GEN_AI_SYSTEM
 
 _NODE_TERMINALS = {"node.completed": "ok", "node.failed": "error"}
 _TOOL_TERMINALS = {
@@ -82,6 +109,24 @@ _RUN_TERMINALS = {
     "run.stopped": "unknown",
 }
 
+# OTel GenAI 语义约定属性名映射（事件字段名 → gen_ai.* 标准名）。
+# 只重命名；不在此列的字段按原名保留。
+_ATTR_RENAME: dict[str, str] = {
+    "modelId": "gen_ai.request.model",
+    "inputTokens": "gen_ai.usage.input_tokens",
+    "outputTokens": "gen_ai.usage.output_tokens",
+    "toolName": "gen_ai.tool.name",
+    "toolCallId": "gen_ai.tool.call.id",
+    "agent": "gen_ai.agent.name",
+}
+
+# span kind → gen_ai.operation.name
+_OPERATION_BY_KIND: dict[str, str] = {
+    "model": "chat",
+    "tool": "execute_tool",
+    "node": "invoke_agent",
+}
+
 
 def _attributes(event: dict[str, Any]) -> dict[str, Any]:
     selected = {
@@ -90,7 +135,8 @@ def _attributes(event: dict[str, Any]) -> dict[str, Any]:
         if key in _ATTRIBUTE_KEYS and value is not None
     }
     _assert_public(selected, "span.attributes")
-    return selected
+    # 重命名为 OTel GenAI 标准属性名；不在映射表中的键按原名保留。
+    return {_ATTR_RENAME.get(k, k): v for k, v in selected.items()}
 
 
 class RunTracer:
@@ -132,7 +178,7 @@ class RunTracer:
         started_at: str,
     ) -> Span:
         self._span_seq += 1
-        return Span(
+        span = Span(
             span_id=f"{self._trace_id}-{self._span_seq:04d}",
             parent_span_id=parent_span_id,
             trace_id=self._trace_id,
@@ -144,6 +190,10 @@ class RunTracer:
             attributes={},
             events=[],
         )
+        op = _OPERATION_BY_KIND.get(kind)
+        if op is not None:
+            span.attributes["gen_ai.operation.name"] = op
+        return span
 
     def note_failure(self) -> None:
         """记一次观测侧失败；仅用于计数，绝不抛出。"""
@@ -173,6 +223,7 @@ class RunTracer:
         *,
         role: str,
         model_id: str,
+        system: str,
         started_at: str,
         ended_at: str,
         status: SpanStatus,
@@ -187,13 +238,16 @@ class RunTracer:
         )
         span.ended_at = ended_at
         span.status = status
+        raw = {"role": role, "modelId": model_id, **attributes}
         selected = {
             key: value
-            for key, value in {"role": role, "modelId": model_id, **attributes}.items()
+            for key, value in raw.items()
             if key in _MODEL_ATTRIBUTE_KEYS and value is not None
         }
         _assert_public(selected, "span.attributes")
-        span.attributes.update(selected)
+        renamed = {_ATTR_RENAME.get(k, k): v for k, v in selected.items()}
+        renamed["gen_ai.system"] = system
+        span.attributes.update(renamed)
         self._emit(span)
 
     def observe(self, event: dict[str, Any]) -> None:
@@ -326,6 +380,7 @@ def record_model_call(
     *,
     role: str,
     model_id: str,
+    system: str = OTHER_GEN_AI_SYSTEM,
     started_at: str,
     ended_at: str,
     status: SpanStatus,
@@ -339,6 +394,7 @@ def record_model_call(
         tracer.record_model_call(
             role=role,
             model_id=model_id,
+            system=system,
             started_at=started_at,
             ended_at=ended_at,
             status=status,

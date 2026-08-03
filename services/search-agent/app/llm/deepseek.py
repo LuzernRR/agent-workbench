@@ -20,7 +20,13 @@ from pydantic import BaseModel
 
 from app.config.agent import agent_config
 from app.config.runtime import runtime_config
-from app.observability.trace import record_model_call, span_now, tracing_enabled
+from app.observability.trace import (
+    OTHER_GEN_AI_SYSTEM,
+    gen_ai_system,
+    record_model_call,
+    span_now,
+    tracing_enabled,
+)
 
 ModelRole = Literal["supervisor", "planner", "reflector", "writer", "verifier"]
 WRITER_MAX_TOKENS = 2048
@@ -173,6 +179,14 @@ def _structured_chat_model(role: ModelRole, model_id: str | None = None) -> Chat
     )
 
 
+def _gen_ai_system() -> str:
+    """按 OTel 约定判定 gen_ai.system；配置不可读时降级，观测绝不影响模型调用。"""
+    try:
+        return gen_ai_system(runtime_config().base_url)
+    except Exception:  # noqa: BLE001 - 观测属性取不到时降级为 _OTHER
+        return OTHER_GEN_AI_SYSTEM
+
+
 def _record_model_span(
     role: str,
     model_id: str,
@@ -186,6 +200,7 @@ def _record_model_span(
     record_model_call(
         role=role,
         model_id=model_id,
+        system=_gen_ai_system(),
         started_at=started_at,
         ended_at=span_now(),
         status=status,  # type: ignore[arg-type]
