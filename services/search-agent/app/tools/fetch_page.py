@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_module
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -62,6 +64,15 @@ _NEVER_SNIFF_PREFIXES = ("image/", "audio/", "video/", "font/")
 # 且必须远小于 MAX_RESPONSE_BYTES，避免为判类型缓冲整页。
 _SNIFF_BYTES = 512
 
+# trafilatura 的 metadata title 取自页面结构，可能命中导航面包屑而不是
+# <title> 标签。实测黄历类页面返回 "黄历"，而 <title> 是
+# "2026年08月03日农历是多少_2026年08月03日星期几-黄历网" —— 日期只在后者。
+# 标题是 Evidence 的一部分，丢失这类限定词会让 Writer 判定证据不足。
+# 仅在 trafilatura 标题缺失或过短时回退，不改动它已给出有效标题的页面。
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_MIN_INFORMATIVE_TITLE_CHARS = 10
+_MAX_TITLE_CHARS = 300
+
 _HEADERS = {
     # 如实标识自己，便于站点识别与限流，不伪装成普通浏览器。
     "user-agent": "agent-workbench-search/0.1 (+https://github.com/LuzernRR/agent-workbench)",
@@ -106,6 +117,29 @@ def _truncate(text: str) -> str:
     if len(text) <= MAX_TEXT_CHARS:
         return text
     return text[:MAX_TEXT_CHARS] + "\n…（正文已截断）"
+
+
+def _html_title(markup: str) -> str | None:
+    """从原始 HTML 取 <title> 标签文本，失败返回 None。"""
+    match = _HTML_TITLE_RE.search(markup)
+    if match is None:
+        return None
+    text = html_module.unescape(re.sub(r"<[^>]*>", "", match.group(1)))
+    text = " ".join(text.split())
+    return text[:_MAX_TITLE_CHARS] or None
+
+
+def _resolve_title(meta_title: str | None, markup: str) -> str | None:
+    """trafilatura 标题过短时回退到 <title>，两者都可用时取信息量更大的一个。"""
+    meta_title = (meta_title or "").strip() or None
+    if meta_title is not None and len(meta_title) > _MIN_INFORMATIVE_TITLE_CHARS:
+        return meta_title[:_MAX_TITLE_CHARS]
+    fallback = _html_title(markup)
+    if fallback is None:
+        return meta_title[:_MAX_TITLE_CHARS] if meta_title else None
+    if meta_title is None or len(fallback) > len(meta_title):
+        return fallback
+    return meta_title[:_MAX_TITLE_CHARS]
 
 
 async def _fetch_static(url: str, timeout: float) -> FetchResult:
@@ -156,10 +190,11 @@ async def _fetch_static(url: str, timeout: float) -> FetchResult:
                                error="响应体超出上限", error_category="output_invalid")
 
         text = trafilatura.extract(response.text, url=url) or ""
-        title = None
+        meta_title = None
         meta = trafilatura.extract_metadata(response.text)
         if meta is not None:
-            title = getattr(meta, "title", None)
+            meta_title = getattr(meta, "title", None)
+        title = _resolve_title(meta_title, response.text)
 
         return FetchResult(
             url=url,
