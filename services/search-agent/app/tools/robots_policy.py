@@ -49,7 +49,10 @@ class _CachedPolicy:
 
 
 _CACHE: dict[str, _CachedPolicy] = {}
-_CACHE_LOCK = asyncio.Lock()
+# 每个 origin 一把锁。锁的职责是「同一 origin 并发时只抓一次 robots.txt」，
+# 用单把全局锁会顺带让不同站点互相排队——抓取本身在锁内，跨域读取因此被
+# 串行化。锁按 origin 分片后，去重语义不变，跨域并发得以恢复。
+_ORIGIN_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _origin_and_policy_url(url: str) -> tuple[str, str]:
@@ -130,6 +133,15 @@ async def _load_policy(policy_url: str, timeout: float) -> _CachedPolicy:
     return _CachedPolicy(0, parser, response.status_code)
 
 
+def _origin_lock(origin: str) -> asyncio.Lock:
+    """取该 origin 的锁，不存在则建。
+
+    `setdefault` 在事件循环的单线程模型里不含 await，两个协程不会各拿到一把
+    不同的锁，因此这里不需要再套一层锁去保护本字典。
+    """
+    return _ORIGIN_LOCKS.setdefault(origin, asyncio.Lock())
+
+
 async def check_robots(
     url: str,
     *,
@@ -139,12 +151,16 @@ async def check_robots(
     """返回目标 URL 的实时 robots 决策；任何不确定状态都拒绝读取。"""
     origin, policy_url = _origin_and_policy_url(url)
     now = time.monotonic()
-    async with _CACHE_LOCK:
-        policy = _CACHE.get(origin)
-        if not policy or policy.expires_at <= now:
-            policy = await _load_policy(policy_url, timeout)
-            policy.expires_at = now + ROBOTS_CACHE_SECONDS
-            _CACHE[origin] = policy
+    policy = _CACHE.get(origin)
+    if not policy or policy.expires_at <= now:
+        async with _origin_lock(origin):
+            # 进锁后复查：等锁期间可能已有同 origin 的协程抓完并写入缓存，
+            # 此时必须复用它的结果，否则去重就失效了。
+            policy = _CACHE.get(origin)
+            if not policy or policy.expires_at <= now:
+                policy = await _load_policy(policy_url, timeout)
+                policy.expires_at = now + ROBOTS_CACHE_SECONDS
+                _CACHE[origin] = policy
 
     if policy.failure_reason:
         return RobotsDecision(False, policy.failure_reason, policy_url, policy.status)
@@ -162,5 +178,10 @@ async def check_robots(
 
 
 def clear_robots_cache() -> None:
-    """测试和运维刷新入口；不会修改外部状态。"""
+    """测试和运维刷新入口；不会修改外部状态。
+
+    锁字典与缓存同生共死：留下无主的锁只会让下一轮抓取白等一次。极端情况下
+    清理时某把锁仍被持有，后果只是该 origin 多抓一次 robots.txt，不影响判定。
+    """
     _CACHE.clear()
+    _ORIGIN_LOCKS.clear()

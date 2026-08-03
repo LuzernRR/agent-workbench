@@ -1,5 +1,45 @@
 # 项目交接
 
+## 当前结论（2026-08-04，Issue #37 robots per-origin 锁分片待验收）
+
+- 本轮唯一功能为
+  [#37](https://github.com/LuzernRR/agent-workbench/issues/37)“robots 门禁的全局锁把跨域抓取
+  串行化”，`Execution Gate: blocked`（等验收）。开发记录见
+  [037](docs/development/2026-08-04-037-issue-37-robots-per-origin-lock.md)。
+- **阶段 4 的第一刀没落在清单上的任何一项**。取证发现真正的瓶颈在清单之外：`fetch_pages` 宣称
+  「全局并发 3、同域并发 2」，但三个不同域名的候选页在 robots 门禁阶段被**完全串行化**——并发
+  上限被它上游压掉了。先修这个，再谈 `as_completed`。
+- 取证脚本 `scripts/robots_lock_probe.py`（替换 `_load_policy` 为 0.5s 延迟，不发真实请求）：
+  改前墙钟 **1.52s**（串行下限 1.50s），改后 **0.51s**（并行上限 0.50s）。同域 3 并发的抓取次数
+  改前改后都是 1。
+- 根因是**锁的粒度**，不是锁的存在：`_CACHE_LOCK` 是单把进程级锁，`await _load_policy(...)`
+  这次真实 HTTP 抓取持在锁内。锁的意图（同 origin 只抓一次，不给站点加压）是对的，但它保护的是
+  「整个缓存字典」，而需要互斥的其实是「同一个 origin 的抓取」。放大效应：`_fetch_static` 每跳
+  重定向都要再抢一次这把全局锁。
+- 修复：`_CACHE_LOCK` → `_ORIGIN_LOCKS: dict[str, asyncio.Lock]`，`check_robots` 改为锁外先查
+  缓存、未命中才进锁并**复查**。复查不能省——等锁期间同 origin 的另一个协程可能已抓完写入缓存，
+  不复查就会在锁释放瞬间再抓一次，去重语义丢失。已为此单独立测试。
+- 锁字典本身**不加锁保护**：`setdefault` 中间没有 `await`，asyncio 单线程事件循环里不存在被抢占
+  的时机。再套一层元锁只会把刚拆掉的全局争用原样加回来。
+- `clear_robots_cache()` 同步清锁字典，否则 `_ORIGIN_LOCKS` 随访问过的 origin 数无界增长。
+- **robots 判定语义零变化**：fail closed 的每个分支、TTL、`ROBOTS_*` reason 码、`check_robots`
+  签名全未动，三个渠道调用方零改动。未放宽任何并发上限。
+- 考虑过但没采用：把 `_load_policy` 挪到锁外、只用锁护字典读写。那样同 origin 的 N 个并发会各抓
+  一次 robots.txt，等于用「给目标站点加压」换并发，与本模块的设计前提冲突。
+- 门禁：`pytest -q` **420 passed in 9.59s**（改前 417，本轮 +3）、`ruff check .` 全通过、
+  `compileall -q app` exit 0。
+- **注意本机有两个 Python**：全量测试必须走 `services/search-agent/.venv/Scripts/python.exe`，
+  系统 `D:\Python312` 缺 `trafilatura` 等依赖，直接 `python -m pytest` 会有 21 个 collection error，
+  与代码无关。
+- 阶段 4 清单其余项仍未做，其中两项在实施前需要先解决前置冲突：
+  - **"gzip" 与既有决策冲突**：`fetch_page.py` 的 `accept-encoding: identity` 带在案理由（容器内
+    解码器组合曾致官方 LangGraph 页面抛 `DecodingError`）。改它需先复现那次故障，应单独立 Issue。
+  - **"keep-alive" 受 SSRF 防御制约**：`_pinned_get` 每次新建 `AsyncClient` 是为了把连接钉在校验
+    过的 IP 上并覆盖 SNI。复用连接须先解决「连接池按 IP 而非 host 复用」，复杂度高于其余项。
+  - 其余：`asyncio.as_completed` 先到先用（须连同过量提供候选的调用方一起改）、单页超时分层、
+    DuckDuckGo 竞速代替串行降级、小红书验证移出关键路径、短期结果缓存。
+- 下一功能执行门：阻塞（等 #37 验收）。
+
 ## 当前结论（2026-08-03，Issue #35 OTel GenAI 语义约定对齐已验收合并）
 
 - 本轮唯一功能为
