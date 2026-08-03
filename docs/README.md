@@ -16,9 +16,10 @@
 7. [前端工作台](./06-frontend-workbench.md)：页面布局、交互状态和事件映射。
 8. [配置与调优](./07-configuration-and-tuning.md)：基线配置、压测方式和故障定位。
 9. [万能搜索 Agent 端到端开发流程](./万能搜索Agent端到端开发流程.md)：当前项目从 LLM 接入、意图、计划、记忆、工具和 LangGraph 到搜索、RAG、核验、结构化输出与逐 Issue 验收的实施主线。
-10. [万能搜索 Agent 研究底稿](./08-universal-search-agent.md)：爬虫、索引、部署、迁移、Runbook 和生产参数的扩展设计。
-11. [动态模型身份与分层记忆](./model-identity-memory/RESEARCH.md)：当前真实实现、隔离和生命周期契约。
-12. [资料来源](./references.md)：本手册采用的官方文档与规范。
+10. [Agent 生产化优化任务清单](./Agent生产化优化任务清单.md)：两份生产级手册与当前代码的差距、技术选型、优先级和后续模型接手顺序。
+11. [万能搜索 Agent 研究底稿](./08-universal-search-agent.md)：爬虫、索引、部署、迁移、Runbook 和生产参数的扩展设计。
+12. [动态模型身份与分层记忆](./model-identity-memory/RESEARCH.md)：当前真实实现、隔离和生命周期契约。
+13. [资料来源](./references.md)：本手册采用的官方文档与规范。
 
 ## 固定决策
 

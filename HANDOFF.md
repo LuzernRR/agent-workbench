@@ -1,11 +1,60 @@
 # 项目交接
 
-## 当前结论（2026-08-04，Issue #37 robots per-origin 锁分片待验收）
+## 当前结论（2026-08-04，Issue #39 Web 搜索重试策略待验收）
+
+- 本轮唯一功能为
+  [#39](https://github.com/LuzernRR/agent-workbench/issues/39)“统一 Web 搜索 Provider 重试策略与
+  Retry-After”，`Execution Gate: blocked`（等验收）。开发记录见
+  [038](docs/development/2026-08-04-038-issue-39-web-retry-policy.md)。两份外部生产级 Agent 手册与当前
+  实现的完整差距、目标技术栈和后续顺序已固化到
+  [Agent 生产化优化任务清单](docs/Agent生产化优化任务清单.md)；后续模型必须从队首取一项，不能并行开工。
+- **修改前那段重试代码有四个各自独立的缺陷，其中两个是真 bug，不只是「退避算法不够好」**：
+  - `httpx.HTTPStatusError` 是 `httpx.HTTPError` 的子类，于是 **HTTP 400 / 404 被当瞬时故障重试
+    3 次**——重试一个参数错误的请求，三次必然得到同一个 400。
+  - `_TAVILY_CREDENTIAL_FAILURES` 同时含 `rate_limited`，于是 **429 被 `break` 掉**。最该按
+    `Retry-After` 重试的那一类，恰恰是唯一被禁止重试的一类。
+  - 另两项：退避固定 0.5s/1.0s 无 jitter（并发查询同步重试，尖峰与限流窗口对齐）；无累计耗时上限
+    （单 Provider 最坏约 **61.5s** = 3 × (connect 5s + read 15s) + 1.5s）。
+- 根因不是算法，是**决策所需的事实没被表达出来**。重试决策需要四个输入：错误是否瞬时、已尝试
+  几次、已耗时多久、服务端是否给了建议等待。旧代码只有第二个。
+- 新增 `app/reliability/retry.py`（130 行纯函数）：`ErrorKind` 四分类、`RetryPolicy`（次数/累计耗时/
+  退避三组上限，构造时校验）、`parse_retry_after`、`next_delay`。策略层不碰网络也不碰时间，所有输入
+  都是参数，调用方注入时钟、随机源、sleeper——六项重试测试全在毫秒级完成，不真实睡眠。
+- **`Retry-After` 优先但不是命令**：服务端可以返回 `Retry-After: 3600`，无条件遵守等于把一次搜索
+  挂起一小时。先被 `max_delay_seconds` 截断，再与剩余 deadline 比较。
+- **等待会耗尽预算时直接停止**（`delay >= remaining` → `None`），不「等完再试」。反过来做会发出一个
+  从诞生起就没有时间预算的请求，它必然超时，只是把失败推迟了 `delay` 秒。
+- `asyncio.timeout(remaining)` 包住单次调用。httpx 的 `read=15s` 只约束单次读；没有这层，
+  `max_elapsed_seconds` 只在两次尝试**之间**被检查，一次慢调用就能整体超出预算。
+- **Key 轮换语义零变化**：Key 池那层的 `_TAVILY_CREDENTIAL_FAILURES` 判断原样保留。多 Key 时
+  `attempts_per_key = 1`，单 Key 内不重试直接轮换；只有单 Key 时才在本 Key 内按 `Retry-After` 重试。
+  轮换顺序与游标推进一行未改，DuckDuckGo 串行回退顺序未改。
+- `except` 顺序有依赖：`HTTPStatusError` → `RequestError` → `HTTPError`，前两者都是后者的子类，
+  颠倒会让状态码判定失效。`CancelledError` 继承 `BaseException`，不被任何分支捕获，取消不会被误当
+  瞬时故障重试。
+- `SearchOutcome.retry_after_seconds` 标 `repr=False, compare=False`：只服务重试层，**不投影到公共
+  AgentEvent 协议**，不参与相等性比较，不进日志。`error_category` 取值集合未变，`channels/web.py`
+  与 BFF 投影零改动。
+- 未采用 `tenacity` / `backoff`：两者把「决定重试」与「执行调用」耦合在装饰器里，而本项目要在同一次
+  失败上同时驱动 Key 轮换与 Provider 回退——那是调用方的控制流。为 130 行纯函数引入依赖，换来的是
+  更难注入的时钟。
+- 门禁：`pytest -q` **443 passed in 8.21s**（改前 420，本轮 +23）、`ruff check .` 全通过、
+  `compileall -q app` exit 0。
+- **遗留语义边界**：`max_elapsed_seconds` 是「每次 Provider 调用」的预算，不是 `web_search` 整体的。
+  Key 池每把 Key 各拿 30s，回退 DuckDuckGo 再叠一份，最坏累计约 90s。收成整体预算要改 Key 池的
+  时间账，属本 Issue 非目标；已登记为生产化清单 P0-01，是 #39 验收后的下一建议切片。
+- **注意本机有两个 Python**：全量测试必须走 `services/search-agent/.venv/Scripts/python.exe`，
+  系统 `D:\Python312` 缺 `trafilatura` 等依赖，直接 `python -m pytest` 会有 21 个 collection error，
+  与代码无关。
+- 下一功能执行门：阻塞（等 #39 验收）。
+
+## 当前结论（2026-08-04，Issue #37 robots per-origin 锁分片已验收合并）
 
 - 本轮唯一功能为
   [#37](https://github.com/LuzernRR/agent-workbench/issues/37)“robots 门禁的全局锁把跨域抓取
-  串行化”，`Execution Gate: blocked`（等验收）。开发记录见
-  [037](docs/development/2026-08-04-037-issue-37-robots-per-origin-lock.md)。
+  串行化”，`Execution Gate: allowed`。开发记录见
+  [037](docs/development/2026-08-04-037-issue-37-robots-per-origin-lock.md)，PR
+  [#38](https://github.com/LuzernRR/agent-workbench/pull/38) 已合并 `main`（`324c98c`）。
 - **阶段 4 的第一刀没落在清单上的任何一项**。取证发现真正的瓶颈在清单之外：`fetch_pages` 宣称
   「全局并发 3、同域并发 2」，但三个不同域名的候选页在 robots 门禁阶段被**完全串行化**——并发
   上限被它上游压掉了。先修这个，再谈 `as_completed`。
@@ -38,7 +87,8 @@
     过的 IP 上并覆盖 SNI。复用连接须先解决「连接池按 IP 而非 host 复用」，复杂度高于其余项。
   - 其余：`asyncio.as_completed` 先到先用（须连同过量提供候选的调用方一起改）、单页超时分层、
     DuckDuckGo 竞速代替串行降级、小红书验证移出关键路径、短期结果缓存。
-- 下一功能执行门：阻塞（等 #37 验收）。
+- 下一功能执行门：放行（#37 已验收合并；阶段 4 性能优化按序排队，重试策略统一已作为 #39 完成，
+  见本文件顶部）。
 
 ## 当前结论（2026-08-03，Issue #35 OTel GenAI 语义约定对齐已验收合并）
 
