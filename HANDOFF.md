@@ -1,6 +1,6 @@
 # 项目交接
 
-## 当前结论（2026-08-03，Issue #35 OTel GenAI 语义约定对齐已实现，等待验收）
+## 当前结论（2026-08-03，Issue #35 OTel GenAI 语义约定对齐已验收合并）
 
 - 本轮唯一功能为
   [#35](https://github.com/LuzernRR/agent-workbench/issues/35)“span 属性名对齐 OTel GenAI 语义约定”，
@@ -32,8 +32,9 @@
   约定中无对应项，强套 `gen_ai.*` 前缀会让后端误以为是标准字段。
 - 顺带清掉 `scripts/title_probe.py` 中 #34 遗留的未使用 `trafilatura` import（ruff F401）。
 - 未改 robots / SSRF / URL policy 任何门禁逻辑，未新增网络出口，全部既有安全测试通过。
-- 下一功能执行门：阻塞（等 #35 验收；随后阶段 4 性能优化按序排队：`asyncio.as_completed` 先到先用、
-  per-page 超时分层、HTTP/2 + keep-alive + gzip、race DuckDuckGo 代替串行降级、短期结果缓存）。
+- 下一功能执行门：放行（用户 2026-08-03 回复「验收通过，继续」，#35 验收通过；阶段 4 性能优化按序
+  排队：`asyncio.as_completed` 先到先用、per-page 超时分层、HTTP/2 + keep-alive + gzip、
+  race DuckDuckGo 代替串行降级、短期结果缓存）。
 
 ## 当前结论（2026-08-03，Issue #33 HTML title 回退已验收合并）
 
