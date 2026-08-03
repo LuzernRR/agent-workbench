@@ -41,8 +41,15 @@
 - 用户 2026-08-03 授权「你自己测试一下，然后没问题就可以验收」，自测全绿后受控收口。
 - 下一功能执行门：放行（阶段 3 起按序排队：researcher 降 effort → Verifier 拆分 → run 级
   `replan_budget`；随后阶段 4/5 与 Item I，一 Issue 一 feature，不得提前开工）。
-- 新立 Issue（尚未开工）：单事实快路径未生效导致链路冗余，须先做成熟产品的设计调研——一次搜索满足
-  即收口，不满足才二次搜索。
+- #29 收口提交在分支 `feat/issue-29-writer-content-streaming`，PR
+  [#30](https://github.com/LuzernRR/agent-workbench/pull/30)，等合并。
+- 新立 [#31](https://github.com/LuzernRR/agent-workbench/issues/31)「链路冗余：一次搜索已满足仍继续
+  补搜，单事实快路径在真实链路上从未生效」，`Execution Gate: blocked`，**尚未开工**。已附实测证据与
+  成熟产品调研：Anthropic 把 effort 预算档位直接写进 prompt（单事实 = 1 agent / 3–10 次工具调用）；
+  Self-RAG 用 retrieve token 做 Yes/No/Continue 三态按需检索；TARG 指出「判断何时不需要检索」与
+  「判断检索什么」同等重要；SIM-RAG / Stop-RAG 把充分性裁判独立出来，避免过早停止与过度检索。
+  建议方向是先给 `evidence_depth` 判定加可观测性做诊断，再改 Supervisor prompt 与收紧第二轮门控，
+  不加关键词表、不减少必要搜索、不绕过 Verifier 硬门禁。
 
 ## 当前结论（2026-08-03，Issue #28 已验收关闭，下一功能执行门放行）
 
