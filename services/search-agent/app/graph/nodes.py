@@ -75,6 +75,7 @@ from app.prompts.agents import (
     VERIFIER_PROMPT,
     WRITER_PROMPT,
 )
+from app.reliability.deadline import DeadlineBudget
 from app.tools.channels.base import ChannelProgress, ChannelVerificationUpdate
 from app.tools.gateway import (
     ToolGatewayCall,
@@ -1644,6 +1645,10 @@ async def _run_one_search(
                 if xiaohongshu_public_only
                 else {}
             )
+            if arguments.channel == "web" and timeout_seconds is not None:
+                execution_options["deadline"] = DeadlineBudget.after(
+                    max(0.001, timeout_seconds)
+                )
             if verification_enabled:
                 execution_options.update({
                     "verification_request_key": (

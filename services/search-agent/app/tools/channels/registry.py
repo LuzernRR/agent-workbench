@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.config.agent import AgentConfig
+from app.reliability.deadline import DeadlineBudget
 from app.tools.channels.base import (
     ChannelName,
     ChannelOutcome,
@@ -44,6 +45,7 @@ class ChannelRegistry:
         max_results: int,
         progress: ChannelProgressReporter | None = None,
         *,
+        deadline: DeadlineBudget | None = None,
         xiaohongshu_public_only: bool = False,
         verification_request_key: str | None = None,
         verification: ChannelVerificationReporter | None = None,
@@ -71,5 +73,12 @@ class ChannelRegistry:
                 progress=progress,
                 verification_request_key=verification_request_key,
                 verification=verification,
+            )
+        if channel == "web":
+            return await adapter.search(
+                query,
+                max_results,
+                progress=progress,
+                deadline=deadline,
             )
         return await adapter.search(query, max_results, progress=progress)

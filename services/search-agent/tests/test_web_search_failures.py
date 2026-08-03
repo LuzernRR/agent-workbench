@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from app.reliability.deadline import DeadlineBudget
 from app.reliability.retry import RetryPolicy
 from app.tools import web_search as module
 from app.tools.web_search import SearchHit, SearchOutcome
@@ -258,6 +259,126 @@ async def test_max_attempts_is_a_hard_limit(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_tavily_keys_consume_one_shared_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    remaining_at_call: list[float] = []
+    deadline = DeadlineBudget.after(5, clock=lambda: now)
+
+    async def search(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal now
+        remaining_at_call.append(deadline.remaining_seconds())
+        if key == "one":
+            now += 3
+            return SearchOutcome(
+                ok=False,
+                query=query,
+                provider="tavily",
+                error="down",
+                error_category="provider_unavailable",
+            )
+        return SearchOutcome(ok=True, query=query, provider="tavily")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("one", "two"))
+    monkeypatch.setattr(module, "_search_tavily", search)
+    outcome = await module.web_search(
+        "query",
+        deadline=deadline,
+        allow_duckduckgo_fallback=False,
+    )
+
+    assert outcome.ok is True
+    assert remaining_at_call == [5.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_deadline_does_not_start_next_key_or_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    calls: list[str] = []
+    deadline = DeadlineBudget.after(5, clock=lambda: now)
+
+    async def unavailable(
+        query: str,
+        max_results: int,
+        key: str,
+    ) -> SearchOutcome:
+        nonlocal now
+        calls.append(key)
+        now += 5
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="down",
+            error_category="provider_unavailable",
+        )
+
+    async def unexpected_fallback(query: str, max_results: int) -> SearchOutcome:
+        calls.append("duckduckgo")
+        raise AssertionError("deadline 耗尽后不得启动 fallback")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("one", "two"))
+    monkeypatch.setattr(module, "_search_tavily", unavailable)
+    monkeypatch.setattr(module, "_search_duckduckgo", unexpected_fallback)
+    outcome = await module.web_search("query", deadline=deadline)
+
+    assert outcome.ok is False
+    assert outcome.provider == "tavily"
+    assert calls == ["one"]
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_never_starts_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadline = DeadlineBudget(expires_at=0, clock=lambda: 0)
+
+    async def unexpected(
+        query: str,
+        max_results: int,
+        key: str,
+    ) -> SearchOutcome:
+        raise AssertionError("已到期 deadline 不得启动 Provider")
+
+    monkeypatch.setattr(module, "_tavily_keys", lambda: ("one",))
+    monkeypatch.setattr(module, "_search_tavily", unexpected)
+    outcome = await module.web_search(
+        "query",
+        deadline=deadline,
+    )
+
+    assert outcome.ok is False
+    assert outcome.error_category == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_still_escapes_shared_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = module.asyncio.Event()
+
+    async def blocked(query: str, max_results: int) -> SearchOutcome:
+        entered.set()
+        await module.asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(module, "_search_duckduckgo", blocked)
+    task = module.asyncio.create_task(module.web_search(
+        "query",
+        deadline=DeadlineBudget.after(30),
+        default_provider="duckduckgo",
+    ))
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(module.asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,43 @@
 # 项目交接
 
-## 当前结论（2026-08-04，Issue #39 Web 搜索重试策略待验收）
+## 当前结论（2026-08-04，Issue #41 Web Search 绝对 Deadline 待验收）
+
+- 本轮唯一功能为
+  [#41](https://github.com/LuzernRR/agent-workbench/issues/41)“Web Search 绝对 Deadline 贯穿 Key 池、
+  fallback 与抓取”，`Execution Gate: blocked`（等验收）。开发记录见
+  [039](docs/development/2026-08-04-039-issue-41-web-search-deadline.md)。
+- **先纠正了任务清单里的原始假设**：项目并非没有 Run 级时间边界。`HarnessRunner` 已用
+  `maxRunSeconds + 10` 包住整张图，`remaining_run_seconds()` / `tool_timeout_seconds()` 还会为写作、
+  核验保留 60 秒。本轮真正缺的是 deadline propagation：`_run_one_search` 只在最外层取消，Web 内部的
+  每把 Tavily Key、DuckDuckGo fallback 和 `fetch_pages` 各自重新领取相对 timeout。
+- 新增 `DeadlineBudget`：保存单调时钟的绝对 `expires_at`，`after()` 创建根预算，`bounded()` 只能收紧、
+  不能延长父预算，`remaining_seconds()` 是下游唯一可消费的时间。时钟可注入，测试无需真实等待。
+- deadline 只作为进程内 runtime dependency 传播：`_run_one_search → execute_search_tool →
+  ChannelRegistry → WebChannel → web_search → Key pool / Provider retry / fallback`。它不写入 LangGraph
+  State、Checkpoint、AgentEvent、Tool Ledger 或 BFF 协议。
+- **两个上限同时生效**：调用方 deadline 是外层硬边界，Web Search 自己的 30 秒仍是局部上限；
+  `deadline.bounded(30)` 取更早者。单个 Provider 也只能继续收紧，不能在切 Key 时重置。
+- 多 Key 确定性测试中，第一把 Key 消耗 3 秒后，第二把观察到的剩余预算由 5 秒降为 2 秒；第一把恰好
+  耗尽 5 秒时，第二把 Key 与 DuckDuckGo 都没有启动。已到期的 Key 池返回 `timeout`，不再误报
+  `auth_required`。
+- WebChannel 发现候选后重新读取同一个 deadline：正文抓取获得 `min(20s, remaining)`；若发现阶段已
+  耗尽预算，则保留真实候选但不启动抓取，候选明确保持 `verified=false`，不制造证据。
+- 最外层 `asyncio.timeout` 保留为最后一道安全兜底。`CancelledError` 仍不被 retry 捕获；Tool Ledger
+  的超时/取消结算、`RUN_TIME_RESERVE`、Key 游标、fallback 顺序、公共错误码与事件结构均未改变。
+- 初次全量门禁：`pytest -q` **458 passed in 7.42s**（改前 443，本轮 +15）；最终 ruff、compileall、
+  diff check 与复跑结果见开发记录。
+- 非目标仍未做：DeepSeek/Model Gateway、X 和小红书 Provider 内部 deadline、Worker/队列、熔断与缓存。
+  其中 Model Gateway 是生产化清单下一项 P0-02；X/小红书仍由现有渠道 timeout + 工具外层硬边界保护，
+  后续迁移必须保留小红书人工验证暂停计时语义。
+- 下一功能执行门：阻塞（等 #41 验收）。
+
+## 当前结论（2026-08-04，Issue #39 Web 搜索重试策略已验收合并）
 
 - 本轮唯一功能为
   [#39](https://github.com/LuzernRR/agent-workbench/issues/39)“统一 Web 搜索 Provider 重试策略与
-  Retry-After”，`Execution Gate: blocked`（等验收）。开发记录见
-  [038](docs/development/2026-08-04-038-issue-39-web-retry-policy.md)。两份外部生产级 Agent 手册与当前
+  Retry-After”，用户 2026-08-04 回复“验收通过，继续”；PR
+  [#40](https://github.com/LuzernRR/agent-workbench/pull/40) 已合并 `main`（`74bc141`），Issue 已关闭。
+  开发记录见 [038](docs/development/2026-08-04-038-issue-39-web-retry-policy.md)。两份外部生产级 Agent 手册与当前
   实现的完整差距、目标技术栈和后续顺序已固化到
   [Agent 生产化优化任务清单](docs/Agent生产化优化任务清单.md)；后续模型必须从队首取一项，不能并行开工。
 - **修改前那段重试代码有四个各自独立的缺陷，其中两个是真 bug，不只是「退避算法不够好」**：
@@ -46,7 +78,7 @@
 - **注意本机有两个 Python**：全量测试必须走 `services/search-agent/.venv/Scripts/python.exe`，
   系统 `D:\Python312` 缺 `trafilatura` 等依赖，直接 `python -m pytest` 会有 21 个 collection error，
   与代码无关。
-- 下一功能执行门：阻塞（等 #39 验收）。
+- 下一功能执行门：放行（#39 已验收；P0-01 已作为 #41 执行，见本文件顶部）。
 
 ## 当前结论（2026-08-04，Issue #37 robots per-origin 锁分片已验收合并）
 

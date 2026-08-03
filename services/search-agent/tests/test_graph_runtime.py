@@ -760,10 +760,12 @@ class Scenario:
         config: Any,
         progress: Any = None,
         *,
+        deadline: Any = None,
         xiaohongshu_public_only: bool = False,
         verification_request_key: str | None = None,
         verification: Any = None,
     ) -> SearchExecutionResult:
+        del deadline
         query = arguments.query
         self.tool_executions.append(query)
         execution_number = len(self.tool_executions)
