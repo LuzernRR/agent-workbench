@@ -5,10 +5,10 @@
 - 用户 2026-08-03 回复「通过，继续」，验收
   [#28](https://github.com/LuzernRR/agent-workbench/issues/28)「Supervisor 增加 evidence_depth 分层，
   单事实问题走 1 次搜索快路径」。受控收口提交 `741e047` 已推送 `main`，Issue 以 completed 关闭。
-- 与 #25 的收口分开执行：先提交
-  `181db68`「accept mislabeled content types when fetching page bodies (#25)」（类型门禁三层判定 +
-  `config/.gitignore` 的 `*.local.json.bak-*`），再提交 `741e047`（#28 的 schema / 状态位 / 两个确定性
-  节点 / 快路径路由 / Prompt v41）。#25 仍等待用户验收，Issue 保持开放。
+- [#25](https://github.com/LuzernRR/agent-workbench/issues/25)「修复被误标 Content-Type 的网页无法
+  读取正文」同轮一并验收，收口提交 `181db68`，Issue 以 completed 关闭。两项按 Issue 边界拆成独立
+  提交：`181db68` 只含类型门禁三层判定与 `config/.gitignore` 的 `*.local.json.bak-*`；`741e047` 只含
+  #28 的 schema / 状态位 / 两个确定性节点 / 快路径路由 / Prompt v41。
 - 下一功能执行门：放行（阶段 2 按序排队：Writer 流式 → researcher 降 effort → `asyncio.as_completed`
   先到先用 → prompt-caching 等，一 Issue 一 feature）。
 
