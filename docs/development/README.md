@@ -32,4 +32,5 @@
 - [LangGraph 自适应多渠道搜索 Agent](2026-07-29-007-multichannel-search-agent.md)
 - [Agent 公开文段流式展示与有效来源增量](2026-07-29-008-streamed-process-effective-sources.md)
 - [OTel GenAI 语义约定属性名对齐](2026-08-03-036-issue-35-otel-genai-conventions.md)
+- [robots 门禁的 per-origin 锁分片](2026-08-04-037-issue-37-robots-per-origin-lock.md)
 - [开发记录模板](TEMPLATE.md)
