@@ -20,14 +20,18 @@ import asyncio
 import json
 import os
 import pathlib
+import random
 import re
 import threading
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from selectolax.parser import HTMLParser
 
+from app.reliability.retry import ErrorKind, RetryPolicy, next_delay, parse_retry_after
 from app.tools.url_policy import is_fetchable
 
 # DuckDuckGo 的无 JS HTML 端点。不需要 Key，但会限流，
@@ -42,6 +46,8 @@ _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 _TAVILY_CREDENTIAL_FAILURES = frozenset(
     {"auth_required", "rate_limited", "quota_exhausted"}
 )
+_RETRYABLE_HTTP_STATUSES = frozenset({500, 502, 503, 504})
+_DEFAULT_MAX_ELAPSED_SECONDS = 30.0
 _TAVILY_PROVIDER_FAILURE_KEY_LIMIT = 2
 _TAVILY_KEY_STATE_LOCK = threading.Lock()
 _tavily_key_state_signature: tuple[str, ...] = ()
@@ -72,6 +78,8 @@ class SearchOutcome:
     hits: list[SearchHit] = field(default_factory=list)
     error: str | None = None
     error_category: str | None = None
+    # 仅供 Provider 重试层使用，不投影到公共 AgentEvent 协议。
+    retry_after_seconds: float | None = field(default=None, repr=False, compare=False)
 
     @property
     def urls(self) -> list[str]:
@@ -243,6 +251,9 @@ async def _search_tavily(query: str, max_results: int, key: str) -> SearchOutcom
             return SearchOutcome(
                 ok=False, query=query, provider="tavily",
                 error="Tavily 请求过于频繁", error_category="rate_limited",
+                retry_after_seconds=parse_retry_after(
+                    response.headers.get("Retry-After")
+                ),
             )
         if response.status_code == 432:
             return SearchOutcome(
@@ -281,6 +292,9 @@ async def _search_duckduckgo(query: str, max_results: int) -> SearchOutcome:
             return SearchOutcome(
                 ok=False, query=query, provider="duckduckgo",
                 error="搜索请求过于频繁", error_category="rate_limited",
+                retry_after_seconds=parse_retry_after(
+                    response.headers.get("Retry-After")
+                ),
             )
         response.raise_for_status()
         html = response.text
@@ -314,40 +328,107 @@ async def _search_duckduckgo(query: str, max_results: int) -> SearchOutcome:
     return SearchOutcome(ok=True, query=query, provider="duckduckgo", hits=hits)
 
 
+def _error_kind_for_outcome(outcome: SearchOutcome) -> ErrorKind:
+    if outcome.error_category == "rate_limited":
+        return ErrorKind.RATE_LIMIT
+    if outcome.error_category == "timeout":
+        return ErrorKind.TIMEOUT
+    if outcome.error_category == "provider_unavailable":
+        return ErrorKind.TRANSIENT
+    return ErrorKind.PERMANENT
+
+
 async def _search_provider_with_retries(
     query: str,
     max_results: int,
     provider: str,
     key: str | None,
     max_attempts: int,
+    *,
+    max_elapsed_seconds: float = _DEFAULT_MAX_ELAPSED_SECONDS,
+    retry_policy: RetryPolicy | None = None,
+    sleeper: Callable[[float], Awaitable[None]] | None = None,
+    clock: Callable[[], float] | None = None,
+    random_source: Callable[[], float] | None = None,
 ) -> SearchOutcome:
+    """在次数与累计耗时双重预算内调用单个 Provider。"""
+    policy = retry_policy or RetryPolicy(
+        max_attempts=max_attempts,
+        max_elapsed_seconds=max_elapsed_seconds,
+    )
+    sleep = sleeper or asyncio.sleep
+    monotonic = clock or time.monotonic
+    rng = random_source or random.random
+    started_at = monotonic()
     last_error: SearchOutcome | None = None
-    for attempt in range(max_attempts):
+    for attempt in range(1, policy.max_attempts + 1):
+        elapsed = max(0.0, monotonic() - started_at)
+        remaining = policy.max_elapsed_seconds - elapsed
+        if remaining <= 0:
+            break
+
+        error_kind = ErrorKind.PERMANENT
         try:
-            if provider == "tavily":
-                assert key
-                outcome = await _search_tavily(query, max_results, key)
-            else:
-                outcome = await _search_duckduckgo(query, max_results)
+            async with asyncio.timeout(remaining):
+                if provider == "tavily":
+                    assert key
+                    outcome = await _search_tavily(query, max_results, key)
+                else:
+                    outcome = await _search_duckduckgo(query, max_results)
             if outcome.ok:
                 return outcome
             last_error = outcome
-            if outcome.error_category in _TAVILY_CREDENTIAL_FAILURES:
-                break
-        except httpx.TimeoutException:
+            error_kind = _error_kind_for_outcome(outcome)
+        except (TimeoutError, httpx.TimeoutException):
             last_error = SearchOutcome(
                 ok=False, query=query, provider=provider,
                 error="搜索请求超时", error_category="timeout",
             )
+            error_kind = ErrorKind.TIMEOUT
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            last_error = SearchOutcome(
+                ok=False, query=query, provider=provider,
+                error=f"搜索服务不可用：HTTP {status}",
+                error_category="provider_unavailable",
+                retry_after_seconds=parse_retry_after(
+                    exc.response.headers.get("Retry-After")
+                ),
+            )
+            error_kind = (
+                ErrorKind.TRANSIENT
+                if status in _RETRYABLE_HTTP_STATUSES
+                else ErrorKind.PERMANENT
+            )
+        except httpx.RequestError as exc:
+            last_error = SearchOutcome(
+                ok=False, query=query, provider=provider,
+                error=f"搜索网络不可用：{type(exc).__name__}",
+                error_category="provider_unavailable",
+            )
+            error_kind = ErrorKind.TRANSIENT
         except httpx.HTTPError as exc:
             last_error = SearchOutcome(
                 ok=False, query=query, provider=provider,
                 error=f"搜索服务不可用：{type(exc).__name__}",
                 error_category="provider_unavailable",
             )
+            error_kind = ErrorKind.PERMANENT
 
-        if attempt < max_attempts - 1:
-            await asyncio.sleep(0.5 * (2 ** attempt))
+        elapsed = max(0.0, monotonic() - started_at)
+        delay = next_delay(
+            policy,
+            error_kind=error_kind,
+            attempt=attempt,
+            elapsed_seconds=elapsed,
+            random_value=rng(),
+            retry_after_seconds=(
+                last_error.retry_after_seconds if last_error is not None else None
+            ),
+        )
+        if delay is None:
+            break
+        await sleep(delay)
 
     return last_error or SearchOutcome(
         ok=False, query=query, provider=provider,
@@ -360,6 +441,7 @@ async def _search_tavily_key_pool(
     max_results: int,
     keys: tuple[str, ...],
     max_attempts: int,
+    max_elapsed_seconds: float,
 ) -> SearchOutcome:
     """按进程内游标尝试 Key；凭据故障可遍历全池，服务故障最多换两把。"""
     candidates = _tavily_key_candidates(keys)
@@ -374,6 +456,7 @@ async def _search_tavily_key_pool(
             "tavily",
             key,
             attempts_per_key,
+            max_elapsed_seconds=max_elapsed_seconds,
         )
         if outcome.ok:
             _select_tavily_key(keys, index)
@@ -402,6 +485,7 @@ async def web_search(
     max_results: int = 8,
     max_attempts: int = 3,
     *,
+    max_elapsed_seconds: float = _DEFAULT_MAX_ELAPSED_SECONDS,
     default_provider: str = "tavily",
     allow_duckduckgo_fallback: bool = True,
 ) -> SearchOutcome:
@@ -423,7 +507,12 @@ async def web_search(
 
     if default_provider == "duckduckgo":
         return await _search_provider_with_retries(
-            query, max_results, "duckduckgo", None, max_attempts
+            query,
+            max_results,
+            "duckduckgo",
+            None,
+            max_attempts,
+            max_elapsed_seconds=max_elapsed_seconds,
         )
 
     keys = _tavily_keys()
@@ -437,14 +526,30 @@ async def web_search(
                 error_category="auth_required",
             )
         return await _search_provider_with_retries(
-            query, max_results, "duckduckgo", None, max_attempts
+            query,
+            max_results,
+            "duckduckgo",
+            None,
+            max_attempts,
+            max_elapsed_seconds=max_elapsed_seconds,
         )
 
-    primary = await _search_tavily_key_pool(query, max_results, keys, max_attempts)
+    primary = await _search_tavily_key_pool(
+        query,
+        max_results,
+        keys,
+        max_attempts,
+        max_elapsed_seconds,
+    )
     if primary.ok or not allow_duckduckgo_fallback:
         return primary
     return await _search_provider_with_retries(
-        query, max_results, "duckduckgo", None, max_attempts
+        query,
+        max_results,
+        "duckduckgo",
+        None,
+        max_attempts,
+        max_elapsed_seconds=max_elapsed_seconds,
     )
 
 

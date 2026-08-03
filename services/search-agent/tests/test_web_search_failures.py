@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from app.reliability.retry import RetryPolicy
 from app.tools import web_search as module
 from app.tools.web_search import SearchHit, SearchOutcome
 
@@ -13,7 +14,9 @@ def reset_tavily_key_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_is_stable_and_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_single_key_rate_limit_retries_with_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = 0
 
     async def limited(query: str, max_results: int, key: str) -> SearchOutcome:
@@ -25,6 +28,7 @@ async def test_rate_limit_is_stable_and_not_retried(monkeypatch: pytest.MonkeyPa
             provider="tavily",
             error="rate limited",
             error_category="rate_limited",
+            retry_after_seconds=0,
         )
 
     monkeypatch.setattr(module, "_tavily_keys", lambda: ("test-key",))
@@ -33,8 +37,227 @@ async def test_rate_limit_is_stable_and_not_retried(monkeypatch: pytest.MonkeyPa
         "query", max_attempts=3, allow_duckduckgo_fallback=False
     )
 
-    assert calls == 1
+    assert calls == 3
     assert outcome.error_category == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_timeout_retries_until_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    waits: list[float] = []
+
+    async def flaky(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.TimeoutException("timeout")
+        return SearchOutcome(ok=True, query=query, provider="tavily")
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(module, "_search_tavily", flaky)
+    outcome = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        3,
+        retry_policy=RetryPolicy(initial_delay_seconds=2),
+        sleeper=sleeper,
+        random_source=lambda: 0.25,
+    )
+
+    assert outcome.ok is True
+    assert calls == 2
+    assert waits == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_network_error_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def flaky(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            request = httpx.Request("POST", "https://api.example.test/search")
+            raise httpx.ConnectError("connection reset", request=request)
+        return SearchOutcome(ok=True, query=query, provider="tavily")
+
+    async def sleeper(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_search_tavily", flaky)
+    outcome = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        2,
+        sleeper=sleeper,
+        random_source=lambda: 0,
+    )
+
+    assert outcome.ok is True
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_retryable_503_retries_but_400_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statuses = [503, 200]
+    waits: list[float] = []
+
+    async def status_response(
+        query: str,
+        max_results: int,
+        key: str,
+    ) -> SearchOutcome:
+        status = statuses.pop(0)
+        if status == 200:
+            return SearchOutcome(ok=True, query=query, provider="tavily")
+        request = httpx.Request("POST", "https://api.example.test/search")
+        response = httpx.Response(status, request=request)
+        raise httpx.HTTPStatusError(str(status), request=request, response=response)
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(module, "_search_tavily", status_response)
+    retryable = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        3,
+        sleeper=sleeper,
+        random_source=lambda: 0,
+    )
+    statuses[:] = [400, 200]
+    permanent = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        3,
+        sleeper=sleeper,
+        random_source=lambda: 0,
+    )
+
+    assert retryable.ok is True
+    assert permanent.ok is False
+    assert statuses == [200]
+    assert len(waits) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["auth_required", "quota_exhausted"])
+async def test_credential_failure_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+) -> None:
+    calls = 0
+
+    async def rejected(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal calls
+        calls += 1
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="rejected",
+            error_category=category,
+        )
+
+    monkeypatch.setattr(module, "_search_tavily", rejected)
+    outcome = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        3,
+        sleeper=lambda delay: None,
+        random_source=lambda: 0,
+    )
+
+    assert outcome.ok is False
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_budget_stops_before_waiting_past_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    now = 0.0
+    waits: list[float] = []
+
+    async def limited(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal calls, now
+        calls += 1
+        now += 4
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="limited",
+            error_category="rate_limited",
+            retry_after_seconds=2,
+        )
+
+    async def sleeper(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(module, "_search_tavily", limited)
+    outcome = await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        3,
+        retry_policy=RetryPolicy(max_attempts=3, max_elapsed_seconds=5),
+        sleeper=sleeper,
+        clock=lambda: now,
+        random_source=lambda: 0,
+    )
+
+    assert outcome.error_category == "rate_limited"
+    assert calls == 1
+    assert waits == []
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_is_a_hard_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def unavailable(query: str, max_results: int, key: str) -> SearchOutcome:
+        nonlocal calls
+        calls += 1
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="down",
+            error_category="provider_unavailable",
+        )
+
+    async def sleeper(delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_search_tavily", unavailable)
+    await module._search_provider_with_retries(
+        "query",
+        5,
+        "tavily",
+        "test-key",
+        2,
+        sleeper=sleeper,
+        random_source=lambda: 0,
+    )
+
+    assert calls == 2
 
 
 @pytest.mark.asyncio

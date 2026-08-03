@@ -33,4 +33,5 @@
 - [Agent 公开文段流式展示与有效来源增量](2026-07-29-008-streamed-process-effective-sources.md)
 - [OTel GenAI 语义约定属性名对齐](2026-08-03-036-issue-35-otel-genai-conventions.md)
 - [robots 门禁的 per-origin 锁分片](2026-08-04-037-issue-37-robots-per-origin-lock.md)
+- [Web 搜索 Provider 重试策略与 Retry-After](2026-08-04-038-issue-39-web-retry-policy.md)
 - [开发记录模板](TEMPLATE.md)
