@@ -1115,6 +1115,47 @@ async def test_single_fact_fast_path_downgrades_to_full_plan_on_research_more(
     assert scenario.structured_calls.get("verifier", 0) >= 2
 
 
+def test_realtime_fact_intent_keeps_fast_path_without_freshness_override() -> None:
+    # 回归锁定 #31：注入当前日期曾让模型判 need_search=false，schema 随之锁死
+    # evidence_depth=multi_source / fast_search=None；再由 _freshness_required()
+    # 把 need_search 翻成 true，就造出一个必然退化为完整链路的状态。
+    # 修好后模型自己判 single_fact，覆盖分支不再进入。
+    intent = IntentResult(
+        task_type="fact_lookup",
+        need_search=True,
+        channels=["web"],
+        use_history=False,
+        evidence_depth="single_fact",
+        fast_search={"query": "2026年8月3日 星期几", "channel": "web"},
+        summary="确认今天的日期。",
+    ).model_dump()
+
+    # 关键词正则仍会命中「今天」，但模型已判 need_search=true，覆盖分支不进入。
+    assert nodes._freshness_required("今天是几号") is True
+    request = nodes._fast_search_request({"intent": intent})  # type: ignore[arg-type]
+    assert request is not None
+    assert request["query"] == "2026年8月3日 星期几"
+    assert request["channel"] == "web"
+
+
+def test_freshness_override_alone_cannot_reach_fast_path() -> None:
+    # 覆盖逻辑只能强制搜索，不能凭空造出 fast_search（服务端不得代猜查询），
+    # 因此由正则触发的搜索必然走完整链路。这条固定该边界，避免日后误加兜底猜测。
+    intent = IntentResult(
+        task_type="direct_answer",
+        need_search=False,
+        channels=[],
+        use_history=False,
+        evidence_depth="multi_source",
+        fast_search=None,
+        summary="直接回答。",
+    ).model_dump()
+    intent["need_search"] = True
+    intent["channels"] = ["web"]
+
+    assert nodes._fast_search_request({"intent": intent}) is None  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 async def test_writer_stream_empty_returns_structured_failure_without_template_answer(
     monkeypatch: pytest.MonkeyPatch,

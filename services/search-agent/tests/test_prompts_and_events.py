@@ -117,6 +117,9 @@ def test_search_product_routes_by_current_intent_and_prompts_emit_public_summari
     assert "need_search=false" in SUPERVISOR_PROMPT
     assert "当前用户消息是本轮唯一权威任务" in SUPERVISOR_PROMPT
     assert "不得用关键词命中或固定问答模板" in SUPERVISOR_PROMPT
+    assert "它本身不是可直接作答的事实依据" in SUPERVISOR_PROMPT
+    assert "当用户所问的答案本身就是实时事实" in SUPERVISOR_PROMPT
+    assert "必须 need_search=true 并按单事实取证" in SUPERVISOR_PROMPT
     assert "不使用固定模板" in SUPERVISOR_PROMPT
     assert "已经通过正文质量检查" in VERIFIER_PROMPT
     assert "不使用 Markdown" in RESEARCHER_PROMPT
