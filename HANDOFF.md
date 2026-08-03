@@ -1,12 +1,48 @@
 # 项目交接
 
-## 当前结论（2026-08-03，Issue #33 HTML title 回退已实现，等待验收）
+## 当前结论（2026-08-03，Issue #35 OTel GenAI 语义约定对齐已实现，等待验收）
+
+- 本轮唯一功能为
+  [#35](https://github.com/LuzernRR/agent-workbench/issues/35)“span 属性名对齐 OTel GenAI 语义约定”，
+  `Execution Gate: allowed`。开发记录见
+  [036](docs/development/2026-08-03-036-issue-35-otel-genai-conventions.md)，PR
+  [#36](https://github.com/LuzernRR/agent-workbench/pull/36) 已合并 `main`（`c536856`）。
+- **这不是缺陷修复，是把一套私有 schema 的翻译成本从下游收回来**。span 属性此前全用项目自定义
+  camelCase（`modelId`/`inputTokens`/`toolName`/`agent`），任何 OTel 后端都不认识；接 Langfuse /
+  Phoenix / Jaeger 各需单独写映射规则且互不通用。改前 `grep gen_ai app/` 命中数为 0。
+- 六个属性迁到 `gen_ai.*`：`modelId→gen_ai.request.model`、
+  `inputTokens→gen_ai.usage.input_tokens`、`outputTokens→gen_ai.usage.output_tokens`、
+  `toolName→gen_ai.tool.name`、`toolCallId→gen_ai.tool.call.id`、`agent→gen_ai.agent.name`。
+  按 span kind 注入 `gen_ai.operation.name`：`model→chat`、`tool→execute_tool`、`node→invoke_agent`。
+- **`run` span 有意不设 `gen_ai.operation.name`**：它是本项目的编排根，不对应约定枚举中的任何 GenAI
+  操作类型。硬塞近似值会让后端把编排根和真正的 agent 节点混为一类，比留空更糟；已加测试锁定。
+- `gen_ai.system` 由新增纯函数 `gen_ai_system(base_url)` 从 hostname 后缀判定，**不硬编码
+  `"deepseek"`**——Provider 由 `config/*.local.json` 决定且可换，硬编码会在换 Provider 后静默说谎。
+  后缀必须落在域名边界上：`api.deepseek.com.evil.example` 与 `notdeepseek.com` 都命中 `_OTHER`。
+- **事件协议字段名零改动**。`_ATTRIBUTE_KEYS` 仍按事件字段名过滤，翻译只发生在 span 输出层；
+  `nodes.py`/`deepseek.py` 的 `runtime_event` 调用点、NDJSON 事件流、BFF 投影、前端 reducer 全未动。
+  隐私门控 `_assert_public` 仍对**原始键**复核，判定基准未变。
+- fail-safe：`deepseek.py` 的 `_gen_ai_system()` 包住 `runtime_config()`，配置不可读时降级 `_OTHER`。
+  这层必要——`_record_model_span` 在模型调用的成功与失败路径上都会被调，它自己抛异常会把「观测缺失」
+  升级成「模型调用失败」。
+- 门禁：`pytest -q` **417 passed**（改前 408，本轮 +9）、`ruff check .` 全通过、`compileall -q app`
+  exit 0。新增反向断言（`"modelId" not in span.attributes` 等）确保后端不会同时看到两套 schema。
+- 未采纳约定中仍 experimental 的属性（`gen_ai.request.temperature`、
+  `gen_ai.response.finish_reasons` 等）；`costUsd`/`totalTokens`/`attempts`/`durationMs` 保持自定义名，
+  约定中无对应项，强套 `gen_ai.*` 前缀会让后端误以为是标准字段。
+- 顺带清掉 `scripts/title_probe.py` 中 #34 遗留的未使用 `trafilatura` import（ruff F401）。
+- 未改 robots / SSRF / URL policy 任何门禁逻辑，未新增网络出口，全部既有安全测试通过。
+- 下一功能执行门：阻塞（等 #35 验收；随后阶段 4 性能优化按序排队：`asyncio.as_completed` 先到先用、
+  per-page 超时分层、HTTP/2 + keep-alive + gzip、race DuckDuckGo 代替串行降级、短期结果缓存）。
+
+## 当前结论（2026-08-03，Issue #33 HTML title 回退已验收合并）
 
 - 本轮唯一功能为
   [#33](https://github.com/LuzernRR/agent-workbench/issues/33)“fetch_page: trafilatura metadata title
   丢失日期，需回退到 HTML `<title>` 标签”，`Execution Gate: allowed`。开发记录见
   [035](docs/development/2026-08-03-035-issue-33-html-title-fallback.md)，PR
-  [#34](https://github.com/LuzernRR/agent-workbench/pull/34)。
+  [#34](https://github.com/LuzernRR/agent-workbench/pull/34)（已合并 `main`，`0eac310`）。用户
+  2026-08-03 回复「验收，继续下一个」，#33 验收通过。
 - **Writer 没有出错，错在上游的证据提取**。7 次「今天是几号」实测：2/7 返回「无法确认今天的日期」——
   这是 Writer 严格遵守 WRITER_PROMPT「每个事实性陈述必须能由来源支持」的**正确**行为。另外 5/7
   「正确」答案实际违反了该规则（靠 URL 路径猜日期），属偶然正确。系统此前是 71% 的偶然正确率。
@@ -31,7 +67,7 @@
   `根据万年日历查询，今天是2026年8月3日，星期一，农历六月廿一（丙午年乙未月辛亥日）[来源1]`，
   `verificationPassed=true`、`isPrefix=True`、`streamedEqualsFinal=True`。
 - 未改 robots / SSRF / URL policy 任何门禁逻辑，未新增网络出口，全部既有安全测试通过。
-- 下一功能执行门：阻塞（等 #33 验收；随后阶段 3 OTel GenAI 语义约定对齐起按序排队）。
+- 下一功能执行门：放行（#33 已验收；阶段 3 OTel GenAI 语义约定对齐已作为 #35 完成，见本文件顶部）。
 
 ## 当前结论（2026-08-03，Issue #31 单事实单次检索已实现，等待验收）
 
