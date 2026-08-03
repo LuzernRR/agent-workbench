@@ -160,9 +160,9 @@ async def test_structured_call_emits_one_model_span_covering_all_attempts(
     span = model_spans[0]
     assert span.name == "model:supervisor"
     assert span.status == "ok"
-    assert span.attributes["modelId"] == "test-model"
-    assert span.attributes["inputTokens"] == 30
-    assert span.attributes["outputTokens"] == 5
+    assert span.attributes["gen_ai.request.model"] == "test-model"
+    assert span.attributes["gen_ai.usage.input_tokens"] == 30
+    assert span.attributes["gen_ai.usage.output_tokens"] == 5
     assert span.attributes["attempts"] == 2
 
 

@@ -277,7 +277,7 @@ async def test_runner_binds_the_tracer_for_the_model_layer_and_unbinds_after() -
     model_spans = [span for span in sink.spans if span.kind == "model"]
     assert len(model_spans) == 1
     assert model_spans[0].name == "model:planner"
-    assert model_spans[0].attributes["inputTokens"] == 7
+    assert model_spans[0].attributes["gen_ai.usage.input_tokens"] == 7
     # model span 挂在 run root 之下，与 node/tool span 同源。
     assert model_spans[0].trace_id == "run_1"
     # 事件流不因 model span 增加任何事件。

@@ -15,6 +15,7 @@ from app.observability.trace import (
     RunTracer,
     TracerFactory,
     bind_tracer,
+    gen_ai_system,
     record_model_call,
     span_now,
     tracing_enabled,
@@ -74,7 +75,8 @@ def test_tracer_derives_node_spans_from_started_and_completed() -> None:
     assert span.started_at == "2026-08-01T00:00:00Z"
     assert span.ended_at == "2026-08-01T00:00:01Z"
     assert span.attributes["durationMs"] == 1000
-    assert span.attributes["agent"] == "planner"
+    assert span.attributes["gen_ai.agent.name"] == "planner"
+    assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
 
 
 def test_tracer_marks_failed_node_span_as_error_with_reason_code() -> None:
@@ -114,6 +116,39 @@ def test_tracer_derives_tool_spans_and_terminal_status() -> None:
         assert span.kind == "tool"
         assert span.name == "web_search"
         assert span.status == expected
+        assert span.attributes["gen_ai.tool.name"] == "web_search"
+        assert span.attributes["gen_ai.tool.call.id"] == call_id
+        assert span.attributes["gen_ai.operation.name"] == "execute_tool"
+        assert "toolName" not in span.attributes
+        assert "toolCallId" not in span.attributes
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://api.deepseek.com/v1", "deepseek"),
+        ("https://api.openai.com/v1", "openai"),
+        ("https://api.anthropic.com", "anthropic"),
+        # 自建网关、代理或未收录厂商按 OTel 约定记 _OTHER，绝不猜测。
+        ("https://llm-gateway.internal.corp/v1", "_OTHER"),
+        ("http://127.0.0.1:8000/v1", "_OTHER"),
+        ("", "_OTHER"),
+        # 后缀必须落在域名边界上，不能被仿冒域命中。
+        ("https://api.deepseek.com.evil.example/v1", "_OTHER"),
+        ("https://notdeepseek.com/v1", "_OTHER"),
+    ],
+)
+def test_gen_ai_system_is_derived_from_base_url_host(base_url: str, expected: str) -> None:
+    assert gen_ai_system(base_url) == expected
+
+
+def test_run_span_carries_no_gen_ai_operation_name() -> None:
+    # run 是本项目的编排根，不对应任何 OTel GenAI 操作类型；不硬塞一个值。
+    sink = RecordingSink()
+    tracer = RunTracer("run_1", sink=sink)
+    tracer.observe(event("run.completed", responseStatus="completed"))
+    root = tracer.finish()
+    assert "gen_ai.operation.name" not in root.attributes
 
 
 def test_tracer_never_copies_query_text_or_result_payloads_into_attributes() -> None:
@@ -364,9 +399,16 @@ def test_model_span_is_recorded_under_the_bound_tracer() -> None:
     assert span.status == "ok"
     assert span.started_at == "2026-08-01T00:00:00Z"
     assert span.ended_at == "2026-08-01T00:00:02Z"
-    assert span.attributes["modelId"] == "deepseek-v4"
-    assert span.attributes["inputTokens"] == 10
+    assert span.attributes["gen_ai.request.model"] == "deepseek-v4"
+    assert span.attributes["gen_ai.usage.input_tokens"] == 10
+    assert span.attributes["gen_ai.usage.output_tokens"] == 5
+    assert span.attributes["gen_ai.operation.name"] == "chat"
+    # 未显式传 system 时按 OTel 约定降级为 _OTHER，不猜测厂商。
+    assert span.attributes["gen_ai.system"] == "_OTHER"
     assert span.attributes["attempts"] == 1
+    # 旧的自定义名不得再出现，否则后端会同时看到两套 schema。
+    assert "modelId" not in span.attributes
+    assert "inputTokens" not in span.attributes
 
 
 def test_model_span_recording_is_a_noop_when_no_tracer_is_bound() -> None:
@@ -390,6 +432,7 @@ def test_model_span_drops_attributes_outside_the_allowlist() -> None:
     tracer.record_model_call(
         role="writer",
         model_id="m",
+        system="deepseek",
         started_at="2026-08-01T00:00:00Z",
         ended_at="2026-08-01T00:00:01Z",
         status="ok",
@@ -397,7 +440,8 @@ def test_model_span_drops_attributes_outside_the_allowlist() -> None:
     )
 
     span = sink.spans[-1]
-    assert span.attributes["inputTokens"] == 3
+    assert span.attributes["gen_ai.usage.input_tokens"] == 3
+    assert span.attributes["gen_ai.system"] == "deepseek"
     assert "messages" not in span.attributes
     assert "summary" not in span.attributes
 
