@@ -299,6 +299,7 @@ class SearchState(TypedDict, total=False):
     plan_revision: int
     plan_ready: bool
     plan_error_code: str | None
+    fast_path: bool  # 本轮是否走单事实快路径；退回完整规划后必须复位为 False
     pending_plan_step_ids: list[str]
     searches: list[SearchRequest]  # 已接受的查询+渠道历史；去重以二者组合为准
     pending_searches: list[SearchRequest]  # 当前轮待执行的结构化查询；完成后清空
@@ -403,6 +404,7 @@ def initial_state(
         plan_revision=0,
         plan_ready=False,
         plan_error_code=None,
+        fast_path=False,
         pending_plan_step_ids=[],
         round=0,
         sufficient=False,

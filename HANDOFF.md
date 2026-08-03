@@ -1,6 +1,71 @@
 # 项目交接
 
-## 当前结论（2026-08-02，Issue #24 工具过程文案单一真相源已验收关闭）
+## 当前结论（2026-08-03，Issue #28 单事实快路径已实现，等待验收）
+
+- 本轮唯一功能为
+  [#28](https://github.com/LuzernRR/agent-workbench/issues/28)“Supervisor 增加 evidence_depth 分层，
+  单事实问题走 1 次搜索快路径”，`Execution Gate: allowed`。目标是让**链路成本匹配问题复杂度**，
+  不是减少搜索：`single_fact` 仍然真实联网检索、仍然读正文、仍然过 Verifier 硬门禁。
+- `IntentResult` 新增两个必填字段 `evidence_depth: single_fact|multi_source` 与
+  `fast_search: PlannedSearch | None`，由 `model_validator` 锁死组合：不搜索 ⇒ 必须 multi_source +
+  fast_search=null；single_fact ⇒ 必须恰好一个渠道、必须给 fast_search、且 `fast_search.channel ∈
+  channels`。分层由 Supervisor **语义判定**，服务端不写关键词表，也从不代猜查询文本。
+- 新增两个**确定性节点**（不调模型、不发公开摘要）：`plan_fast_search` 用 Supervisor 给出的
+  query/channel 直接建 1 步计划；`accept_fast_evidence` 把本轮读到正文的 Evidence 从 `read` 迁移到
+  `accepted`。后者是本轮的关键发现——完整链路的 `read → accepted` 迁移由 Reflector/Source Curator
+  完成（`nodes.py:2471`），而 `answerable_evidence()` 只接受 `accepted/cited`；跳过 Reflector 却不补
+  这一步，快路径的证据将永远不可作答。
+- 新增显式 `fast_path: bool` 状态位：`plan_fast_search` 置 True，`plan_research` 的**每个**返回路径
+  清 False。若不这么做而让路由重读 `intent`，一旦降级到完整链路会被 single_fact 条件反复命中，
+  永远回不去。
+- **目标从「2 次模型调用」下调为 3 次**（intent + compose + verify），并已记入 Issue #28。原因是两个
+  硬门禁（`nodes.py:2530`、`nodes.py:2585` 的 missingChannels 检查）都位于模型节点 `verify` 内部，
+  用户明令不得绕过。省下的是 Planner + Reflector（+ Source Curator）与最多 2 轮补搜，这才是延迟主体。
+- 快路径节点序列：`load_context → classify_intent → plan_fast_search → mark_plan_running →
+  merge_research → accept_fast_evidence → compose → verify → finalize`，1 次工具调用。任一环节不成立
+  （缺 fast_search、渠道非法、预算为 0、计划校验失败、没读到正文、verify 判 research_more）都自动退
+  回完整链路，不自行编造查询、不凭记忆作答。
+- Prompt 版本 `2026-08-03.v41-supervisor-evidence-depth`，只追加判据说明与约束，不含任何固定问答模板。
+- 门禁：Search Agent `390 passed`；Ruff `All checks passed`；compileall 0；`git diff --check` 0；
+  7 个改动文件均为 UTF-8 + LF + 无 BOM。前端安全性由既有 `reducer.ts` 的 `sourcePresentations.size &&`
+  守卫保证：跳过 reflect 不清空 UI，也不逼前端自造过程文案（`AGENTS.md:50`）。
+- 遗留：`nodes.py:394` `_freshness_required()` 关键词正则仍覆盖 Supervisor 语义，按用户要求待本分层
+  验证稳定后单独开 Issue 移除。阶段 2–5（Writer 流式、researcher 降 effort、`asyncio.as_completed`
+  先到先用、prompt-caching 等）按序排队，一 Issue 一 feature。
+- 详见 `docs/development/2026-08-03-032-issue-28-single-fact-fast-path.md`。
+
+## 上一轮结论（2026-08-03，Issue #25 误标 Content-Type 网页无法读取正文，等待验收）
+
+- 本轮唯一功能为
+  [#25](https://github.com/LuzernRR/agent-workbench/issues/25)“修复被误标 Content-Type 的网页无法
+  读取正文，导致证据为空”。只改 `services/search-agent/app/tools/fetch_page.py` 与其测试，不动
+  事件契约、Prompt 与任何 tracked 共享配置。
+- 这是一个**正确性缺陷伪装成的性能问题**：类型门禁误拒可读页面 → `web.py:65` 跳过 →
+  `evidence_count=0` → Reflector 判 insufficient → 再规划一轮 → 触顶 `MAX_ITERATIONS` → partial、
+  0 引用。实测单次 run 38-73s，其中 67% 花在工具调用。延迟是重试的结果，不是原因。
+- 两类误判已修复：其一，RFC 9110 §5.2 允许把重复字段行按逗号合并（CDN 会发
+  `text/html, text/html`），旧 `.split(";",1)[0]` 解析不出白名单类型；其二，
+  `application/octet-stream` 是“服务器没主动标注”的默认值，实测有站点用它返回真 HTML。现按三层
+  判定：明确二进制大类**不读 body** 直接拒绝 → 白名单文本照旧接受 → 其余给一次首 512 字节嗅探。
+- 安全上的关键点：嗅探**必须在流式读取中做**。本轮中途曾用 `await response.aread()` 实现嗅探，
+  那会在体积上限生效前把整页读进内存，等于为判类型引入一条无界内存路径，且恰好作用在最可疑的
+  那批响应上。已改为边流式读边判，`MAX_RESPONSE_BYTES` 全程有效；既有
+  `test_declared_oversized_response_is_rejected_before_buffering` 仍通过。另：状态码 >= 400 不做
+  类型门禁，避免用“不支持的响应类型”掩盖真实 HTTP 失败原因。
+- `fetch_pages` 曾被改为 `asyncio.wait` 早退（新增 `success_target`），**已还原**为原本的
+  `asyncio.gather`：全仓 grep 确认无任何调用方传该参数，`target` 恒等于 `len(urls)`，行为与
+  `gather` 完全一致，属没有调用方的推测性代码。早退需连同过量提供候选的调用方一起改（阶段 4）。
+- 门禁：Search Agent `384 passed`（改前 378，本轮 +6）；Ruff `All checks passed`；compileall 0；
+  `git diff --check` 0。真实站点复验 `m.tthuangli.com` 由 `不支持的响应类型：application/octet-stream`
+  变为 `ok=True status=200`。`packages/contracts/python` 因当前 venv 缺 `jsonschema` 无法收集，
+  属预存环境问题，本轮未改动该目录。
+- 未修复且已记录：`www.timeanddate.com` 仍 `HTTP 403`（反爬，与本 Issue 无关，不声称修复）；
+  `web_search.py:383-385` 的 `auth_required` 未设上限，401 会走遍整个 Key 池；`reducer.ts:338`
+  导致点击发送后耗时显示空窗；`nodes.py:394` `_freshness_required()` 关键词正则覆盖 Supervisor
+  语义。四项各自另开 Issue，均未并入本轮。
+- 详见 `docs/development/2026-08-03-031-issue-25-mislabeled-content-type.md`。
+
+## 上一轮结论（2026-08-02，Issue #24 工具过程文案单一真相源已验收关闭）
 
 - 本轮唯一功能为
   [#24](https://github.com/LuzernRR/agent-workbench/issues/24)“收敛工具过程文案到单一真相源，移除
@@ -26,7 +91,7 @@
 - 详见 `docs/development/2026-08-02-030-issue-24-process-text-single-source.md`。
 - 验收：用户 2026-08-02 回复“通过”，#24 已 accepted 并以 completed 关闭，下一功能执行门放行。
 
-## 上一轮结论（2026-08-01，Issue #23 可观测性 / 可选 LangSmith / 完整离线评测已验收关闭）
+## 历史结论（2026-08-01，Issue #23 可观测性 / 可选 LangSmith / 完整离线评测已验收关闭）
 
 - 本轮唯一功能为
   [#23](https://github.com/LuzernRR/agent-workbench/issues/23)“实现可观测性、可选 LangSmith

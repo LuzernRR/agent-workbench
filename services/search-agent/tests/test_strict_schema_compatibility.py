@@ -85,6 +85,8 @@ def test_intent_route_requires_channels_only_for_research() -> None:
         need_search=False,
         channels=[],
         use_history=False,
+        evidence_depth="multi_source",
+        fast_search=None,
         summary="直接回答当前问题",
     )
     research = IntentResult(
@@ -92,6 +94,8 @@ def test_intent_route_requires_channels_only_for_research() -> None:
         need_search=True,
         channels=["web"],
         use_history=False,
+        evidence_depth="multi_source",
+        fast_search=None,
         summary="检索当前资料",
     )
 
@@ -103,6 +107,8 @@ def test_intent_route_requires_channels_only_for_research() -> None:
             need_search=False,
             channels=["web"],
             use_history=False,
+            evidence_depth="multi_source",
+            fast_search=None,
             summary="无效直接路由",
         )
     with pytest.raises(ValidationError):
@@ -111,8 +117,75 @@ def test_intent_route_requires_channels_only_for_research() -> None:
             need_search=True,
             channels=[],
             use_history=False,
+            evidence_depth="multi_source",
+            fast_search=None,
             summary="无效搜索路由",
         )
+
+
+def test_single_fact_requires_fast_search_and_single_channel() -> None:
+    base = {
+        "task_type": "research",
+        "need_search": True,
+        "use_history": False,
+        "summary": "检索当前日期",
+    }
+    # A1：single_fact 未给出 fast_search 必须被拒绝。
+    with pytest.raises(ValidationError, match="fast_search"):
+        IntentResult(**base, channels=["web"], evidence_depth="single_fact", fast_search=None)
+    # A2：single_fact 只允许一个渠道。
+    with pytest.raises(ValidationError, match="一个渠道"):
+        IntentResult(
+            **base,
+            channels=["web", "x"],
+            evidence_depth="single_fact",
+            fast_search={"query": "今天几号", "channel": "web"},
+        )
+    # A3：fast_search 渠道必须在 channels 内。
+    with pytest.raises(ValidationError, match="channels 内"):
+        IntentResult(
+            **base,
+            channels=["web"],
+            evidence_depth="single_fact",
+            fast_search={"query": "今天几号", "channel": "x"},
+        )
+    # A4：need_search=false 时 single_fact 与 fast_search 均不得出现。
+    with pytest.raises(ValidationError, match="multi_source"):
+        IntentResult(
+            task_type="direct_answer",
+            need_search=False,
+            channels=[],
+            use_history=False,
+            evidence_depth="single_fact",
+            fast_search=None,
+            summary="直接回答",
+        )
+    with pytest.raises(ValidationError, match="fast_search"):
+        IntentResult(
+            task_type="direct_answer",
+            need_search=False,
+            channels=[],
+            use_history=False,
+            evidence_depth="multi_source",
+            fast_search={"query": "今天几号", "channel": "web"},
+            summary="直接回答",
+        )
+
+
+def test_single_fact_valid_combination_is_accepted() -> None:
+    result = IntentResult(
+        task_type="research",
+        need_search=True,
+        channels=["web"],
+        use_history=False,
+        evidence_depth="single_fact",
+        fast_search={"query": "2026年8月3日 星期几", "channel": "web"},
+        summary="检索今天星期几",
+    )
+    assert result.evidence_depth == "single_fact"
+    assert result.fast_search is not None
+    assert result.fast_search.query == "2026年8月3日 星期几"
+    assert result.fast_search.channel == "web"
 
 
 def test_preflight_rejects_optional_properties_before_provider_call() -> None:

@@ -66,6 +66,15 @@ class IntentResult(StrictModel):
     use_history: bool = Field(
         description="当前消息是否含有必须依赖会话历史才能消解的明确指代"
     )
+    evidence_depth: Literal["single_fact", "multi_source"] = Field(
+        description=(
+            "取证深度：single_fact 表示一次检索读到权威正文即可确定答案；"
+            "multi_source 表示需要多来源交叉。必须按语义判断，不得套关键词或固定问答模板"
+        )
+    )
+    fast_search: PlannedSearch | None = Field(
+        description="single_fact 时唯一一次检索的 query 与渠道；其余情况必须为 null"
+    )
     summary: str = Field(description="一句话说明你如何理解这个任务，面向用户，不超过80字")
 
     @model_validator(mode="after")
@@ -76,6 +85,19 @@ class IntentResult(StrictModel):
             raise ValueError("直接回答不得携带搜索渠道")
         if not self.need_search and self.task_type != "direct_answer":
             raise ValueError("无需搜索的任务必须路由为 direct_answer")
+        # 不搜索就不存在取证深度，只允许中性取值，避免出现无意义组合。
+        if not self.need_search and self.evidence_depth != "multi_source":
+            raise ValueError("无需搜索的任务取证深度必须为 multi_source")
+        if self.evidence_depth == "single_fact":
+            if self.fast_search is None:
+                raise ValueError("single_fact 必须给出 fast_search")
+            # 多渠道即多来源，与「一次检索即可确定」自相矛盾。
+            if len(self.channels) != 1:
+                raise ValueError("single_fact 只允许一个渠道")
+            if self.fast_search.channel not in self.channels:
+                raise ValueError("fast_search 渠道必须在 channels 内")
+        elif self.fast_search is not None:
+            raise ValueError("非 single_fact 不得携带 fast_search")
         return self
 
 

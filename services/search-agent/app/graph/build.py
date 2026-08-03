@@ -23,6 +23,7 @@ from langgraph.types import Send
 from app.events.runtime import runtime_event
 from app.graph.context import RunContext
 from app.graph.nodes import (
+    accept_fast_evidence,
     build_research_work_items,
     classify_intent,
     compose,
@@ -30,10 +31,12 @@ from app.graph.nodes import (
     load_context,
     mark_plan_running,
     merge_research,
+    plan_fast_search,
     plan_research,
     reflect,
     research,
     route_after_compose,
+    route_after_fast_plan,
     route_after_intent,
     route_after_plan,
     route_after_reflect,
@@ -50,9 +53,11 @@ _AGENT_BY_NODE = {
     "load_context": "supervisor",
     "classify_intent": "supervisor",
     "plan_research": "planner",
+    "plan_fast_search": "planner",
     "mark_plan_running": "planner",
     "research": "researcher",
     "merge_research": "researcher",
+    "accept_fast_evidence": "reflector",
     "reflect": "reflector",
     "compose": "writer",
     "verify": "verifier",
@@ -197,6 +202,10 @@ def build_graph(checkpointer: object | None = None):
     graph.add_node("classify_intent", _evented("classify_intent", classify_intent))
     graph.add_node("plan_research", _evented("plan_research", plan_research))
     graph.add_node(
+        "plan_fast_search",
+        _evented("plan_fast_search", plan_fast_search),
+    )
+    graph.add_node(
         "mark_plan_running",
         _evented("mark_plan_running", mark_plan_running),
     )
@@ -204,6 +213,10 @@ def build_graph(checkpointer: object | None = None):
     graph.add_node(
         "merge_research",
         _evented("merge_research", merge_research),
+    )
+    graph.add_node(
+        "accept_fast_evidence",
+        _evented("accept_fast_evidence", accept_fast_evidence),
     )
     graph.add_node("reflect", _evented("reflect", reflect))
     graph.add_node("compose", _evented("compose", compose))
@@ -215,7 +228,16 @@ def build_graph(checkpointer: object | None = None):
     graph.add_conditional_edges(
         "classify_intent",
         route_after_intent,
-        {"plan_research": "plan_research", "compose": "compose"},
+        {
+            "plan_research": "plan_research",
+            "plan_fast_search": "plan_fast_search",
+            "compose": "compose",
+        },
+    )
+    graph.add_conditional_edges(
+        "plan_fast_search",
+        route_after_fast_plan,
+        {"mark_plan_running": "mark_plan_running", "plan_research": "plan_research"},
     )
     graph.add_conditional_edges(
         "plan_research",
@@ -227,8 +249,13 @@ def build_graph(checkpointer: object | None = None):
     graph.add_conditional_edges(
         "merge_research",
         route_after_research,
-        {"mark_plan_running": "mark_plan_running", "reflect": "reflect"},
+        {
+            "mark_plan_running": "mark_plan_running",
+            "reflect": "reflect",
+            "accept_fast_evidence": "accept_fast_evidence",
+        },
     )
+    graph.add_edge("accept_fast_evidence", "compose")
     graph.add_conditional_edges(
         "reflect",
         route_after_reflect,

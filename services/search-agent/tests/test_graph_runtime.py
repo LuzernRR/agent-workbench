@@ -498,6 +498,8 @@ class Scenario:
     need_search: bool = True
     supervisor_channels: list[str] = field(default_factory=lambda: ["web"])
     supervisor_use_history: bool = False
+    supervisor_evidence_depth: str = "multi_source"
+    supervisor_fast_search: dict[str, str] | None = None
     plans: list[list[str]] = field(default_factory=lambda: [["query one"]])
     reflects: list[dict[str, Any]] = field(
         default_factory=lambda: [{
@@ -587,6 +589,8 @@ class Scenario:
                 need_search=self.need_search,
                 channels=self.supervisor_channels if self.need_search else [],
                 use_history=self.supervisor_use_history,
+                evidence_depth=self.supervisor_evidence_depth,
+                fast_search=self.supervisor_fast_search,
                 summary="已判断是否需要联网",
             )
         elif role == "planner":
@@ -968,6 +972,123 @@ async def test_oversized_writer_answer_is_compacted_before_verification(
     verifier_prompt = scenario.structured_messages["verifier"][-1][-1].content
     assert output["answer"] in verifier_prompt
     assert writer_answer not in verifier_prompt
+
+
+def _fast_scenario() -> Scenario:
+    """单事实快路径场景：Supervisor 语义判定 single_fact 并给出唯一检索请求。"""
+
+    return Scenario(
+        supervisor_evidence_depth="single_fact",
+        supervisor_channels=["web"],
+        supervisor_fast_search={"query": "2026年8月3日 星期几", "channel": "web"},
+        plans=[["2026年8月3日 星期几"]],
+        evidence_by_query={"2026年8月3日 星期几": True},
+        writer_answer="今天是 2026 年 8 月 3 日，星期一 [来源1]。",
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_fact_fast_path_uses_one_tool_and_three_model_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _fast_scenario()
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    # A5 / A6：恰好 1 次工具调用、3 次模型调用。
+    assert output["tool_calls"] == 1
+    assert output["model_calls"] == 3
+    # A7：不经过 plan_research 与 reflect。
+    assert scenario.structured_calls.get("planner", 0) == 0
+    assert scenario.structured_calls.get("reflector", 0) == 0
+    visited_nodes = [step["node"] for step in output["steps"]]
+    assert "plan_research" not in visited_nodes
+    assert "reflect" not in visited_nodes
+    assert "plan_fast_search" in visited_nodes
+    # A5（继续）：工具调用恰为该唯一检索请求。
+    assert scenario.tool_executions == ["2026年8月3日 星期几"]
+    assert [s["query"] for s in output["searches"]] == ["2026年8月3日 星期几"]
+    # A8：引用非空且全部指向 Evidence。
+    assert output["citations"], "快路径必须带来源引用"
+    evidence_urls = {item["url"] for item in output["evidence"]}
+    assert all(c["url"] in evidence_urls for c in output["citations"])
+    assert output["response_status"] == "completed"
+    assert output["stop_reason"] == "VERIFIED"
+    # 无 plan_research / reflect 事件。
+    assert not [e for e in events if e.get("node") == "plan_research"]
+    assert not [e for e in events if e.get("node") == "reflect"]
+
+
+@pytest.mark.asyncio
+async def test_single_fact_fast_path_preserves_plan_and_evidence_for_frontend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _fast_scenario()
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    plan = output["plan"]
+    assert plan is not None
+    assert len(plan["steps"]) == 1
+    step = plan["steps"][0]
+    assert step["status"] == "done"
+    assert step["query"] == "2026年8月3日 星期几"
+    assert step["channel"] == "web"
+    assert step["reason_code"] is None
+    evidence = output["evidence"]
+    assert len(evidence) == 1
+    assert evidence[0]["status"] == "cited"
+    assert evidence[0]["query"] == "2026年8月3日 星期几"
+    assert evidence[0]["url"] == "https://example.com/1"
+    assert scenario.checkpoint_values["fast_path"] is True
+    # 思考记录包含唯一确定性快规划步骤。
+    fast_steps = [s for s in output["steps"] if s["node"] == "plan_fast_search"]
+    assert len(fast_steps) == 1
+    assert fast_steps[0]["kind"] == "deterministic"
+    assert fast_steps[0]["detail"] == "fast_path_steps=1"
+
+
+@pytest.mark.asyncio
+async def test_single_fact_fast_path_with_zero_evidence_falls_back_to_full_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _fast_scenario()
+    scenario.evidence_by_query = {"2026年8月3日 星期几": False}
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    # 首次检索零已读 → 不视为快路径证据，退回 reflect。
+    visited_nodes = [step["node"] for step in output["steps"]]
+    assert "reflect" in visited_nodes
+    assert "accept_fast_evidence" not in visited_nodes
+    # 快路径不凭空产出完成态；证据缺失由完整链路兜底。
+    assert scenario.structured_calls.get("reflector", 0) >= 1
+    assert scenario.structured_calls.get("planner", 0) >= 1
+    assert output["evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_single_fact_fast_path_downgrades_to_full_plan_on_research_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _fast_scenario()
+    # 首次核验判定证据不足，第二次通过。
+    scenario.verifier_actions = ["research_more", "pass"]
+    scenario.plans = [["2026年8月3日 星期几"], ["query two"]]
+    scenario.evidence_by_query = {
+        "2026年8月3日 星期几": True,
+        "query two": True,
+    }
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    # A9：verify 判 research_more 后退回 plan_research，完整链路继续。
+    visited_nodes = [step["node"] for step in output["steps"]]
+    assert "plan_fast_search" in visited_nodes
+    assert "plan_research" in visited_nodes
+    assert scenario.structured_calls.get("planner", 0) == 1
+    # 退回后不再当作快路径：reflect 重新参与。
+    assert "reflect" in visited_nodes
+    assert output["fast_path"] is False
+    assert scenario.checkpoint_values["fast_path"] is False
+    assert output["tool_calls"] >= 1
+    assert scenario.structured_calls.get("verifier", 0) >= 2
 
 
 @pytest.mark.asyncio

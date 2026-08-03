@@ -974,9 +974,12 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
 
 
 async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
+    # 到达 Planner 即不再走单事实快路径；后续轮次一律按完整链路判定。
+    fast_path_clear = {"fast_path": False}
     limit = budget_reason(state, reserve_model_calls=1)
     if limit:
         return {
+            **fast_path_clear,
             "pending_searches": [],
             "pending_queries": [],
             "replan_required": False,
@@ -990,6 +993,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     )
     if remaining_tool_calls <= 0:
         return {
+            **fast_path_clear,
             "pending_searches": [],
             "pending_queries": [],
             "replan_required": False,
@@ -1158,6 +1162,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
             plan = None
         if plan is None:
             return {
+                **fast_path_clear,
                 **memory_patch,
                 "pending_searches": [],
                 "pending_queries": [],
@@ -1191,6 +1196,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     ):
         history.append(current_plan)
     return {
+        **fast_path_clear,
         **memory_patch,
         "searches": prior_searches + audit_searches,
         "pending_searches": [],
@@ -1212,6 +1218,170 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
             "model",
             _effective_process_text(result.summary),
             f"new_searches={len(fresh_searches)}",
+        ),
+    }
+
+
+def _fast_search_request(state: SearchState) -> SearchRequest | None:
+    """取 Supervisor 判定的单事实检索请求；无效时返回 None 以退回完整链路。"""
+
+    intent = state.get("intent") or {}
+    if intent.get("evidence_depth") != "single_fact":
+        return None
+    fast = intent.get("fast_search")
+    if not isinstance(fast, dict):
+        return None
+    query = " ".join(str(fast.get("query") or "").split())
+    channel = str(fast.get("channel") or "")
+    allowed = intent.get("channels") or []
+    if not query or channel not in allowed:
+        return None
+    return SearchRequest(query=query, channel=channel)  # type: ignore[typeddict-item]
+
+
+async def plan_fast_search(
+    state: SearchState,
+    runtime: Runtime[RunContext],
+) -> dict[str, Any]:
+    """单事实快路径：用 Supervisor 已给出的检索请求直接建 1 步计划。
+
+    这个节点不调用模型。query 与 channel 完全来自 `IntentResult.fast_search`，
+    服务端只做预算裁剪与稳定 ID 分配，不得在此拼接或改写查询文本。
+    """
+
+    request = _fast_search_request(state)
+    remaining_tool_calls = max(
+        0,
+        state.get("max_tool_calls", 6) - state.get("tool_calls", 0),
+    )
+    if request is None or remaining_tool_calls <= 0:
+        # 快路径不可用时不自行降级搜索，交回 Planner 走完整规划。
+        return {
+            "plan_ready": False,
+            "fast_path": False,
+            "replan_required": True,
+            "steps": _step(
+                "plan_fast_search",
+                "deterministic",
+                None,
+                "fast_search_unavailable",
+            ),
+        }
+    iteration = state.get("round", 0) + 1
+    revision = state.get("plan_revision", 0) + 1
+    max_evidence_per_step = runtime.context.config.graph.max_pages_per_call
+    try:
+        plan = build_plan_snapshot(
+            run_id=state["run_id"],
+            iteration=iteration,
+            revision=revision,
+            created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            planned_steps=[{
+                "local_id": "fast_fact",
+                "facet": "单事实取证",
+                "objective": "读取权威正文确认该事实",
+                "query": request["query"],
+                "channel": request["channel"],
+                "depends_on": [],
+                "priority": 100,
+                "evidence_needed": min(2, max_evidence_per_step),
+                "can_parallelize": False,
+            }],
+            allowed_channels=set((state.get("intent") or {}).get("channels") or ["web"]),
+            prior_search_keys={
+                _search_key(item["query"], item["channel"])
+                for item in _state_searches(state)
+            },
+            max_steps=1,
+            max_evidence_per_step=max_evidence_per_step,
+            max_total_evidence=max_evidence_per_step,
+        )
+    except PlanValidationError as exc:
+        return {
+            "plan_ready": False,
+            "fast_path": False,
+            "replan_required": True,
+            "plan_error_code": exc.code,
+            "steps": _step(
+                "plan_fast_search",
+                "deterministic",
+                None,
+                f"rejected={exc.code}",
+            ),
+        }
+    fresh_searches = requests_for_steps(plan["steps"])
+    prior_searches = _state_searches(state)
+    return {
+        "fast_path": True,
+        "searches": prior_searches + [
+            SearchRequest(query=item["query"], channel=item["channel"])
+            for item in fresh_searches
+        ],
+        "pending_searches": [],
+        "queries": [item["query"] for item in prior_searches] + [
+            item["query"] for item in fresh_searches
+        ],
+        "query_channels": {
+            **dict(state.get("query_channels") or {}),
+            **{item["query"]: item["channel"] for item in fresh_searches},
+        },
+        "pending_queries": [],
+        "plan": plan,
+        "plan_history": list(state.get("plan_history") or []),
+        "plan_revision": revision,
+        "plan_ready": True,
+        "plan_error_code": None,
+        "pending_plan_step_ids": [],
+        "round": iteration,
+        "no_progress_count": 0,
+        "replan_required": False,
+        "steps": _step(
+            "plan_fast_search",
+            "deterministic",
+            None,
+            "fast_path_steps=1",
+        ),
+    }
+
+
+async def accept_fast_evidence(
+    state: SearchState,
+    runtime: Runtime[RunContext],
+) -> dict[str, Any]:
+    """单事实快路径的确定性证据接受，不调用模型。
+
+    完整链路由 Reflector / Source Curator 决定哪些已读正文值得采用；快路径没有
+    这一步，因此在此把本轮成功读到正文的 Evidence 从 ``read`` 迁移到
+    ``accepted``。判据是客观的「正文已成功读取」，不是模型意见，所以放在确定性
+    节点里；被拒绝或已进入终态的条目不受影响。
+    """
+
+    del runtime
+    evidence = list(state.get("evidence") or [])
+    accepted: list[Evidence] = []
+    changed_items: list[Evidence] = []
+    for item in evidence:
+        normalized = normalize_evidence(item)
+        if normalized["status"] == "read":
+            normalized, changed = transition_evidence(
+                normalized,
+                "accepted",
+                "FAST_PATH_BODY_READ",
+            )
+            if changed:
+                changed_items.append(normalized)
+        accepted.append(normalized)
+    writer = _event_writer()
+    for item in changed_items:
+        writer(runtime_event("evidence.updated", **evidence_event_payload(item)))
+    return {
+        "evidence": accepted,
+        "sufficient": bool(answerable_evidence(accepted)),
+        "steps": _step(
+            "accept_fast_evidence",
+            "deterministic",
+            None,
+            f"accepted={len(changed_items)}",
         ),
     }
 
@@ -2767,16 +2937,33 @@ async def finalize(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
 def route_after_intent(state: SearchState) -> str:
     if not state.get("need_search"):
         return "compose"
-    return "compose" if budget_reason(state, reserve_model_calls=2) else "plan_research"
+    if budget_reason(state, reserve_model_calls=2):
+        return "compose"
+    # 单事实取证由 Supervisor 语义判定，且必须已给出可用的 fast_search；
+    # 任一条件不成立就走完整规划，绝不由服务端代为猜测查询。
+    if _fast_search_request(state) is not None:
+        return "plan_fast_search"
+    return "plan_research"
 
 
 def route_after_plan(state: SearchState) -> str:
     return "mark_plan_running" if state.get("plan_ready") else "reflect"
 
 
+def route_after_fast_plan(state: SearchState) -> str:
+    return "mark_plan_running" if state.get("plan_ready") else "plan_research"
+
+
 def route_after_research(state: SearchState) -> str:
     if not state.get("stop_reason") and has_todo_steps(state.get("plan")):
         return "mark_plan_running"
+    # 快路径已按 Supervisor 判定完成唯一一次取证；读到正文即交付写作。
+    # 证据不足或渠道缺口仍由后续 verify 的既有硬门禁拦截并退回补搜。
+    if state.get("fast_path") and any(
+        normalize_evidence(item)["status"] in {"read", "accepted", "cited"}
+        for item in (state.get("evidence") or [])
+    ):
+        return "accept_fast_evidence"
     return "reflect"
 
 
