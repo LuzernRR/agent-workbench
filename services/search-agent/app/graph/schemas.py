@@ -233,16 +233,6 @@ class ReflectResult(StrictModel):
     summary: str = Field(description="一句话说明证据评估结论，面向用户，不超过80字")
 
 
-class ComposeResult(StrictModel):
-    """compose 节点产出：基于证据的答案。"""
-
-    answer_markdown: str = Field(
-        description="基于证据的精简中文回答，使用Markdown，必要引用不得省略",
-        min_length=1,
-    )
-    summary: str = Field(description="一句话说明你如何组织了这个回答，面向用户，不超过80字")
-
-
 class VerifyResult(StrictModel):
     """verify 节点产出：核验答案。"""
 

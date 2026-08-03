@@ -69,6 +69,27 @@ function graphemeEvent(item: QueueItem) {
   } satisfies AgentEvent;
 }
 
+// 真实流式的到达速率会持续高于每帧一个字，固定速度会让队列无界积压、
+// 打字机严重落后于生成。因此按积压量提速：积压越多每帧吐得越多，既保证
+// backlog 有界，又保持逐字 append、顺序不变、绝不回写。
+const GRAPHEMES_PER_FRAME = 1;
+const MAX_GRAPHEMES_PER_FRAME = 24;
+const BACKLOG_PER_EXTRA_GRAPHEME = 12;
+
+function pendingGraphemes(queue: QueueItem[]) {
+  let pending = 0;
+  for (const item of queue) {
+    if (item.graphemes) pending += item.graphemes.length - item.offset;
+  }
+  return pending;
+}
+
+function frameBudget(queue: QueueItem[]) {
+  const backlog = pendingGraphemes(queue);
+  const accelerated = GRAPHEMES_PER_FRAME + Math.floor(backlog / BACKLOG_PER_EXTRA_GRAPHEME);
+  return Math.max(GRAPHEMES_PER_FRAME, Math.min(MAX_GRAPHEMES_PER_FRAME, accelerated));
+}
+
 export function createRenderQueue(options: RenderQueueOptions) {
   const requestFrame = options.requestFrame ?? ((callback: () => void) => window.requestAnimationFrame(callback));
   const cancelFrame = options.cancelFrame ?? ((handle: number) => window.cancelAnimationFrame(handle));
@@ -80,6 +101,7 @@ export function createRenderQueue(options: RenderQueueOptions) {
     frame = 0;
     if (disposed) return;
 
+    let budget = frameBudget(queue);
     while (queue.length > 0) {
       const current = queue[0];
       if (!current.graphemes) {
@@ -92,10 +114,12 @@ export function createRenderQueue(options: RenderQueueOptions) {
         continue;
       }
       options.apply(graphemeEvent(current));
+      budget -= 1;
       if (current.offset >= current.graphemes.length) queue.shift();
-      // Always yield after one visible grapheme so React can paint it before
-      // any later text or terminal event is applied.
-      if (queue.length > 0 || (current.graphemes && current.offset < current.graphemes.length)) {
+      // 每帧最多吐 budget 个字，之后让出以便 React 绘制；控制事件仍排在
+      // 所有更早的字之后，durable 顺序不变。
+      if (budget > 0) continue;
+      if (queue.length > 0) {
         frame = requestFrame(drain);
       }
       return;

@@ -12,7 +12,6 @@ from app.events.runtime import (
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     STRUCTURED_ANSWER_MAX_CHARS,
-    ComposeResult,
 )
 from app.llm.deepseek import WRITER_MAX_TOKENS
 from app.prompts.agents import (
@@ -136,17 +135,15 @@ def test_search_product_routes_by_current_intent_and_prompts_emit_public_summari
 
 
 def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> None:
-    generated = ComposeResult(
-        answer_markdown="中" * (ANSWER_MAX_CHARS + 1),
-        summary="已按证据精简回答",
-    )
-
-    # Provider 输出可先完整解析，交付长度由 Verifier 前的确定性边界压缩兜底；
-    # 避免 maxLength 协议漂移把已有真实 Evidence 的运行升级为 run.failed。
-    assert len(generated.answer_markdown) == ANSWER_MAX_CHARS + 1
+    # Writer 走纯 content 流式，模型正文没有 schema 层长度约束；交付长度由
+    # Verifier 前的确定性边界压缩兜底，避免协议漂移把已有真实 Evidence 的
+    # 运行升级为 run.failed。
     assert ANSWER_MAX_CHARS == 760
     assert STRUCTURED_ANSWER_MAX_CHARS == 1100
     assert WRITER_MAX_TOKENS == 2048
+    assert "只输出面向用户的回答正文本身" in WRITER_PROMPT
+    assert "只输出面向用户的回答正文本身" in DEGRADED_WRITER_PROMPT
+    assert "只输出面向用户的回答正文本身" in DIRECT_WRITER_PROMPT
     assert "默认硬上限 760 个 Unicode 字符" in WRITER_PROMPT
     assert "绝不超过 1100 个 Unicode" in WRITER_PROMPT
     assert "不能为压缩篇幅删除必要的 [来源N] 引用" in WRITER_PROMPT

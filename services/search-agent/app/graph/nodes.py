@@ -34,7 +34,6 @@ from app.graph.plan import (
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     STRUCTURED_ANSWER_MAX_CHARS,
-    ComposeResult,
     IntentResult,
     PlanResult,
     ReflectResult,
@@ -60,8 +59,10 @@ from app.graph.state import (
 from app.llm.deepseek import (
     ModelUsage,
     StructuredOutputError,
+    WriterStreamError,
     add_usage,
     invoke_structured,
+    stream_writer_answer,
 )
 from app.persistence.tool_ledger import ToolLedgerSettlement
 from app.prompts.agents import (
@@ -329,6 +330,89 @@ def _compact_answer_markdown(
     if not re.search(r"[。！？!?；;\]]$", candidate):
         candidate = f"{candidate[: max(0, max_chars - 1)].rstrip()}。"
     return candidate[:max_chars]
+
+
+class _AnswerStreamEmitter:
+    """把 Writer 的原始增量转成可安全公开的 append-only 文本。
+
+    公开文本必须始终是最终交付 answer 的前缀，这由三条规则共同保证：
+
+    1. **只在完整句子边界放行。** ``_compact_answer_markdown`` 超限时取的是
+       上限内**最大**的那个边界，因此任何不超过上限的边界都必然被终稿包含。
+       逐字符放行则可能越过终稿的截断点，留下收不回的尾巴。
+    2. **只放行 ``_clean_answer_prefix`` 不会再删的文本。** 终稿会在边界处
+       再删掉悬空标题、空列表标记与未闭合代码块；若这些内容已经公开就收不
+       回了。因此空标题这类文本必须一直压着，直到后续正文让它不再悬空。
+    3. **公开文本按首次出现顺序增量归一 ``[来源N]``。** finalize 的
+       ``_answer_citations`` 会把稀疏编号归一为连续编号，那是一次正文中段
+       替换。这里用同一套规则增量完成同一映射，且 State 仍保留原始编号，
+       归一化全程只发生一次，两条路径必然收敛到同一文本。
+
+    公开文本还从不以空白结尾（尾部空白留在 tail 里等下一段正文），因为终稿
+    在边界处会 ``rstrip``，先放行空白同样是不可回收的差异。
+    """
+
+    def __init__(self, evidence: list[Evidence], max_chars: int) -> None:
+        self._evidence = evidence
+        self._max_chars = max_chars
+        self._url_to_normalized: dict[str, int] = {}
+        self._original_to_normalized: dict[int, int] = {}
+        self._tail = ""
+        self._raw_published = 0
+        self._raw_text = ""
+        self._published = ""
+
+    @property
+    def published(self) -> str:
+        return self._published
+
+    def _normalize_reference(self, original: int) -> str:
+        known = self._original_to_normalized.get(original)
+        if known is not None:
+            return f"[来源{known}]"
+        index = original - 1
+        if index < 0 or index >= len(self._evidence):
+            # 解析不到真实 Evidence 的编号原样保留，与 _answer_citations 一致。
+            return f"[来源{original}]"
+        item = self._evidence[index]
+        normalized = self._url_to_normalized.get(item["url"])
+        if normalized is None:
+            normalized = len(self._url_to_normalized) + 1
+            self._url_to_normalized[item["url"]] = normalized
+        self._original_to_normalized[original] = normalized
+        return f"[来源{normalized}]"
+
+    def push(self, chunk: str) -> str:
+        """吃进一段原始增量，返回本次可公开的文本（可能为空）。"""
+
+        self._tail += chunk
+        if not self._raw_published:
+            # 终稿以 strip() 开头，行首空白不能进入公开流。
+            self._tail = self._tail.lstrip()
+        cut = 0
+        for match in _COMPLETE_ANSWER_BOUNDARY.finditer(self._tail):
+            if self._raw_published + match.end() > self._max_chars:
+                break
+            cut = match.end()
+        if not cut:
+            return ""
+        # 尾部空白留到下一段，公开文本必须以正文字符结尾。
+        raw_ready = self._tail[:cut].rstrip()
+        if not raw_ready:
+            return ""
+        candidate = self._raw_text + raw_ready
+        if _clean_answer_prefix(candidate) != candidate:
+            # 终稿会在这里再删一次，先压着等后续正文补齐。
+            return ""
+        self._tail = self._tail[len(raw_ready):]
+        self._raw_published += len(raw_ready)
+        self._raw_text = candidate
+        ready = _CITATION_REFERENCE.sub(
+            lambda match: self._normalize_reference(int(match.group(1))),
+            raw_ready,
+        )
+        self._published += ready
+        return ready
 
 
 def _answer_citations(
@@ -2633,15 +2717,39 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     if state.get("verification_action") == "rewrite" and state.get("verification_issue"):
         human += f"\n\n上一轮核验问题（必须修复）：{state['verification_issue']}"
 
+    repairing = state.get("verification_action") == "rewrite"
+    # 改写产出的是另一段答案，不能续写在已可见消息上；前端据此换新 messageId。
+    compose_round = int(state.get("repair_count", 0) or 0) + (1 if repairing else 0)
+    delivery_limit = _answer_delivery_limit(state["question"])
+    emitter = _AnswerStreamEmitter(evidence, delivery_limit)
+    event_writer = _event_writer()
+    raw_parts: list[str] = []
+    usage: ModelUsage | None = None
+    started = False
     try:
-        result, usage = await invoke_structured(
-            "writer",
-            ComposeResult,
+        async for item in stream_writer_answer(
             [SystemMessage(content=system), HumanMessage(content=human)],
             model_id=state.get("model_id") or None,
-            allow_repair=_allow_structured_repair(state),
-        )
-    except StructuredOutputError as exc:
+        ):
+            if isinstance(item, ModelUsage):
+                usage = item
+                break
+            raw_parts.append(item)
+            delta = emitter.push(item)
+            if not delta:
+                continue
+            if not started:
+                started = True
+                event_writer(runtime_event(
+                    "answer.started",
+                    composeRound=compose_round,
+                ))
+            event_writer(runtime_event(
+                "answer.delta",
+                composeRound=compose_round,
+                delta=delta,
+            ))
+    except WriterStreamError as exc:
         stop_reason = state.get("stop_reason") or "OUTPUT_INVALID"
         return {
             "answer": None,
@@ -2652,18 +2760,19 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
             "verification_action": "",
             "stop_reason": stop_reason,
             **_structured_usage_patch(state, exc.usage),
-            "steps": _step(
-                "compose",
-                "deterministic",
-                None,
-                "structured_output_invalid",
-            ),
+            "steps": _step("compose", "deterministic", None, "writer_stream_empty"),
         }
-    repairing = state.get("verification_action") == "rewrite"
-    answer = _compact_answer_markdown(
-        result.answer_markdown,
-        max_chars=_answer_delivery_limit(state["question"]),
-    )
+    if usage is None:
+        usage = ModelUsage()
+    raw_answer = "".join(raw_parts)
+    # State 保留模型的原始 [来源N] 编号，归一化仍只在 finalize 发生一次；
+    # 公开流由 emitter 按同一套「首次出现顺序」规则独立归一，两者必然一致。
+    answer = _compact_answer_markdown(raw_answer, max_chars=delivery_limit)
+    if started:
+        event_writer(runtime_event(
+            "answer.completed",
+            composeRound=compose_round,
+        ))
     return {
         "answer": answer,
         "answer_source": "model",
@@ -2675,9 +2784,9 @@ async def compose(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         "steps": _step(
             "compose",
             "model",
-            _effective_process_text(result.summary),
-            f"answer_chars={len(result.answer_markdown)} delivered_chars={len(answer)} "
-            f"sources={len(evidence)}",
+            None,
+            f"answer_chars={len(raw_answer)} delivered_chars={len(answer)} "
+            f"streamed_chars={len(emitter.published)} sources={len(evidence)}",
         ),
     }
 

@@ -10,7 +10,6 @@ from openai import BadRequestError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.graph.schemas import (
-    ComposeResult,
     IntentResult,
     PlanResult,
     ReflectResult,
@@ -19,12 +18,13 @@ from app.graph.schemas import (
 )
 from app.llm import deepseek
 
+# 结构化输出只服务于 Agent 的工具调用与内部决策；Writer 产出的是面向用户的
+# 自然语言，走纯 content 流式，因此不在这里登记任何撰写用 schema。
 PRODUCTION_STRUCTURED_SCHEMAS = (
     IntentResult,
     PlanResult,
     ReflectResult,
     SourcePresentationResult,
-    ComposeResult,
     VerifyResult,
 )
 

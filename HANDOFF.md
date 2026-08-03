@@ -1,5 +1,49 @@
 # 项目交接
 
+## 当前结论（2026-08-03，Issue #29 Writer 纯 content 流式已验收，下一功能执行门放行）
+
+- 本轮唯一功能为
+  [#29](https://github.com/LuzernRR/agent-workbench/issues/29)“Writer 走纯 content 流式，回答正文
+  逐块可见”，`Execution Gate: allowed`。开发记录见
+  [033](docs/development/2026-08-03-033-issue-29-writer-content-streaming.md)。
+- 方向由用户纠正后确定：**结构化输出服务于 Agent 的工具调用与内部决策，Writer 产出的是面向用户的
+  自然语言，本就不该套 schema**。据此删除 `ComposeResult`，Writer 改走 `stream_writer_answer`
+  （`stream=True` + `include_usage`，先若干 `str` 增量、最后一个 `ModelUsage` 作终结项）。这同时
+  绕开了「结构化输出与 token 流式不可兼得」这一业界公认冲突，不需要增量解析半成品 JSON。
+- 其它 5 个角色（Supervisor / Planner / Reflector / Verifier / Source Curator）仍走 strict function
+  calling，`PRODUCTION_STRUCTURED_SCHEMAS` 保留这 5 个 schema，未动。
+- 本轮关键设计是 `_AnswerStreamEmitter`：前端已可见消息不可回写，因此公开文本必须始终是终稿 answer
+  的前缀。三条规则各封死一处差异来源——只在完整句子边界放行、只放行 `_clean_answer_prefix` 不会再删
+  的文本、`[来源N]` 按首次出现顺序增量归一（State 仍存原始编号，归一化全程只发生一次）。第二条是
+  复核 `_compact_answer_markdown` 时自查发现的缺口（末尾停在悬空标题会被终稿删掉却已公开），已补测试
+  锁定。
+- 新增 `answer.started/delta/completed` 三个内部事件（只含 `composeRound` 与 `delta`），由 BFF mapper
+  投影为 `message.*`；`answerMessageId()` 在改写轮（`composeRound > 0`）追加 `_r{N}`，避免续写在已
+  可见的上一版答案上。engine 用 `streamedMessageId` 防护，结算只补 citations，不整段重发。
+- 打字机队列改为按积压提速（1 → 最多 24 字/帧），backlog 有界且仍保持逐字 append、顺序不变、不回写。
+- 门禁：`pytest -q` 399 passed、`ruff check .` 全通过、`npx tsc --noEmit` 干净、`npx vitest run`
+  398 passed / 1 skipped、`npm run test:e2e`（mock 3110）16 passed / 3 skipped（skipped 为需真实
+  provider 的 live spec，与基线一致）；14 个改动文件均 UTF-8 + 纯 LF，`git diff --check` 无告警。
+- A5 / A11 已在真实 provider 链路实测（本地未提交代码跑 8101，对照旧提交代码的容器 8080，
+  `promptVersion=2026-08-03.v42-writer-content-streaming` 确认被测的是新代码）：新链路
+  `firstVisible` 由 `answer.delta` 给出、`isPrefix=True`、`streamedEqualsFinal=True`、字段白名单
+  违规 0；旧链路正文只在 `run.completed` 一次性交付（`deltas=0`，`firstVisible=40453ms`）。
+- **但 A5 的实际收益有限**：三次运行的 `firstVisible/total` 为 95%(34107/32438)、90%(50177/45092)、
+  91%(3538/3232)——34s 的运行里流式窗口只有约 1.7s。空窗的 90–95% 属于 Writer 之前的
+  research → reflect → replan 链路，不是 Writer 本身。要真正降低体感等待，得靠缩短前置链路
+  （见下条），Writer 流式只是必要前提。
+- 实测同时印证了用户反馈的「链路太长」：三次运行 `fastPath=False`，**包括跑旧提交代码的容器**，
+  因此不是 #29 引入的回归。「今天是几号」这类单事实问题的 nodeOrder 出现两轮
+  `plan_research → … → reflect`，从未走 `plan_fast_search`/`accept_fast_evidence`；其中一次以
+  `stopReason=MODEL_CALL_LIMIT`、`responseStatus=partial`、`verificationPassed=false`、10 次模型调用
+  结束。根因在 `nodes.py` 的 `_fast_search_request()` 返回 None，即 Supervisor 未给出
+  `evidence_depth="single_fact"`（或 `fast_search` 不合法）——属 #28 的语义判定缺口，单独立 Issue。
+- 用户 2026-08-03 授权「你自己测试一下，然后没问题就可以验收」，自测全绿后受控收口。
+- 下一功能执行门：放行（阶段 3 起按序排队：researcher 降 effort → Verifier 拆分 → run 级
+  `replan_budget`；随后阶段 4/5 与 Item I，一 Issue 一 feature，不得提前开工）。
+- 新立 Issue（尚未开工）：单事实快路径未生效导致链路冗余，须先做成熟产品的设计调研——一次搜索满足
+  即收口，不满足才二次搜索。
+
 ## 当前结论（2026-08-03，Issue #28 已验收关闭，下一功能执行门放行）
 
 - 用户 2026-08-03 回复「通过，继续」，验收

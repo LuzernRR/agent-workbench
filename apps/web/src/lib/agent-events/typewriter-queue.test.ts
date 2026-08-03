@@ -149,7 +149,7 @@ describe("createRenderQueue", () => {
     }
   );
 
-  it("never accelerates a large backlog beyond one grapheme per frame", () => {
+  it("accelerates a large backlog but never exceeds the per-frame cap", () => {
     const frames = manualFrames();
     let count = 0;
     const queue = createRenderQueue({
@@ -163,7 +163,9 @@ describe("createRenderQueue", () => {
     queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: big }));
     const drawn = frames.flush();
     expect(count).toBe(3000);
-    expect(drawn).toBe(3000);
+    // 积压 3000 字时每帧吐 24 个（上限），3000/24 ≈ 125 帧即可排空。
+    expect(drawn).toBeLessThan(3000);
+    expect(drawn).toBeGreaterThanOrEqual(Math.ceil(3000 / 24));
   });
 
   it("does not let a terminal event accelerate or overtake answer text", () => {
@@ -180,7 +182,9 @@ describe("createRenderQueue", () => {
     queue.enqueue(event(2, "run.completed", {}));
     const drawn = frames.flush();
     expect(chars).toBe(1000);
-    expect(drawn).toBe(1001);
+    // run.completed 只在所有更早的字之后触发，且不增加逐字计数。
+    expect(drawn).toBeGreaterThanOrEqual(Math.ceil(1000 / 24));
+    expect(drawn).toBeLessThan(1001);
   });
 
   it("applies a queued terminal only after the preceding text has drained", () => {
@@ -219,8 +223,10 @@ describe("createRenderQueue", () => {
     const drawn = frames.flush();
 
     expect(visible).toBe(answer);
+    // 逐字 append 不变：每个可见快照仍只比上一个多一个 grapheme。
     expect(snapshots.length).toBe(Array.from(answer).length);
-    expect(drawn).toBeGreaterThanOrEqual(snapshots.length);
+    // 提速后每帧最多 24 字，快照数 = 字数，因此帧数不会超过字数。
+    expect(drawn).toBeLessThanOrEqual(snapshots.length);
   });
 
   it("preserves non-text ordering: tool events apply after earlier text drains", () => {
