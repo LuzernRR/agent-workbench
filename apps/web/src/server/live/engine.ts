@@ -116,6 +116,8 @@ async function finalize(
 
 async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
   const messageId = `msg_${runtime.run.id.replace(/[^A-Za-z0-9]/gu, "")}_assistant`;
+  // 记录真正流式送达正文的消息；改写会换新 messageId，这里始终指向最后一轮。
+  let streamedMessageId = "";
   if (!input.resume) await emit(runtime, "run.started", { agentId: "search-agent", modelId: runtime.run.modelId });
   const imageInput = negotiateImageInputs(input.imageInputs || [], Boolean(input.modelSupportsImageInput));
   const question = [input.message, input.attachmentContext, imageInput.context].filter(Boolean).join("\n\n").slice(0, 20_000);
@@ -146,7 +148,11 @@ async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
           await emit(runtime, "run.status", { status: "running", recoveryAttempt: attempt, recovered: true });
         }
         const projection = mapSearchAgentEvent(sourceEvent, runtime.run.id);
-        for (const event of projection.events) await emit(runtime, event.type, event.payload);
+        for (const event of projection.events) {
+          // 流式正文已逐块发出，finalize 不能再补发整段，否则前端会二次追加。
+          if (event.type === "message.delta") streamedMessageId = String(event.payload.messageId || "");
+          await emit(runtime, event.type, event.payload);
+        }
         if (!projection.terminal) continue;
         if (projection.terminal.kind === "failed") {
           await finalize(runtime, "failed", projection.terminal.payload);
@@ -157,11 +163,16 @@ async function execute(runtime: LiveRuntime, input: SearchAgentExecutionInput) {
           return;
         }
         await finalize(runtime, "completed", projection.terminal.payload, {
-          events: [
-            { type: "message.started", payload: { messageId, role: "assistant", text: "", agentId: "search-agent", agentName: "搜索 Agent" } },
-            { type: "message.delta", payload: { messageId, delta: projection.terminal.answer } },
-            { type: "message.completed", payload: { messageId, text: projection.terminal.answer, citations: projection.terminal.citations } }
-          ],
+          events: streamedMessageId
+            ? [
+                // 正文已流式送达，这里只补最终 citations。
+                { type: "message.completed", payload: { messageId: streamedMessageId, text: projection.terminal.answer, citations: projection.terminal.citations } }
+              ]
+            : [
+                { type: "message.started", payload: { messageId, role: "assistant", text: "", agentId: "search-agent", agentName: "搜索 Agent" } },
+                { type: "message.delta", payload: { messageId, delta: projection.terminal.answer } },
+                { type: "message.completed", payload: { messageId, text: projection.terminal.answer, citations: projection.terminal.citations } }
+              ],
           memory: projection.terminal.remember ? { userMessage: input.message, assistantMessage: projection.terminal.answer } : undefined
         });
         return;

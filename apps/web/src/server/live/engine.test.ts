@@ -273,4 +273,52 @@ describe("live Search Agent engine", () => {
     expect(order).toEqual(["stop-called", "stop-resolved", "aborted"]);
     expect(store.finalizeLiveRun).toHaveBeenCalledWith(expect.anything(), "stopped", {}, undefined);
   });
+
+  it("正文已逐块流式送达后，结算只补 citations，不再整段重发", async () => {
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield { ...sourceEnvelope, type: "answer.started", composeRound: 0 };
+      yield { ...sourceEnvelope, type: "answer.delta", composeRound: 0, delta: "基于来源的" };
+      yield { ...sourceEnvelope, type: "answer.delta", composeRound: 0, delta: "回答" };
+      yield { ...sourceEnvelope, type: "answer.completed", composeRound: 0 };
+      yield completedEvent;
+    });
+    const engine = await freshEngine();
+    await engine.startLiveRun({ visitorId: "visitor_one", threadId: "thread_one", message: "最新 LangGraph 是什么？", modelId: "deepseek-v4-flash", reasoningEffort: "high", attachmentIds: [] });
+    await vi.waitFor(() => expect(store.finalizeLiveRun).toHaveBeenCalledWith(expect.anything(), "completed", expect.anything(), expect.anything()));
+
+    // 正文在运行途中就逐块落库，不必等待终态。
+    const messageCalls = store.persistLiveEvent.mock.calls.filter((call) => String(call[1]).startsWith("message."));
+    expect(messageCalls.map((call) => call[1])).toEqual(["message.started", "message.delta", "message.delta", "message.completed"]);
+    expect(messageCalls.filter((call) => call[1] === "message.delta").map((call) => call[2].delta).join("")).toBe("基于来源的回答");
+    expect(messageCalls.every((call) => call[2].messageId === "msg_runone_assistant")).toBe(true);
+
+    // 结算只补最终 citations；再发一条 message.delta 会让前端二次追加整段正文。
+    const completion = store.finalizeLiveRun.mock.calls.at(-1)?.[3] as { events: Array<{ type: string; payload: Record<string, unknown> }> };
+    expect(completion.events).toEqual([
+      { type: "message.completed", payload: { messageId: "msg_runone_assistant", text: "基于来源的回答", citations: [{ label: "官方来源", url: "https://example.com/source" }] } }
+    ]);
+    expect(completion.events.some((event) => event.type === "message.delta")).toBe(false);
+  });
+
+  it("改写重来时，最终 citations 落在最后一轮可见消息上", async () => {
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield { ...sourceEnvelope, type: "answer.started", composeRound: 0 };
+      yield { ...sourceEnvelope, type: "answer.delta", composeRound: 0, delta: "被改写掉的初版" };
+      yield { ...sourceEnvelope, type: "answer.completed", composeRound: 0 };
+      yield { ...sourceEnvelope, type: "answer.started", composeRound: 1 };
+      yield { ...sourceEnvelope, type: "answer.delta", composeRound: 1, delta: "基于来源的回答" };
+      yield { ...sourceEnvelope, type: "answer.completed", composeRound: 1 };
+      yield completedEvent;
+    });
+    const engine = await freshEngine();
+    await engine.startLiveRun({ visitorId: "visitor_one", threadId: "thread_one", message: "最新 LangGraph 是什么？", modelId: "deepseek-v4-flash", reasoningEffort: "high", attachmentIds: [] });
+    await vi.waitFor(() => expect(store.finalizeLiveRun).toHaveBeenCalledWith(expect.anything(), "completed", expect.anything(), expect.anything()));
+
+    const deltaIds = store.persistLiveEvent.mock.calls.filter((call) => call[1] === "message.delta").map((call) => call[2].messageId);
+    expect(deltaIds).toEqual(["msg_runone_assistant", "msg_runone_assistant_r1"]);
+    const completion = store.finalizeLiveRun.mock.calls.at(-1)?.[3] as { events: Array<{ type: string; payload: Record<string, unknown> }> };
+    expect(completion.events).toEqual([
+      { type: "message.completed", payload: { messageId: "msg_runone_assistant_r1", text: "基于来源的回答", citations: [{ label: "官方来源", url: "https://example.com/source" }] } }
+    ]);
+  });
 });

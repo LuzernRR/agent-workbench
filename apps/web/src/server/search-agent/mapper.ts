@@ -27,6 +27,13 @@ function activityId(kind: "thinking" | "verification", runId: string, nodeRunId:
   return `${kind}:${runId}:${nodeRunId}`;
 }
 
+// 改写产出的是另一段答案，不能续写在已可见消息上（reducer 的旧消息不可回写）。
+// composeRound 随 Verifier 的 rewrite 递增，因而每轮撰写都得到独立 messageId。
+export function answerMessageId(runId: string, composeRound: number) {
+  const base = `msg_${runId.replace(/[^A-Za-z0-9]/gu, "")}_assistant`;
+  return composeRound > 0 ? `${base}_r${composeRound}` : base;
+}
+
 function channelName(channel: "web" | "x" | "xiaohongshu") {
   return channel === "x" ? "X 搜索" : channel === "xiaohongshu" ? "小红书搜索" : "网页搜索";
 }
@@ -261,6 +268,31 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
           ]
         }
       : { events: [] };
+  }
+  if (event.type === "answer.started") {
+    const messageId = answerMessageId(runId, event.composeRound);
+    return {
+      events: [{
+        type: "message.started",
+        payload: { messageId, role: "assistant", text: "", agentId: "search-agent", agentName: "搜索 Agent" }
+      }]
+    };
+  }
+  if (event.type === "answer.delta") {
+    return {
+      events: [{
+        type: "message.delta",
+        payload: { messageId: answerMessageId(runId, event.composeRound), delta: event.delta }
+      }]
+    };
+  }
+  if (event.type === "answer.completed") {
+    return {
+      events: [{
+        type: "message.completed",
+        payload: { messageId: answerMessageId(runId, event.composeRound), text: "" }
+      }]
+    };
   }
   if (event.type === "evidence.updated") {
     return {

@@ -8,12 +8,12 @@ LangGraph State、checkpoint、事件或业务日志。
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, Literal
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel
@@ -344,6 +344,82 @@ async def invoke_researcher_turn(
         usage=turn_usage,
         finish_reason=choice.finish_reason,
     )
+
+
+class WriterStreamError(RuntimeError):
+    """Writer 流式生成未产出可交付正文。"""
+
+    code = "WRITER_STREAM_FAILED"
+
+    def __init__(self, usage: ModelUsage) -> None:
+        super().__init__("模型流式回答生成失败")
+        self.usage = usage
+
+
+async def stream_writer_answer(
+    messages: Sequence[BaseMessage],
+    *,
+    model_id: str | None = None,
+) -> AsyncIterator[str | ModelUsage]:
+    """流式生成面向用户的回答正文。
+
+    Writer 产出的是给人看的自然语言，不承载任何工具调用语义，因此这里走
+    纯 content 流式而非 strict function calling：``delta.content`` 本身就是
+    可直接显示的文本，无需增量解析 JSON，也不依赖字段输出顺序。
+
+    先产出若干 ``str`` 增量，最后产出一个 ``ModelUsage`` 作为终结项。
+    调用方据此拼接正文并累加真实用量。
+    """
+    config = runtime_config()
+    resolved_model = config.model(model_id).id
+    payload: list[dict[str, str]] = []
+    for message in messages:
+        role = "system" if isinstance(message, SystemMessage) else "user"
+        payload.append({"role": role, "content": str(message.content)})
+    started_at = span_now() if tracing_enabled() else ""
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    produced = False
+    try:
+        stream = await _research_client().chat.completions.create(
+            model=resolved_model,
+            messages=payload,  # type: ignore[arg-type]
+            max_tokens=_ROLE_MAX_TOKENS["writer"],
+            temperature=_ROLE_TEMPERATURE["writer"],
+            stream=True,
+            stream_options={"include_usage": True},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        async for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                total_tokens = int(
+                    getattr(usage, "total_tokens", 0) or (input_tokens + output_tokens)
+                )
+            if not chunk.choices:
+                continue
+            delta = getattr(chunk.choices[0], "delta", None)
+            text = getattr(delta, "content", None) if delta is not None else None
+            if text:
+                produced = True
+                yield text
+    except Exception:
+        _record_model_span("writer", resolved_model, started_at, "error", [])
+        raise
+    stream_usage = ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens or (input_tokens + output_tokens),
+        cost_usd=_cost(resolved_model, input_tokens, output_tokens),
+    )
+    if not produced:
+        _record_model_span("writer", resolved_model, started_at, "error", [stream_usage])
+        raise WriterStreamError(stream_usage)
+    _record_model_span("writer", resolved_model, started_at, "ok", [stream_usage])
+    yield stream_usage
 
 
 def add_usage(current: dict[str, Any] | None, addition: ModelUsage) -> dict[str, int | float]:

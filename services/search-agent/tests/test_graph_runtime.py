@@ -20,7 +20,6 @@ from app.graph.context import RunContext
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     STRUCTURED_ANSWER_MAX_CHARS,
-    ComposeResult,
     IntentResult,
     PlanResult,
     ReflectResult,
@@ -33,6 +32,7 @@ from app.llm.deepseek import (
     ResearcherTurn,
     ResearchToolCall,
     StructuredOutputError,
+    WriterStreamError,
 )
 from app.persistence.tool_ledger import (
     LedgerDecision,
@@ -515,6 +515,11 @@ class Scenario:
     verifier_actions: list[str] = field(default_factory=lambda: ["pass"])
     writer_answer: str | None = None
     writer_answers: list[str] = field(default_factory=list)
+    # Writer 走纯 content 流式，不再经过 invoke_structured；这些字段记录流式侧的调用。
+    writer_stream_fails: bool = False
+    writer_stream_calls: int = 0
+    writer_messages: list[Any] = field(default_factory=list)
+    writer_stream_chunk_chars: int = 7
     researcher_mode: str = "valid"
     include_reasoning: bool = False
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
@@ -626,19 +631,6 @@ class Scenario:
             for presentation in data.get("source_presentations", []):
                 presentation.setdefault("include_in_details", True)
             result = ReflectResult(summary="已评估证据覆盖", **data)
-        elif role == "writer":
-            writer_answer = (
-                self.writer_answers[min(index, len(self.writer_answers) - 1)]
-                if self.writer_answers
-                else self.writer_answer
-            )
-            result = ComposeResult(
-                answer_markdown=(
-                    writer_answer
-                    or ("可核验回答 [来源1]" if self.need_search else "直接回答")
-                ),
-                summary="已组织回答",
-            )
         elif role == "verifier":
             action = self.verifier_actions[min(index, len(self.verifier_actions) - 1)]
             result = VerifyResult(
@@ -664,6 +656,37 @@ class Scenario:
             15,
             0.000001,
             attempts=self.structured_attempts.get(role, 1),
+        )
+
+    async def stream_writer(
+        self,
+        messages: Any,
+        *,
+        model_id: str | None = None,
+    ) -> Any:
+        """模拟 Writer 的 content 流：按 chunk 吐增量，末尾给真实 usage。"""
+
+        self.writer_stream_calls += 1
+        self.writer_messages.append(copy.deepcopy(messages))
+        if self.writer_stream_fails:
+            raise WriterStreamError(ModelUsage(10, 4, 14, 0.000002, attempts=1))
+        answer = (
+            self.writer_answers[min(
+                self.writer_stream_calls - 1,
+                len(self.writer_answers) - 1,
+            )]
+            if self.writer_answers
+            else self.writer_answer
+        ) or ("可核验回答 [来源1]" if self.need_search else "直接回答")
+        chunk = max(1, self.writer_stream_chunk_chars)
+        for offset in range(0, len(answer), chunk):
+            yield answer[offset:offset + chunk]
+        yield ModelUsage(
+            10,
+            len(answer),
+            10 + len(answer),
+            0.000001,
+            attempts=1,
         )
 
     async def researcher(
@@ -846,6 +869,7 @@ async def run_scenario(
     **state_overrides: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     monkeypatch.setattr(nodes, "invoke_structured", scenario.structured)
+    monkeypatch.setattr(nodes, "stream_writer_answer", scenario.stream_writer)
     monkeypatch.setattr(nodes, "execute_search_tool", scenario.execute_tool)
 
     state = initial_state(
@@ -1092,10 +1116,10 @@ async def test_single_fact_fast_path_downgrades_to_full_plan_on_research_more(
 
 
 @pytest.mark.asyncio
-async def test_writer_output_invalid_returns_structured_failure_without_template_answer(
+async def test_writer_stream_empty_returns_structured_failure_without_template_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenario = Scenario(invalid_structured_roles={"writer"})
+    scenario = Scenario(writer_stream_fails=True)
 
     output, _events = await run_scenario(monkeypatch, scenario)
 
@@ -1104,6 +1128,7 @@ async def test_writer_output_invalid_returns_structured_failure_without_template
     assert output["verification_passed"] is False
     assert output["answer"] is None
     assert output["answer_source"] == "none"
+    assert scenario.writer_stream_calls == 1
     assert scenario.structured_calls.get("verifier", 0) == 0
 
 
@@ -1135,7 +1160,7 @@ async def test_current_direct_intent_bypasses_search_with_stale_research_history
     assert scenario.structured_calls.get("supervisor", 0) == 1
     assert scenario.structured_calls.get("planner", 0) == 0
     assert scenario.structured_calls.get("reflector", 0) == 0
-    assert scenario.structured_calls.get("writer", 0) == 1
+    assert scenario.writer_stream_calls == 1
     assert output["intent"]["channels"] == []
     assert output["plan"] is None
     classify_step = next(
@@ -1148,7 +1173,7 @@ async def test_current_direct_intent_bypasses_search_with_stale_research_history
     supervisor_input = scenario.structured_messages["supervisor"][0][-1].content
     assert supervisor_input.index("历史上下文") < supervisor_input.index("当前用户消息")
     assert supervisor_input.rstrip().endswith('"你是谁"')
-    writer_input = scenario.structured_messages["writer"][0][-1].content
+    writer_input = scenario.writer_messages[0][-1].content
     assert "British Council" not in writer_input
     assert writer_input == "当前用户消息（唯一任务）：你是谁"
 
@@ -1170,7 +1195,7 @@ async def test_direct_referential_intent_receives_history_only_when_model_reques
     )
 
     assert output["stop_reason"] == "DIRECT_COMPLETED"
-    writer_input = scenario.structured_messages["writer"][0][-1].content
+    writer_input = scenario.writer_messages[0][-1].content
     assert "用于消解当前消息指代的会话上下文" in writer_input
     assert "方案包含两个步骤" in writer_input
     assert writer_input.rstrip().endswith("当前用户消息（唯一任务）：那它指什么？")
@@ -1301,9 +1326,9 @@ async def test_explicit_output_contract_forces_rewrite_when_verifier_misses_form
     assert output["answer"] == valid_answer
     assert output["answer_source"] == "model"
     assert output["answer_model_calls"] == 1
-    assert scenario.structured_calls["writer"] == 2
+    assert scenario.writer_stream_calls == 2
     assert scenario.structured_calls["verifier"] == 2
-    first_writer_prompt = scenario.structured_messages["writer"][0][-1].content
+    first_writer_prompt = scenario.writer_messages[0][-1].content
     assert "输出格式硬约束" in first_writer_prompt
     assert "### N. 短标题" in first_writer_prompt
     assert "**肤质与场景**" in first_writer_prompt
@@ -2052,7 +2077,7 @@ async def test_model_limit_stops_with_partial_answer_without_overshoot(
     assert output["answer"] == scenario.writer_answer
     assert output["answer_source"] == "model"
     assert output["answer_model_calls"] == 1
-    assert scenario.structured_calls["writer"] == 1
+    assert scenario.writer_stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2246,3 +2271,230 @@ async def test_private_reasoning_never_crosses_state_checkpoint_or_public_events
     )
     assert "reasoning_content" not in serialized
     assert "PRIVATE_CHAIN_OF_THOUGHT_SENTINEL" not in serialized
+
+
+def _drain_emitter(chunks: list[str], evidence: list[Any], max_chars: int) -> tuple[str, str]:
+    """把一串增量喂给 emitter，返回（公开文本, 最终交付 answer）。"""
+
+    emitter = nodes._AnswerStreamEmitter(evidence, max_chars)
+    published = ""
+    for chunk in chunks:
+        published += emitter.push(chunk)
+    assert published == emitter.published
+    answer = nodes._compact_answer_markdown("".join(chunks), max_chars=max_chars)
+    return published, answer
+
+
+def _stream_evidence(count: int, *, shared_url: bool = False) -> list[Any]:
+    return [
+        {
+            "channel": "web",
+            "provider": "tavily",
+            "query": "流式测试",
+            "url": (
+                "https://example.com/shared"
+                if shared_url
+                else f"https://example.com/source_{index}"
+            ),
+            "title": f"来源 {index}",
+            "text": "已读取正文",
+            "extractor": "readability",
+            "captured_at": "2026-08-01T00:00:00Z",
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def test_streamed_answer_text_is_always_a_prefix_of_the_delivered_answer() -> None:
+    # A2：公开流是 append-only 的，必须始终是终稿的前缀，绝不能出现收不回的尾巴。
+    evidence = _stream_evidence(2)
+    body = "\n".join(
+        f"- 要点{index}：这条结论有可核验来源支撑 [来源1][来源2]。"
+        for index in range(1, 12)
+    )
+    chunks = [body[offset:offset + 5] for offset in range(0, len(body), 5)]
+
+    published, answer = _drain_emitter(chunks, evidence, 180)
+
+    assert len(answer) <= 180
+    assert published
+    assert answer.startswith(published)
+
+
+def test_streamed_answer_normalizes_sparse_citations_exactly_like_finalize() -> None:
+    # A3：公开流按首次出现顺序增量归一 [来源N]，与 finalize 的一次性归一收敛到同一文本。
+    evidence = _stream_evidence(4)
+    body = "第一段只引用第三个来源 [来源3]。\n第二段引用第一个来源 [来源1]。\n"
+    chunks = [body[offset:offset + 3] for offset in range(0, len(body), 3)]
+
+    published, answer = _drain_emitter(chunks, evidence, nodes.ANSWER_MAX_CHARS)
+    normalized, citations = nodes._answer_citations(answer, evidence)
+
+    # State 里保留模型原始编号，归一化只在 finalize 发生一次。
+    assert "[来源3]" in answer
+    # 公开流已提前完成同一映射：3 → 1、1 → 2。
+    assert published.startswith("第一段只引用第三个来源 [来源1]。")
+    assert "[来源2]" in published
+    assert normalized.startswith(published)
+    assert [citation["url"] for citation in citations] == [
+        "https://example.com/source_3",
+        "https://example.com/source_1",
+    ]
+
+
+def test_streamed_answer_merges_duplicate_source_urls_like_finalize() -> None:
+    # 同 URL 的多个 Evidence 在 finalize 会合并成一个编号，公开流必须同样合并。
+    evidence = _stream_evidence(3, shared_url=True)
+    body = "同一来源被引用两次 [来源1] 与 [来源2]。\n后续正文继续展开说明。\n"
+
+    published, answer = _drain_emitter([body], evidence, nodes.ANSWER_MAX_CHARS)
+    normalized, citations = nodes._answer_citations(answer, evidence)
+
+    assert published.startswith("同一来源被引用两次 [来源1] 与 [来源1]。")
+    assert normalized.startswith(published)
+    assert len(citations) == 1
+
+
+def test_streamed_answer_withholds_text_the_final_answer_would_strip() -> None:
+    # A2 边界：终稿会删掉悬空标题与未闭合代码块；这些文本不能先公开。
+    evidence = _stream_evidence(1)
+    emitter = nodes._AnswerStreamEmitter(evidence, nodes.ANSWER_MAX_CHARS)
+
+    # 悬空的三级标题在后续正文到达前必须一直压住。
+    assert emitter.push("### 1. 短标题\n") == ""
+    assert emitter.push("- **字段**：正文内容 [来源1]。\n") != ""
+    assert emitter.published.startswith("### 1. 短标题")
+
+    # 公开文本不以空白结尾，终稿在边界处 rstrip 不会造成差异。
+    assert emitter.published == emitter.published.rstrip()
+
+
+def test_streamed_answer_never_publishes_beyond_the_delivery_limit() -> None:
+    # A2 边界：公开流受同一个交付上限约束，绝不能越过终稿的截断点。
+    evidence = _stream_evidence(1)
+    body = "".join(f"第{index}句可核验结论 [来源1]。" for index in range(1, 40))
+
+    published, answer = _drain_emitter([body], evidence, 120)
+
+    assert len(published) <= 120
+    assert len(answer) <= 120
+    assert answer.startswith(published)
+
+
+@pytest.mark.asyncio
+async def test_writer_streams_answer_deltas_before_the_run_terminates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A1 真流式：正文在 compose 节点内逐块公开，而不是等到 finalize 整段送达。
+    answer = "结论先行：这条结论有可核验来源支撑 [来源1]。\n后续补充说明同样来自该来源 [来源1]。"
+    scenario = Scenario(writer_answer=answer, writer_stream_chunk_chars=4)
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    started = [event for event in events if event["type"] == "answer.started"]
+    deltas = [event for event in events if event["type"] == "answer.delta"]
+    completed = [event for event in events if event["type"] == "answer.completed"]
+
+    assert len(started) == 1
+    assert len(completed) == 1
+    assert len(deltas) > 1, "正文必须分多块公开，否则不是真流式"
+    # A2：拼接后的公开流是终稿的前缀，且逐块 append 顺序不变。
+    streamed = "".join(event["delta"] for event in deltas)
+    assert output["answer"].startswith(streamed)
+    assert output["answer_source"] == "model"
+
+    # answer.started 必须早于所有 delta，answer.completed 必须晚于所有 delta。
+    order = [event["type"] for event in events if event["type"].startswith("answer.")]
+    assert order[0] == "answer.started"
+    assert order[-1] == "answer.completed"
+    assert set(order[1:-1]) == {"answer.delta"}
+
+
+@pytest.mark.asyncio
+async def test_answer_stream_events_carry_no_private_or_raw_model_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A4 无泄露：answer.* 只允许公开正文与 composeRound，不得夹带任何模型内部字段。
+    scenario = Scenario(
+        writer_answer="可核验回答 [来源1]。\n继续补充一句可核验说明 [来源1]。",
+        writer_stream_chunk_chars=3,
+    )
+
+    _output, events = await run_scenario(monkeypatch, scenario)
+
+    answer_events = [event for event in events if event["type"].startswith("answer.")]
+    assert answer_events
+    for event in answer_events:
+        extra = set(event) - {
+            "type", "version", "eventId", "streamId", "streamSeq", "seq",
+            "runId", "createdAt", "composeRound", "delta",
+        }
+        assert not extra, f"answer.* 出现未审计字段：{sorted(extra)}"
+    serialized = json.dumps(answer_events, ensure_ascii=False)
+    assert "reasoning" not in serialized
+    assert "tool_calls" not in serialized
+    assert "arguments" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_rewrite_round_starts_a_new_answer_stream_instead_of_appending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A7 二次撰写：rewrite 产出的是另一段答案，composeRound 必须递增以便前端换 messageId。
+    scenario = Scenario(
+        writer_answers=[
+            "第一版回答缺少必要说明 [来源1]。\n这一版会被核验要求改写 [来源1]。",
+            "第二版回答补齐了必要说明 [来源1]。\n这一版通过核验 [来源1]。",
+        ],
+        verifier_actions=["rewrite", "pass"],
+        writer_stream_chunk_chars=6,
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    rounds = [
+        event["composeRound"] for event in events if event["type"] == "answer.started"
+    ]
+    assert rounds == [0, 1], "两轮撰写必须落在不同的 composeRound 上"
+    assert scenario.writer_stream_calls == 2
+    assert output["repair_count"] == 1
+
+    # 第二轮的公开流只能是第二版答案的前缀，绝不能续写在第一版上。
+    second = "".join(
+        event["delta"]
+        for event in events
+        if event["type"] == "answer.delta" and event["composeRound"] == 1
+    )
+    assert output["answer"].startswith(second)
+    assert "第二版回答" in second
+
+
+@pytest.mark.asyncio
+async def test_writer_stream_usage_is_accumulated_into_the_run_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A4 用量：流式路径必须回传真实 usage 并计入运行预算，不能因为改流式而丢账。
+    answer = "可核验回答 [来源1]。"
+    scenario = Scenario(writer_answer=answer)
+
+    output, _events = await run_scenario(monkeypatch, scenario)
+
+    assert output["answer_model_calls"] == 1
+    # fake 流的 completion_tokens 等于正文长度，必须出现在累计用量里。
+    assert output["usage"]["output_tokens"] >= len(answer)
+    assert output["usage"]["total_tokens"] >= output["usage"]["output_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_failed_writer_stream_emits_no_partial_answer_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A6 降级：流式失败时不得留下已公开的半截正文，也不得回落到写死模板。
+    scenario = Scenario(writer_stream_fails=True)
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    assert not [event for event in events if event["type"].startswith("answer.")]
+    assert output["answer"] is None
+    assert output["answer_source"] == "none"
+    assert output["stop_reason"] == "OUTPUT_INVALID"

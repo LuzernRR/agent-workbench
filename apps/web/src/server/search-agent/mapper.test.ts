@@ -498,4 +498,31 @@ describe("Search Agent v1 白名单投影", () => {
     }]);
     expect(JSON.stringify(projection)).not.toContain("text");
   });
+
+  it("把 answer.* 逐块投影成 append-only 的可见消息，不等待终态", () => {
+    const started = mapSearchAgentEvent(source({ type: "answer.started", composeRound: 0 }), "run_one");
+    const first = mapSearchAgentEvent(source({ type: "answer.delta", composeRound: 0, delta: "结论先行：" }), "run_one");
+    const second = mapSearchAgentEvent(source({ type: "answer.delta", composeRound: 0, delta: "这条结论有来源支撑 [来源1]。" }), "run_one");
+    const completed = mapSearchAgentEvent(source({ type: "answer.completed", composeRound: 0 }), "run_one");
+
+    const messageId = "msg_runone_assistant";
+    expect(started.events).toEqual([{
+      type: "message.started",
+      payload: expect.objectContaining({ messageId, role: "assistant", text: "", agentId: "search-agent" })
+    }]);
+    expect(first.events).toEqual([{ type: "message.delta", payload: expect.objectContaining({ messageId, delta: "结论先行：" }) }]);
+    expect(second.events).toEqual([{ type: "message.delta", payload: expect.objectContaining({ messageId, delta: "这条结论有来源支撑 [来源1]。" }) }]);
+    // 逐块 message.completed 不回写正文，正文只由 delta 累加。
+    expect(completed.events).toEqual([{ type: "message.completed", payload: expect.objectContaining({ messageId, text: "" }) }]);
+    expect([started, first, second, completed].every((projection) => !projection.terminal)).toBe(true);
+  });
+
+  it("改写轮换用新 messageId，避免续写在已可见的上一版答案上", () => {
+    const firstRound = mapSearchAgentEvent(source({ type: "answer.delta", composeRound: 0, delta: "第一版" }), "run_one");
+    const secondRound = mapSearchAgentEvent(source({ type: "answer.delta", composeRound: 1, delta: "第二版" }), "run_one");
+
+    expect(firstRound.events[0].payload.messageId).toBe("msg_runone_assistant");
+    expect(secondRound.events[0].payload.messageId).toBe("msg_runone_assistant_r1");
+    expect(firstRound.events[0].payload.messageId).not.toBe(secondRound.events[0].payload.messageId);
+  });
 });
