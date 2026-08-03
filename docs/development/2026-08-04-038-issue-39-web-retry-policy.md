@@ -27,6 +27,8 @@
 - 新增 `app/reliability/retry.py`：`ErrorKind`、`RetryPolicy`、`parse_retry_after`、`next_delay`
 - `app/tools/web_search.py`：Provider 调用改用该策略，注入时钟、随机源与 sleeper
 - `tests/test_retry_policy.py`（新）、`tests/test_web_search_failures.py`（扩充）
+- `docs/Agent生产化优化任务清单.md`：把两份外部手册的技术栈、当前差距与 P0/P1/P2 后续顺序固化给
+  后续模型
 
 ### 非目标
 
@@ -130,6 +132,7 @@ Key 池那一层的 `_TAVILY_CREDENTIAL_FAILURES` 判断**原样保留**：多 K
 | `app/tools/web_search.py` | `SearchOutcome` 加 `retry_after_seconds`；`_search_tavily` / `_search_duckduckgo` 的 429 分支解析 `Retry-After`；新增 `_error_kind_for_outcome`；`_search_provider_with_retries` 改为策略驱动并接受注入 | 唯一被迁移的调用链 |
 | `tests/test_retry_policy.py` | 新增 7 项纯函数测试 | 锁定 Retry-After / jitter / 上限 / 参数校验 |
 | `tests/test_web_search_failures.py` | 新增 6 项集成测试，改写原限流用例 | 锁定重试与不重试两个方向 |
+| `docs/Agent生产化优化任务清单.md` | 新增技术栈对照、P0/P1/P2 队列和接手步骤 | 满足用户要求，防止后续模型遗漏生产化问题或并行开工 |
 
 `retry_after_seconds` 标记为 `repr=False, compare=False` 并带注释：它只服务于重试层，
 **不投影到公共 AgentEvent 协议**，也不参与 outcome 相等性比较。
@@ -180,7 +183,7 @@ Key 池那一层的 `_TAVILY_CREDENTIAL_FAILURES` 判断**原样保留**：多 K
 | full jitter 与封顶 | `test_next_delay_uses_full_jitter_and_caps_exponential_backoff` | 通过 |
 | Retry-After 受限 | `test_next_delay_prefers_retry_after_but_keeps_hard_limits`：8s 被截到 4s；剩余 3s 时返回 `None` | 通过 |
 | 参数校验 | `test_retry_policy_rejects_invalid_limits`（5 组非法上限） | 通过 |
-| 全量测试 | `pytest -q` → **443 passed in 9.35s**（改前 420，本轮 +23） | 通过 |
+| 全量测试 | `pytest -q` → **443 passed in 8.21s**（改前 420，本轮 +23） | 通过 |
 | Lint | `ruff check .` → All checks passed | 通过 |
 | 编译 | `compileall -q app` → exit 0 | 通过 |
 
@@ -195,11 +198,15 @@ Key 池那一层的 `_TAVILY_CREDENTIAL_FAILURES` 判断**原样保留**：多 K
 
 - **`max_elapsed_seconds` 是「每次 Provider 调用」的预算，不是 `web_search` 整体的。**
   Tavily Key 池中每把 Key 各拿一份完整 30s，回退 DuckDuckGo 再叠一份，最坏累计约 90s。
-  收成整体预算需要改 Key 池的时间账，属本 Issue 的非目标，建议单独立 Issue。
+  收成整体预算需要改 Key 池的时间账，属本 Issue 的非目标，已登记为
+  [生产化优化任务清单 P0-01](../Agent生产化优化任务清单.md#p0-01-run-级-deadline-propagation)。
 - DeepSeek SDK 与小红书 MCP 仍用各自的重试，尚未迁到本模块（本 Issue 明确的非目标）。
 - 阶段 4 清单其余项仍未做：`asyncio.as_completed` 先到先用、单页超时分层、DuckDuckGo 竞速代替
   串行降级、短期结果缓存；`gzip` 与 `keep-alive` 两项的前置冲突见
   [037](2026-08-04-037-issue-37-robots-per-origin-lock.md) 的同名段落。
+- Model Gateway、Worker/lease/fencing、Checkpoint/Event/Outbox 原子边界、OIDC/RBAC/ABAC、
+  Tool Gateway、RAG 技术收敛、记忆治理、OTel/SLO、Golden Cases、PITR、分层与 ADR 等审计问题均已
+  进入上述生产化清单；它们仍是未来任务，不能视为本 Issue 已实现。
 
 ## 用户验收
 

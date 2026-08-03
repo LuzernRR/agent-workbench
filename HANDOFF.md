@@ -5,7 +5,9 @@
 - 本轮唯一功能为
   [#39](https://github.com/LuzernRR/agent-workbench/issues/39)“统一 Web 搜索 Provider 重试策略与
   Retry-After”，`Execution Gate: blocked`（等验收）。开发记录见
-  [038](docs/development/2026-08-04-038-issue-39-web-retry-policy.md)。
+  [038](docs/development/2026-08-04-038-issue-39-web-retry-policy.md)。两份外部生产级 Agent 手册与当前
+  实现的完整差距、目标技术栈和后续顺序已固化到
+  [Agent 生产化优化任务清单](docs/Agent生产化优化任务清单.md)；后续模型必须从队首取一项，不能并行开工。
 - **修改前那段重试代码有四个各自独立的缺陷，其中两个是真 bug，不只是「退避算法不够好」**：
   - `httpx.HTTPStatusError` 是 `httpx.HTTPError` 的子类，于是 **HTTP 400 / 404 被当瞬时故障重试
     3 次**——重试一个参数错误的请求，三次必然得到同一个 400。
@@ -36,11 +38,11 @@
 - 未采用 `tenacity` / `backoff`：两者把「决定重试」与「执行调用」耦合在装饰器里，而本项目要在同一次
   失败上同时驱动 Key 轮换与 Provider 回退——那是调用方的控制流。为 130 行纯函数引入依赖，换来的是
   更难注入的时钟。
-- 门禁：`pytest -q` **443 passed in 9.35s**（改前 420，本轮 +23）、`ruff check .` 全通过、
+- 门禁：`pytest -q` **443 passed in 8.21s**（改前 420，本轮 +23）、`ruff check .` 全通过、
   `compileall -q app` exit 0。
 - **遗留语义边界**：`max_elapsed_seconds` 是「每次 Provider 调用」的预算，不是 `web_search` 整体的。
   Key 池每把 Key 各拿 30s，回退 DuckDuckGo 再叠一份，最坏累计约 90s。收成整体预算要改 Key 池的
-  时间账，属本 Issue 非目标，建议单独立 Issue。
+  时间账，属本 Issue 非目标；已登记为生产化清单 P0-01，是 #39 验收后的下一建议切片。
 - **注意本机有两个 Python**：全量测试必须走 `services/search-agent/.venv/Scripts/python.exe`，
   系统 `D:\Python312` 缺 `trafilatura` 等依赖，直接 `python -m pytest` 会有 21 个 collection error，
   与代码无关。
