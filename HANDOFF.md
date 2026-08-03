@@ -1,5 +1,45 @@
 # 项目交接
 
+## 当前结论（2026-08-03，Issue #31 单事实单次检索已实现，等待验收）
+
+- 本轮唯一功能为
+  [#31](https://github.com/LuzernRR/agent-workbench/issues/31)“实时事实类问题走单次检索，不再退化为
+  完整链路”，`Execution Gate: allowed`（用户授权「你自己思考怎么做，按照你的方案做就好」）。开发记录见
+  [034](docs/development/2026-08-03-034-issue-31-realtime-fact-single-search.md)。
+- **诊断结论与原假设相反**：`evidence_depth` 的语义判定本身是准确的——`OpenAI 最新的模型`、
+  `LangGraph 最新版本号` 都判出 `single_fact` 且 `fastPath=True`，比较类正确落 `multi_source`。
+  #28 的机制没坏。
+- **真正的根因是一条状态不一致的路径**：Supervisor prompt 注入 `当前日期` 供相对时间换算，模型看到
+  日期就在输入里便判 `need_search=False`；`validate_route()` 随之锁死 `evidence_depth=multi_source` +
+  `fast_search=None`（这个约束是对的）；随后 `_freshness_required()` 正则命中「今天」把 `need_search`
+  翻成 True，**却造不出 `fast_search`**（服务端不得代猜查询），于是 `_fast_search_request()` 必然返回
+  None，落完整链路。即：由正则触发的搜索必然退化。这正是 Item I，但危害比原记录更具体。
+- 修复落在**让模型自己判对**而非服务端兜底猜测：`SUPERVISOR_PROMPT` 增加口径——注入的当前日期只用于
+  相对时间换算，本身不是可直接作答的事实依据；答案本身就是实时事实时必须 `need_search=true` 并按单事实
+  取证。正则保留为兜底，模型判对后变 no-op（`overrideBroke=False`）。产品代码净改动 3 行。
+- **用户要求的循环形状已在图上成立，本轮未改**：`merge_research → reflect` 是每轮检索后的核验；
+  `reflect`/`verify` 判不足才回 `plan_research`；`resolved_rounds = min(max_rounds or budget_rounds, 3)`
+  （`state.py:388`）硬顶 3 轮，balanced 默认 2 轮。
+- **工具调用 JSON 完整性由 pydantic 三层保证**（`deepseek.py:202-262`）：`validate_strict_schema()`
+  发请求前递归校验 schema 满足 Provider strict 约束；`with_structured_output(method="function_calling",
+  strict=True)` 由 Provider 端强制；失败最多补一次修复重试，再失败抛 `StructuredOutputError`，绝不用
+  默认值伪造语义结果。5 个工具调用角色全部走这条；Writer 无工具、纯 content 流式，不涉及。
+- 门禁：`pytest -q` 401 passed（+2 为本轮新增）、`ruff check .` 全通过、`npx tsc --noEmit` 干净、
+  `npx vitest run` 398 passed / 1 skipped。
+- 真实链路实测（`promptVersion=2026-08-03.v43-realtime-fact-single-search`）：
+
+  | 问题 | modelCalls | toolCalls | 节点数 | stopReason |
+  |---|---|---|---|---|
+  | 今天是几号（修复前） | 9 | 3 | 16 | MODEL_CALL_LIMIT / VERIFIED |
+  | **今天是几号（修复后）** | **3** | **1** | **10** | **VERIFIED** |
+  | 你是谁 | 2 | 0 | 5 | DIRECT_COMPLETED（保持） |
+  | 比较 LangGraph 和 LlamaIndex | 8 | 4 | 17 | VERIFIED（保持两轮，每轮后经 reflect） |
+
+  修复后「今天是几号」答案带真实来源引用、`verificationPassed=true`，答案来自真实检索而非模型记忆；
+  `isPrefix=True`、`streamedEqualsFinal=True`、字段白名单违规 0，#29 的流式不变量未破坏。
+- TTFT 从 32.4s（总 34.1s）降到 17.3s（总 19.3s）。仍有 17.3s 落在 Writer 之前，需阶段 3–5 继续优化。
+- 下一功能执行门：阻塞（等 #31 验收；随后阶段 3 起按序排队）。
+
 ## 当前结论（2026-08-03，Issue #29 Writer 纯 content 流式已验收，下一功能执行门放行）
 
 - 本轮唯一功能为
