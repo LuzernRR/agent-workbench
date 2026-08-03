@@ -1,5 +1,17 @@
 # 项目交接
 
+## 当前结论（2026-08-03，Issue #28 已验收关闭，下一功能执行门放行）
+
+- 用户 2026-08-03 回复「通过，继续」，验收
+  [#28](https://github.com/LuzernRR/agent-workbench/issues/28)「Supervisor 增加 evidence_depth 分层，
+  单事实问题走 1 次搜索快路径」。受控收口提交 `741e047` 已推送 `main`，Issue 以 completed 关闭。
+- 与 #25 的收口分开执行：先提交
+  `181db68`「accept mislabeled content types when fetching page bodies (#25)」（类型门禁三层判定 +
+  `config/.gitignore` 的 `*.local.json.bak-*`），再提交 `741e047`（#28 的 schema / 状态位 / 两个确定性
+  节点 / 快路径路由 / Prompt v41）。#25 仍等待用户验收，Issue 保持开放。
+- 下一功能执行门：放行（阶段 2 按序排队：Writer 流式 → researcher 降 effort → `asyncio.as_completed`
+  先到先用 → prompt-caching 等，一 Issue 一 feature）。
+
 ## 当前结论（2026-08-03，Issue #28 单事实快路径已实现，等待验收）
 
 - 本轮唯一功能为
