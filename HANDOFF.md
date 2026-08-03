@@ -1,5 +1,38 @@
 # 项目交接
 
+## 当前结论（2026-08-03，Issue #33 HTML title 回退已实现，等待验收）
+
+- 本轮唯一功能为
+  [#33](https://github.com/LuzernRR/agent-workbench/issues/33)“fetch_page: trafilatura metadata title
+  丢失日期，需回退到 HTML `<title>` 标签”，`Execution Gate: allowed`。开发记录见
+  [035](docs/development/2026-08-03-035-issue-33-html-title-fallback.md)，PR
+  [#34](https://github.com/LuzernRR/agent-workbench/pull/34)。
+- **Writer 没有出错，错在上游的证据提取**。7 次「今天是几号」实测：2/7 返回「无法确认今天的日期」——
+  这是 Writer 严格遵守 WRITER_PROMPT「每个事实性陈述必须能由来源支持」的**正确**行为。另外 5/7
+  「正确」答案实际违反了该规则（靠 URL 路径猜日期），属偶然正确。系统此前是 71% 的偶然正确率。
+- 根因：`trafilatura.extract_metadata()` 在黄历类页面抽到的是导航面包屑 `"黄历"`，而 HTML `<title>`
+  才是 `"2026年08月03日农历是多少_2026年08月03日星期几-黄历网"`。同时 `trafilatura.extract()` 的正文
+  **完全不含日期**（实测 `body 含 2026 = False`），所以标题是唯一的日期信号。标题经
+  `channels/web.py:82` 的 `page.title or hit.title or page.url` 进入 `SearchEvidence.title`，
+  再作为 `[来源N] {title}` 送给 Writer；日期丢了，Writer 只能拒绝作答。
+- 修复：`_fetch_static()` 新增 `_html_title()` / `_resolve_title()` 两个纯函数——trafilatura 标题为
+  None 或 ≤10 字符时回退到 `<title>` 正则，反转义实体、剥内联标签、归一空白、限长 300；两者都有时取
+  信息量更大的一个。trafilatura 已给出有效标题的页面行为不变。
+- 门禁：`pytest -q` 408 passed（+7 为本轮新增）、`ruff check .` 全通过、`compileall -q app` 通过。
+- 真实页面探针（`scripts/title_probe.py`）：
+
+  | URL | 修复前 title | 修复后 title |
+  |---|---|---|
+  | `huangli.com/huangli/2026/08_03.html` | `"黄历"` | `"2026年08月03日农历是多少_2026年08月03日星期几-黄历网"` |
+  | `langchain.com/langgraph` | trafilatura 已有效 | 同上，未改写 |
+
+- 真实链路实测（本地 8101）：`total=15662ms`、`firstVisible=14144ms`、`model=3`、`tool=1`、
+  字段白名单违规 0，答案为
+  `根据万年日历查询，今天是2026年8月3日，星期一，农历六月廿一（丙午年乙未月辛亥日）[来源1]`，
+  `verificationPassed=true`、`isPrefix=True`、`streamedEqualsFinal=True`。
+- 未改 robots / SSRF / URL policy 任何门禁逻辑，未新增网络出口，全部既有安全测试通过。
+- 下一功能执行门：阻塞（等 #33 验收；随后阶段 3 OTel GenAI 语义约定对齐起按序排队）。
+
 ## 当前结论（2026-08-03，Issue #31 单事实单次检索已实现，等待验收）
 
 - 本轮唯一功能为
