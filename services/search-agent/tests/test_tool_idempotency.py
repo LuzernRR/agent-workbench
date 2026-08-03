@@ -18,6 +18,7 @@ from app.persistence.tool_ledger import (
     payload_hash,
     safe_result_payload,
 )
+from app.reliability.deadline import DeadlineBudget
 from app.tools.gateway import ToolGateway
 from app.tools.search_tool import SearchExecutionResult, SearchToolInput
 
@@ -208,6 +209,48 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
     completed_events = [event for event in events if event["type"] == "tool.completed"]
     assert all(isinstance(event["durationMs"], int) for event in completed_events)
     assert all(event["durationMs"] >= 0 for event in completed_events)
+
+
+@pytest.mark.asyncio
+async def test_web_tool_creates_one_absolute_deadline_for_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = Ledger()
+    deadlines: list[DeadlineBudget] = []
+
+    async def execute(
+        arguments: SearchToolInput,
+        config: Any,
+        progress: Any = None,
+        *,
+        deadline: DeadlineBudget | None = None,
+    ) -> SearchExecutionResult:
+        assert deadline is not None
+        deadlines.append(deadline)
+        return SearchExecutionResult(
+            ok=True,
+            channel=arguments.channel,
+            query=arguments.query,
+            provider="test",
+            results=[],
+            evidence=[],
+        )
+
+    monkeypatch.setattr(nodes, "execute_search_tool", execute)
+    monkeypatch.setattr(nodes, "get_stream_writer", lambda: (lambda event: None))
+    runtime = SimpleNamespace(
+        context=RunContext(agent_config(), ToolGateway(ledger), None)
+    )
+    await nodes._run_one_search(
+        state(),
+        runtime,
+        "call_deadline",
+        SearchToolInput(query="query one", channel="web", max_results=5),
+        timeout_seconds=5,
+    )
+
+    assert len(deadlines) == 1
+    assert 0 < deadlines[0].remaining_seconds() <= 5
 
 
 @pytest.mark.asyncio

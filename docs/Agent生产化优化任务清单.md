@@ -45,20 +45,20 @@
 
 ### P0-00 Web Search RetryPolicy
 
-- 状态：`awaiting-acceptance`，Issue [#39](https://github.com/LuzernRR/agent-workbench/issues/39)，PR
-  [#40](https://github.com/LuzernRR/agent-workbench/pull/40)。
+- 状态：`accepted`，Issue [#39](https://github.com/LuzernRR/agent-workbench/issues/39)，PR
+  [#40](https://github.com/LuzernRR/agent-workbench/pull/40) 已合并（`74bc141`）。
 - 已实现：错误分类、`Retry-After`、full jitter、attempt/elapsed 双上限；只迁移 Web Search。
-- 验收后动作：合并 PR、关闭 Issue，再将 P0-01 立为唯一活动 Issue。
+- 验收：用户 2026-08-04 回复“验收通过，继续”。
 
-### P0-01 Run 级 Deadline Propagation
+### P0-01 Web Search 绝对 Deadline Propagation
 
-- 状态：`blocked`（等待 P0-00 验收）。
-- 当前问题：`max_elapsed_seconds` 只约束一次 Provider 调用；Tavily 多 Key 与 DuckDuckGo 回退会各自取得
-  新预算，端到端最坏时长仍可能叠加。
-- 目标设计：在 Run/搜索入口生成绝对 `deadline_at`，向模型、检索、抓取、工具、重试等待逐层传递
-  `remaining_seconds`；任何下游不得自行重置总预算。
-- 最小验收：多 Key + fallback 的总墙钟不超过同一 deadline；取消可打断请求和重试等待；事件明确区分
-  dependency timeout 与 run deadline exhausted。
+- 状态：`awaiting-acceptance`，Issue [#41](https://github.com/LuzernRR/agent-workbench/issues/41)。
+- 诊断修正：Run 已有 `maxRunSeconds`、最终写作预留和工具外层硬 timeout；缺口是 Web 内部各层重置相对
+  timeout，而不是缺少 Run 终止机制。
+- 已实现：进程内单调时钟 `DeadlineBudget` 从工具入口贯穿 WebChannel、Tavily Key 池、Provider retry、
+  DuckDuckGo fallback 与 fetch；任何子层只能收紧 deadline，不能延长。公共 State/Event 协议不变。
+- 未迁移：DeepSeek/Model Gateway 进入 P0-02；X/小红书仍保留现有渠道 timeout 与工具外层硬边界，迁移
+  时必须单独处理小红书人工验证的暂停计时。
 
 ### P0-02 统一 Model Gateway 与分层重试
 

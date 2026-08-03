@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.config.agent import AgentConfig
+from app.reliability.deadline import DeadlineBudget
 from app.tools.channels.base import (
     ChannelEvidence,
     ChannelOutcome,
@@ -13,7 +14,7 @@ from app.tools.channels.base import (
     SourceProvenance,
     report_progress,
 )
-from app.tools.fetch_page import fetch_pages
+from app.tools.fetch_page import FetchResult, fetch_pages
 from app.tools.web_search import web_search
 
 
@@ -28,12 +29,15 @@ class WebChannel:
         query: str,
         max_results: int,
         progress: ChannelProgressReporter | None = None,
+        *,
+        deadline: DeadlineBudget | None = None,
     ) -> ChannelOutcome:
         outcome = await web_search(
             query,
             max_results=max_results,
             default_provider=self.config.search.default_provider,
             allow_duckduckgo_fallback=self.config.search.allow_duckduckgo_fallback,
+            deadline=deadline,
         )
         if not outcome.ok:
             return ChannelOutcome(
@@ -55,9 +59,28 @@ class WebChannel:
             )
 
         selected = hits[: self.config.graph.max_pages_per_call]
-        pages = await fetch_pages(
-            [hit.url for hit in selected], concurrency=min(3, len(selected))
-        ) if selected else []
+        if selected and (deadline is None or not deadline.expired):
+            fetch_timeout = min(
+                20.0,
+                deadline.remaining_seconds() if deadline is not None else 20.0,
+            )
+            pages = await fetch_pages(
+                [hit.url for hit in selected],
+                concurrency=min(3, len(selected)),
+                timeout=fetch_timeout,
+            )
+        elif selected:
+            pages = [
+                FetchResult(
+                    url=hit.url,
+                    ok=False,
+                    error="搜索调用预算已耗尽",
+                    error_category="timeout",
+                )
+                for hit in selected
+            ]
+        else:
+            pages = []
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         evidence: list[ChannelEvidence] = []
         verified: set[str] = set()

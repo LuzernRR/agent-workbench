@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 from selectolax.parser import HTMLParser
 
+from app.reliability.deadline import DeadlineBudget
 from app.reliability.retry import ErrorKind, RetryPolicy, next_delay, parse_retry_after
 from app.tools.url_policy import is_fetchable
 
@@ -350,6 +351,7 @@ async def _search_provider_with_retries(
     sleeper: Callable[[float], Awaitable[None]] | None = None,
     clock: Callable[[], float] | None = None,
     random_source: Callable[[], float] | None = None,
+    deadline: DeadlineBudget | None = None,
 ) -> SearchOutcome:
     """在次数与累计耗时双重预算内调用单个 Provider。"""
     policy = retry_policy or RetryPolicy(
@@ -359,11 +361,14 @@ async def _search_provider_with_retries(
     sleep = sleeper or asyncio.sleep
     monotonic = clock or time.monotonic
     rng = random_source or random.random
-    started_at = monotonic()
+    operation_deadline = (
+        deadline.bounded(policy.max_elapsed_seconds)
+        if deadline is not None
+        else DeadlineBudget.after(policy.max_elapsed_seconds, clock=monotonic)
+    )
     last_error: SearchOutcome | None = None
     for attempt in range(1, policy.max_attempts + 1):
-        elapsed = max(0.0, monotonic() - started_at)
-        remaining = policy.max_elapsed_seconds - elapsed
+        remaining = operation_deadline.remaining_seconds()
         if remaining <= 0:
             break
 
@@ -415,7 +420,8 @@ async def _search_provider_with_retries(
             )
             error_kind = ErrorKind.PERMANENT
 
-        elapsed = max(0.0, monotonic() - started_at)
+        remaining = operation_deadline.remaining_seconds()
+        elapsed = max(0.0, policy.max_elapsed_seconds - remaining)
         delay = next_delay(
             policy,
             error_kind=error_kind,
@@ -432,7 +438,7 @@ async def _search_provider_with_retries(
 
     return last_error or SearchOutcome(
         ok=False, query=query, provider=provider,
-        error="搜索失败", error_category="provider_unavailable",
+        error="搜索请求超时", error_category="timeout",
     )
 
 
@@ -442,6 +448,10 @@ async def _search_tavily_key_pool(
     keys: tuple[str, ...],
     max_attempts: int,
     max_elapsed_seconds: float,
+    *,
+    deadline: DeadlineBudget,
+    sleeper: Callable[[float], Awaitable[None]] | None = None,
+    random_source: Callable[[], float] | None = None,
 ) -> SearchOutcome:
     """按进程内游标尝试 Key；凭据故障可遍历全池，服务故障最多换两把。"""
     candidates = _tavily_key_candidates(keys)
@@ -450,6 +460,8 @@ async def _search_tavily_key_pool(
     attempts_per_key = max_attempts if len(candidates) <= 1 else 1
 
     for index, key in candidates:
+        if deadline.expired:
+            break
         outcome = await _search_provider_with_retries(
             query,
             max_results,
@@ -457,6 +469,9 @@ async def _search_tavily_key_pool(
             key,
             attempts_per_key,
             max_elapsed_seconds=max_elapsed_seconds,
+            deadline=deadline,
+            sleeper=sleeper,
+            random_source=random_source,
         )
         if outcome.ok:
             _select_tavily_key(keys, index)
@@ -471,7 +486,17 @@ async def _search_tavily_key_pool(
         if provider_failures >= min(_TAVILY_PROVIDER_FAILURE_KEY_LIMIT, len(candidates)):
             break
 
-    return last_error or SearchOutcome(
+    if last_error is not None:
+        return last_error
+    if deadline.expired:
+        return SearchOutcome(
+            ok=False,
+            query=query,
+            provider="tavily",
+            error="搜索请求超时",
+            error_category="timeout",
+        )
+    return SearchOutcome(
         ok=False,
         query=query,
         provider="tavily",
@@ -488,6 +513,10 @@ async def web_search(
     max_elapsed_seconds: float = _DEFAULT_MAX_ELAPSED_SECONDS,
     default_provider: str = "tavily",
     allow_duckduckgo_fallback: bool = True,
+    deadline: DeadlineBudget | None = None,
+    sleeper: Callable[[float], Awaitable[None]] | None = None,
+    clock: Callable[[], float] | None = None,
+    random_source: Callable[[], float] | None = None,
 ) -> SearchOutcome:
     """执行一次网页搜索。
 
@@ -505,6 +534,15 @@ async def web_search(
             error="搜索词为空", error_category="invalid_arguments",
         )
 
+    search_deadline = (
+        deadline.bounded(max_elapsed_seconds)
+        if deadline is not None
+        else DeadlineBudget.after(
+            max_elapsed_seconds,
+            clock=clock or time.monotonic,
+        )
+    )
+
     if default_provider == "duckduckgo":
         return await _search_provider_with_retries(
             query,
@@ -513,6 +551,9 @@ async def web_search(
             None,
             max_attempts,
             max_elapsed_seconds=max_elapsed_seconds,
+            deadline=search_deadline,
+            sleeper=sleeper,
+            random_source=random_source,
         )
 
     keys = _tavily_keys()
@@ -532,6 +573,9 @@ async def web_search(
             None,
             max_attempts,
             max_elapsed_seconds=max_elapsed_seconds,
+            deadline=search_deadline,
+            sleeper=sleeper,
+            random_source=random_source,
         )
 
     primary = await _search_tavily_key_pool(
@@ -540,8 +584,11 @@ async def web_search(
         keys,
         max_attempts,
         max_elapsed_seconds,
+        deadline=search_deadline,
+        sleeper=sleeper,
+        random_source=random_source,
     )
-    if primary.ok or not allow_duckduckgo_fallback:
+    if primary.ok or not allow_duckduckgo_fallback or search_deadline.expired:
         return primary
     return await _search_provider_with_retries(
         query,
@@ -550,6 +597,9 @@ async def web_search(
         None,
         max_attempts,
         max_elapsed_seconds=max_elapsed_seconds,
+        deadline=search_deadline,
+        sleeper=sleeper,
+        random_source=random_source,
     )
 
 

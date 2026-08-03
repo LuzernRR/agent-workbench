@@ -34,4 +34,5 @@
 - [OTel GenAI 语义约定属性名对齐](2026-08-03-036-issue-35-otel-genai-conventions.md)
 - [robots 门禁的 per-origin 锁分片](2026-08-04-037-issue-37-robots-per-origin-lock.md)
 - [Web 搜索 Provider 重试策略与 Retry-After](2026-08-04-038-issue-39-web-retry-policy.md)
+- [Web Search 绝对 Deadline 贯穿 Key 池、fallback 与抓取](2026-08-04-039-issue-41-web-search-deadline.md)
 - [开发记录模板](TEMPLATE.md)

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config.agent import AgentConfig
+from app.reliability.deadline import DeadlineBudget
 from app.tools.channels.base import (
     ChannelName,
     ChannelProgressReporter,
@@ -136,6 +137,7 @@ async def execute_search_tool(
     config: AgentConfig,
     progress: ChannelProgressReporter | None = None,
     *,
+    deadline: DeadlineBudget | None = None,
     xiaohongshu_public_only: bool = False,
     verification_request_key: str | None = None,
     verification: ChannelVerificationReporter | None = None,
@@ -145,6 +147,7 @@ async def execute_search_tool(
         arguments.query,
         min(arguments.max_results, config.graph.max_results_per_call),
         progress=progress,
+        deadline=deadline,
         xiaohongshu_public_only=xiaohongshu_public_only,
         verification_request_key=verification_request_key,
         verification=verification,

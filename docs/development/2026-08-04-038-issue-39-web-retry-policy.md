@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-08-04 |
 | Issue | https://github.com/LuzernRR/agent-workbench/issues/39 |
-| 状态 | awaiting-acceptance |
+| 状态 | accepted |
 | 目标环境 | local |
 
 ## 问题与目标
@@ -210,6 +210,8 @@ Key 池那一层的 `_TAVILY_CREDENTIAL_FAILURES` 判断**原样保留**：多 K
 
 ## 用户验收
 
-- 状态：等待验收
-- 验收反馈：待填写
-- 下一功能执行门：阻塞（等 #39 验收）
+- 状态：已验收并合并
+- 验收反馈：用户 2026-08-04 回复“验收通过，继续”
+- PR：[#40](https://github.com/LuzernRR/agent-workbench/pull/40)，merge commit `74bc141`
+- Issue：#39 已关闭
+- 下一功能执行门：放行（P0-01 已作为 #41 执行）
