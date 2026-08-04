@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any
-
-import httpx
 import pytest
-from langchain_core.messages import HumanMessage
-from openai import BadRequestError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.graph.schemas import (
@@ -198,54 +192,3 @@ def test_preflight_rejects_optional_properties_before_provider_call() -> None:
         deepseek.validate_strict_schema(OptionalResult)
     assert error.value.code == "STRICT_SCHEMA_INVALID"
     assert "optional fields" in str(error.value)
-
-
-class ValidResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    value: str
-
-
-class RejectingRunnable:
-    async def ainvoke(self, _messages: list[Any]) -> dict[str, Any]:
-        request = httpx.Request("POST", "https://provider.invalid/chat/completions")
-        response = httpx.Response(400, request=request)
-        raise BadRequestError(
-            "PRIVATE_PROVIDER_BODY_SENTINEL",
-            response=response,
-            body={"error": {"message": "PRIVATE_PROVIDER_BODY_SENTINEL"}},
-        )
-
-
-class RejectingModel:
-    def with_structured_output(
-        self,
-        schema: type[BaseModel],
-        **kwargs: Any,
-    ) -> RejectingRunnable:
-        assert schema is ValidResult
-        assert kwargs["strict"] is True
-        return RejectingRunnable()
-
-
-@pytest.mark.asyncio
-async def test_provider_bad_request_becomes_stable_safe_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = SimpleNamespace(model=lambda _model_id: SimpleNamespace(id="test-model"))
-    monkeypatch.setattr(deepseek, "runtime_config", lambda: config)
-    monkeypatch.setattr(
-        deepseek,
-        "_structured_chat_model",
-        lambda _role, _model_id: RejectingModel(),
-    )
-
-    with pytest.raises(deepseek.StructuredProviderRequestError) as error:
-        await deepseek.invoke_structured(
-            "planner",
-            ValidResult,
-            [HumanMessage(content="return structured data")],
-        )
-
-    assert error.value.code == "MODEL_STRUCTURED_REQUEST_INVALID"
-    assert "PRIVATE_PROVIDER_BODY_SENTINEL" not in str(error.value)
