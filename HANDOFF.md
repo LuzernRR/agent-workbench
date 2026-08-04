@@ -38,11 +38,12 @@
 - 下一功能执行门：放行（用户 2026-08-04 回复「通过，继续」，#43 验收通过；下一项按清单顺序为 P0-03
   独立 Worker、持久任务队列与租约，须先建 Issue 并置 `Execution Gate: allowed`）。
 
-## 当前结论（2026-08-04，Issue #41 Web Search 绝对 Deadline 待验收）
+## 当前结论（2026-08-04，Issue #41 Web Search 绝对 Deadline 已验收合并）
 
 - 本轮唯一功能为
   [#41](https://github.com/LuzernRR/agent-workbench/issues/41)“Web Search 绝对 Deadline 贯穿 Key 池、
-  fallback 与抓取”，`Execution Gate: blocked`（等验收）。开发记录见
+  fallback 与抓取”，用户 2026-08-04 验收通过，PR
+  [#42](https://github.com/LuzernRR/agent-workbench/pull/42) 已合并（`7b68016`）。开发记录见
   [039](docs/development/2026-08-04-039-issue-41-web-search-deadline.md)。
 - **先纠正了任务清单里的原始假设**：项目并非没有 Run 级时间边界。`HarnessRunner` 已用
   `maxRunSeconds + 10` 包住整张图，`remaining_run_seconds()` / `tool_timeout_seconds()` 还会为写作、
@@ -67,7 +68,7 @@
 - 非目标仍未做：DeepSeek/Model Gateway、X 和小红书 Provider 内部 deadline、Worker/队列、熔断与缓存。
   其中 Model Gateway 是生产化清单下一项 P0-02；X/小红书仍由现有渠道 timeout + 工具外层硬边界保护，
   后续迁移必须保留小红书人工验证暂停计时语义。
-- 下一功能执行门：阻塞（等 #41 验收）。
+- 下一功能执行门：放行（#41 已验收合并；P0-02 已作为 #43 完成，见本文件顶部）。
 
 ## 当前结论（2026-08-04，Issue #39 Web 搜索重试策略已验收合并）
 
