@@ -78,7 +78,8 @@
   TypeScript DeepSeek 客户端。
 - 遗留已清理：`app/llm/deepseek.py` 的 `invoke_structured`、`stream_writer_answer`、
   `invoke_researcher_turn`、`_record_model_span` 已由 Issue
-  [#46](https://github.com/LuzernRR/agent-workbench/issues/46) 全部删除，模块只剩
+  [#46](https://github.com/LuzernRR/agent-workbench/issues/46) 全部删除（PR
+  [#47](https://github.com/LuzernRR/agent-workbench/pull/47) 已合并 `028c9c7`），模块只剩
   `DeepSeekProviderAdapter`，并由 AST 静态测试守住「网络调用只能出现在 adapter 类体内」。
   复核中确认 `invoke_researcher_turn` 无任何调用点，无需先扩展 `ModelResult` 即可删除。
 

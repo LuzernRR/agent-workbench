@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-08-04 |
 | Issue | https://github.com/LuzernRR/agent-workbench/issues/46 |
-| 状态 | awaiting-acceptance |
+| 状态 | accepted |
 | 目标环境 | local |
 
 ## 手册依据
@@ -151,6 +151,9 @@ review 发现。
 
 ## 用户验收
 
-- 状态：等待用户验收
-- 验收反馈：待补充
-- 下一功能执行门：blocked（#46 验收通过前不得开始 P0-03）
+- 状态：验收通过
+- 验收反馈：用户 2026-08-04 回复“确认”。PR
+  [#47](https://github.com/LuzernRR/agent-workbench/pull/47) 已 squash 合入 main（`028c9c7`），
+  #46 以 completed 关闭。
+- 下一功能执行门：放行（#46 已验收合并；下一项按清单顺序为 P0-03 独立 Worker、持久任务队列与租约，
+  须先建带 Problem/Goal/Scope/Non-Goals/DoD 的 Issue 并置 `Execution Gate: allowed` 才能改代码）

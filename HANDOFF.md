@@ -1,10 +1,11 @@
 # 项目交接
 
-## 当前结论（2026-08-04，Issue #46 单一模型路径待验收）
+## 当前结论（2026-08-04，Issue #46 单一模型路径已验收合并）
 
 - 本轮唯一功能为
   [#46](https://github.com/LuzernRR/agent-workbench/issues/46)“清理 deepseek.py 未受 Gateway 治理的
-  第二模型路径”，代码与测试已完成、门禁全绿，**等待用户验收**。开发记录见
+  第二模型路径”，用户 2026-08-04 回复“确认”，验收通过；PR
+  [#47](https://github.com/LuzernRR/agent-workbench/pull/47) 已合并（`028c9c7`）。开发记录见
   [041](docs/development/2026-08-04-041-issue-46-single-model-path.md)。
 - 问题不是「有死代码」：#43 建成 Gateway 后，`invoke_structured` / `stream_writer_answer` /
   `invoke_researcher_turn` / `_record_model_span` 仍在 `deepseek.py` 里，各自绕过 `RetryPolicy`、
@@ -28,7 +29,8 @@
   新增 8 个，其中 AST 守卫、遗留符号缺席、reasoning 剥离 3 个是改前不存在的保护）；`ruff check .`、
   `compileall -q app`、`git diff --check` 通过。本轮未触碰 Web 侧，未跑前端门禁。
 - 生产行为零变化：被删函数在 #43 之后已无生产调用点。
-- 下一功能执行门：**blocked**（#46 验收通过前不得开始 P0-03 独立 Worker、持久任务队列与租约）。
+- 下一功能执行门：**放行**（#46 已验收合并；下一项按清单顺序为 P0-03 独立 Worker、持久任务队列与
+  租约，须先建带 Problem/Goal/Scope/Non-Goals/DoD 的 Issue 并置 `Execution Gate: allowed`）。
 
 ## 上一轮结论（2026-08-04，Issue #43 统一 Model Gateway 已验收）
 
