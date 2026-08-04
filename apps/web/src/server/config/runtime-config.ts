@@ -10,6 +10,7 @@ const modelSchema = z.object({
   description: z.string().min(1),
   reasoningEfforts: z.array(reasoningEffortSchema).min(1),
   defaultReasoningEffort: reasoningEffortSchema,
+  fallbackModel: z.string().min(1).optional(),
   // 配置在服务端；当前所有 DeepSeek 模型均为 false。未来视觉模型还必须
   // 实现媒体 adapter，engine 才会把图片 bytes 交给 Provider。
   capabilities: z.object({ imageInput: z.boolean() }).strict().default({ imageInput: false })
@@ -88,6 +89,19 @@ export function parseRuntimeConfig(input: unknown): AgentRuntimeConfig {
   if (!defaultModel) throw new RuntimeConfigError("默认模型未在模型列表中定义");
   if (!defaultModel.reasoningEfforts.includes(defaultModel.defaultReasoningEffort)) {
     throw new RuntimeConfigError("默认推理强度未在模型能力中定义");
+  }
+  for (const model of config.provider.models) {
+    if (!model.fallbackModel) continue;
+    const fallback = config.provider.models.find((candidate) => candidate.id === model.fallbackModel);
+    if (!fallback || fallback.id === model.id) {
+      throw new RuntimeConfigError("备用模型必须引用另一个已定义模型");
+    }
+    if (!model.reasoningEfforts.every((effort) => fallback.reasoningEfforts.includes(effort))) {
+      throw new RuntimeConfigError("备用模型的推理能力不能低于主模型");
+    }
+    if (model.capabilities.imageInput && !fallback.capabilities.imageInput) {
+      throw new RuntimeConfigError("备用模型的媒体能力不能低于主模型");
+    }
   }
   return config;
 }

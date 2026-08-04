@@ -51,6 +51,41 @@ describe("统一运行配置", () => {
     })).toThrow("默认模型未在模型列表中定义");
   });
 
+  it("只接受显式且能力不降低的备用模型", () => {
+    const primary = {
+      ...validConfig.provider.models[0],
+      fallbackModel: "deepseek-v4-pro"
+    };
+    const stronger = {
+      ...validConfig.provider.models[0],
+      id: "deepseek-v4-pro",
+      name: "DeepSeek V4 Pro",
+      reasoningEfforts: ["medium", "high", "xhigh"],
+      defaultReasoningEffort: "high"
+    };
+    const parsed = parseRuntimeConfig({
+      ...validConfig,
+      provider: { ...validConfig.provider, models: [primary, stronger] }
+    });
+    expect(parsed.provider.models[0].fallbackModel).toBe("deepseek-v4-pro");
+    expect(publicModelDefinitions(parsed)[0]).not.toHaveProperty("fallbackModel");
+
+    expect(() => parseRuntimeConfig({
+      ...validConfig,
+      provider: {
+        ...validConfig.provider,
+        models: [{ ...primary, fallbackModel: "missing" }, stronger]
+      }
+    })).toThrow("备用模型必须引用另一个已定义模型");
+    expect(() => parseRuntimeConfig({
+      ...validConfig,
+      provider: {
+        ...validConfig.provider,
+        models: [primary, { ...stronger, reasoningEfforts: ["medium"] }]
+      }
+    })).toThrow("备用模型的推理能力不能低于主模型");
+  });
+
   it("仅在服务端以显式环境变量覆盖容器数据库地址", () => {
     const config = applyRuntimeEnvironment(parseRuntimeConfig(validConfig), {
       WORKBENCH_DATABASE_URL: "postgresql://workbench:secret@postgres:5432/agent_workbench",

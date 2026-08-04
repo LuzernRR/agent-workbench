@@ -38,6 +38,7 @@ class ModelDefinition:
     name: str
     reasoning_efforts: tuple[str, ...]
     default_reasoning_effort: str
+    fallback_model: str | None
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ def load_runtime_config(path: Path | None = None) -> RuntimeConfig:
             name=item.get("name", item["id"]),
             reasoning_efforts=tuple(item.get("reasoningEfforts", ())),
             default_reasoning_effort=item.get("defaultReasoningEffort", "medium"),
+            fallback_model=item.get("fallbackModel"),
         )
         for item in provider.get("models", ())
         if isinstance(item, dict) and "id" in item
@@ -111,6 +113,15 @@ def load_runtime_config(path: Path | None = None) -> RuntimeConfig:
     default_model = provider.get("defaultModel") or models[0].id
     if all(item.id != default_model for item in models):
         raise ConfigError("默认模型未在模型列表中定义")
+    model_by_id = {item.id: item for item in models}
+    for model in models:
+        if model.fallback_model is None:
+            continue
+        fallback = model_by_id.get(model.fallback_model)
+        if fallback is None or fallback.id == model.id:
+            raise ConfigError("备用模型必须引用另一个已定义模型")
+        if not set(model.reasoning_efforts).issubset(fallback.reasoning_efforts):
+            raise ConfigError("备用模型的推理能力不能低于主模型")
 
     database = raw.get("database") or {}
 

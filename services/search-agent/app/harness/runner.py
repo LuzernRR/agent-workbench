@@ -22,6 +22,8 @@ from app.events.runtime import (
 )
 from app.graph.context import RunContext
 from app.graph.state import initial_state
+from app.llm.factory import model_gateway
+from app.llm.ports import ModelGateway
 from app.observability.trace import TracerFactory, bind_tracer, unbind_tracer
 from app.prompts.agents import PROMPT_VERSION
 from app.run_control import RunRegistry, StopDecision
@@ -96,6 +98,7 @@ class HarnessDependencies:
     milvus: MilvusEvidenceStore | None
     run_registry: RunRegistry
     xiaohongshu_verifications: XiaohongshuVerificationRegistry | None = None
+    model_gateway: ModelGateway | None = None
 
 
 class ResumeScopeError(RuntimeError):
@@ -228,6 +231,7 @@ class HarnessRunner:
             tool_gateway=ToolGateway(dependencies.ledger),  # type: ignore[arg-type]
             milvus=dependencies.milvus,
             xiaohongshu_verifications=dependencies.xiaohongshu_verifications,
+            model_gateway=dependencies.model_gateway or model_gateway(),
         )
         graph_config = {
             "configurable": {"thread_id": f"run:{payload.run_id}"},
