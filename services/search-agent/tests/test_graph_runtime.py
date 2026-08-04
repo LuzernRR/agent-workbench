@@ -27,11 +27,9 @@ from app.graph.schemas import (
     VerifyResult,
 )
 from app.graph.state import initial_state
-from app.llm.contracts import ModelRequest
-from app.llm.deepseek import (
+from app.llm.contracts import (
+    ModelRequest,
     ModelUsage,
-    ResearcherTurn,
-    ResearchToolCall,
     StructuredOutputError,
     WriterStreamError,
 )
@@ -516,13 +514,11 @@ class Scenario:
     verifier_actions: list[str] = field(default_factory=lambda: ["pass"])
     writer_answer: str | None = None
     writer_answers: list[str] = field(default_factory=list)
-    # Writer 走纯 content 流式，不再经过 invoke_structured；这些字段记录流式侧的调用。
+    # Writer 走纯 content 流式，不经结构化输出；这些字段记录流式侧的调用。
     writer_stream_fails: bool = False
     writer_stream_calls: int = 0
     writer_messages: list[Any] = field(default_factory=list)
     writer_stream_chunk_chars: int = 7
-    researcher_mode: str = "valid"
-    include_reasoning: bool = False
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
     result_count_by_query: dict[str, int] = field(default_factory=dict)
     limitations_by_query: dict[str, str] = field(default_factory=dict)
@@ -539,7 +535,6 @@ class Scenario:
     structured_repair_permissions: list[tuple[str, bool]] = field(default_factory=list)
     structured_messages: dict[str, list[Any]] = field(default_factory=dict)
     invalid_structured_roles: set[str] = field(default_factory=set)
-    researcher_messages: list[list[dict[str, Any]]] = field(default_factory=list)
     tool_executions: list[str] = field(default_factory=list)
     tool_execution_searches: list[dict[str, str]] = field(default_factory=list)
     tool_execution_public_only: list[bool] = field(default_factory=list)
@@ -698,81 +693,6 @@ class Scenario:
             total_tokens=10 + len(answer),
             cost_usd=0.000001,
             attempts=1,
-        )
-
-    async def researcher(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None,
-        **kwargs: Any,
-    ) -> ResearcherTurn:
-        self.researcher_messages.append(copy.deepcopy(messages))
-        if kwargs.get("thinking"):
-            return ResearcherTurn(
-                assistant_message={"role": "assistant", "content": "证据观察完成"},
-                tool_calls=(),
-                content="已读取并评估本轮证据",
-                usage=ModelUsage(
-                    input_tokens=10,
-                    output_tokens=5,
-                    total_tokens=15,
-                    cost_usd=0.000001,
-                ),
-                finish_reason="stop",
-            )
-
-        requested = json.loads(str(messages[-1]["content"]).split("：", 1)[-1])
-        target = requested["query"]
-        channel = requested["channel"]
-        self.tool_call_index += 1
-        call_id = f"call_{self.tool_call_index}"
-        if self.researcher_mode == "bad_args":
-            calls = (ResearchToolCall(call_id, "web_search", '{"query":1}'),)
-        elif self.researcher_mode == "unknown_tool":
-            calls = (ResearchToolCall(call_id, "shell", "{}"),)
-        elif self.researcher_mode == "multiple":
-            calls = (
-                ResearchToolCall(
-                    call_id,
-                    "web_search",
-                    json.dumps({"query": target, "channel": channel, "max_results": 5}),
-                ),
-                ResearchToolCall(
-                    f"{call_id}_extra",
-                    "web_search",
-                    json.dumps({"query": target, "channel": channel, "max_results": 5}),
-                ),
-            )
-        else:
-            calls = (ResearchToolCall(
-                call_id,
-                "web_search",
-                json.dumps({"query": target, "channel": channel, "max_results": 5}),
-            ),)
-        assistant_message = {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
-                }
-                for call in calls
-            ],
-        }
-        if self.include_reasoning:
-            assistant_message["reasoning_content"] = "PRIVATE_CHAIN_OF_THOUGHT_SENTINEL"
-        return ResearcherTurn(
-            assistant_message=assistant_message,
-            tool_calls=calls,
-            content="",
-            usage=ModelUsage(
-                input_tokens=10,
-                output_tokens=5,
-                total_tokens=15,
-                cost_usd=0.000001,
-            ),
-            finish_reason="tool_calls",
         )
 
     async def execute_tool(
@@ -1456,7 +1376,6 @@ async def test_single_search_uses_deterministic_tool_id_and_complete_ledger(
     assert len(output["evidence"]) == 1
     assert scenario.tool_executions == ["query one"]
 
-    assert scenario.researcher_messages == []
     tool_call_id = output["tool_traces"][0]["tool_call_id"]
     assert tool_call_id.startswith("call_search_")
     assert output["tool_traces"][0]["research_batch_id"].startswith(
@@ -2046,12 +1965,20 @@ async def test_verifier_research_more_keeps_query_and_channel_structured(
 async def test_planner_approved_arguments_bypass_redundant_researcher_tool_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenario = Scenario(
-        researcher_mode="bad_args",
-    )
+    """计划批准的参数直接执行工具，不经过第二轮模型选参。"""
+
+    scenario = Scenario()
     output, events = await run_scenario(monkeypatch, scenario)
 
-    assert scenario.researcher_messages == []
+    # Gateway 只被语义节点调用；工具参数不再由额外一次模型选参产生，
+    # 因此不会出现参数不合法或未知工具的裁决事件。
+    assert set(scenario.structured_calls) <= {
+        "supervisor",
+        "planner",
+        "reflector",
+        "verifier",
+        "source_curator",
+    }
     assert scenario.tool_executions == ["query one"]
     assert output["tool_calls"] == 1
     assert not any(
@@ -2318,9 +2245,16 @@ async def test_node_run_ids_pair_and_rewrite_runs_are_unique(monkeypatch: pytest
 async def test_private_reasoning_never_crosses_state_checkpoint_or_public_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenario = Scenario(include_reasoning=True)
+    """图层不得把模型内部字段带进 State、checkpoint 或公开事件。
+
+    #46 之后节点只经 ModelGateway 取 ``(parsed, ModelUsage)`` 与纯文本增量，
+    契约本身没有承载 ``reasoning_content`` 的通道，图层已无处注入该字段；
+    真正剥离 reasoning 的行为断言在 ``test_deepseek_model_adapter.py``。
+    本用例保留为结构回归守卫：任何新增的模型内部字段一旦流到公开面就会失败。
+    """
+
+    scenario = Scenario()
     output, events = await run_scenario(monkeypatch, scenario)
-    assert scenario.researcher_messages == []
 
     serialized = json.dumps(
         {
@@ -2338,7 +2272,8 @@ async def test_private_reasoning_never_crosses_state_checkpoint_or_public_events
         ensure_ascii=False,
     )
     assert "reasoning_content" not in serialized
-    assert "PRIVATE_CHAIN_OF_THOUGHT_SENTINEL" not in serialized
+    # reasoning_effort 是请求侧配置，属于公开面；这里只守思维链正文本身。
+    assert "chain_of_thought" not in serialized
 
 
 def _drain_emitter(chunks: list[str], evidence: list[Any], max_chars: int) -> tuple[str, str]:

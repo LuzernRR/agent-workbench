@@ -75,10 +75,12 @@
   closed；Writer 首段正文之后不再重试或切模型；model span 用 `gen_ai.request.model` 与
   `gen_ai.response.model` 区分 primary/effective。
 - 未做（本项范围外）：租户持久配额与 Provider 健康度存储留在 P0-05/P0-08；未迁移 mock/旧预览
-  TypeScript DeepSeek 客户端；`invoke_researcher_turn` 需先扩展 `ModelResult` 表达工具调用才能纳入契约。
-- 遗留：`app/llm/deepseek.py` 的 `invoke_structured`、`stream_writer_answer`、`invoke_researcher_turn`、
-  `_record_model_span` 已无生产调用点，仍被两个既有测试文件和 `scripts/intent_probe.py` 引用，
-  建议单独立 Issue 清理，不要与本项混做。
+  TypeScript DeepSeek 客户端。
+- 遗留已清理：`app/llm/deepseek.py` 的 `invoke_structured`、`stream_writer_answer`、
+  `invoke_researcher_turn`、`_record_model_span` 已由 Issue
+  [#46](https://github.com/LuzernRR/agent-workbench/issues/46) 全部删除，模块只剩
+  `DeepSeekProviderAdapter`，并由 AST 静态测试守住「网络调用只能出现在 adapter 类体内」。
+  复核中确认 `invoke_researcher_turn` 无任何调用点，无需先扩展 `ModelResult` 即可删除。
 
 ### P0-03 独立 Worker、持久任务队列与租约
 

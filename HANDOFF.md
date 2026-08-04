@@ -1,6 +1,36 @@
 # 项目交接
 
-## 当前结论（2026-08-04，Issue #43 统一 Model Gateway 已验收）
+## 当前结论（2026-08-04，Issue #46 单一模型路径待验收）
+
+- 本轮唯一功能为
+  [#46](https://github.com/LuzernRR/agent-workbench/issues/46)“清理 deepseek.py 未受 Gateway 治理的
+  第二模型路径”，代码与测试已完成、门禁全绿，**等待用户验收**。开发记录见
+  [041](docs/development/2026-08-04-041-issue-46-single-model-path.md)。
+- 问题不是「有死代码」：#43 建成 Gateway 后，`invoke_structured` / `stream_writer_answer` /
+  `invoke_researcher_turn` / `_record_model_span` 仍在 `deepseek.py` 里，各自绕过 `RetryPolicy`、
+  `DeadlineBudget`、分层记账与 Gateway span。后续任何改动重新调用它们都不会有测试报警。
+- `app/llm/deepseek.py` 575 → 276 行，只剩 `DeepSeekProviderAdapter` 及其辅助函数。
+- **用静态测试代替约定**：`test_provider_network_calls_only_exist_inside_the_adapter` 解析 AST，
+  模块内所有 `.ainvoke(` / `.create(` 必须落在 `DeepSeekProviderAdapter` 类体内，否则失败——它挡的是
+  「后续把网络调用重新写到类外」，而不是靠 review 发现。
+- **一处诊断修正**：#43 的记录称 `invoke_researcher_turn` 被 `scripts/intent_probe.py` 引用、需先扩展
+  `ModelResult` 才能删。复核代码后确认不成立——探针引用的是 `invoke_structured`，researcher 子回合
+  没有任何调用点，`Scenario.researcher` 测试替身从未被接线（三处 `researcher_messages == []` 恒真）。
+  故本轮直接删除。
+- **一处空转测试被换成真断言**：`test_private_reasoning_never_crosses_...` 原先靠那个从未被接线的
+  替身注入 sentinel，实际从未生效。现新增
+  `test_stream_never_forwards_reasoning_content_to_the_gateway`，用含 `reasoning_content` 的假流断言
+  adapter 只转发 `delta.content`；图层用例保留为结构回归守卫。注意断言不能写成
+  `"reasoning" not in serialized`——State 合法携带请求侧配置 `reasoning_effort`。
+- `StructuredOutputError` / `WriterStreamError` 本就定义在 `app/llm/contracts.py`，此前经 `deepseek.py`
+  转出口；孤立 import 删除后转出口消失，测试改从正源导入。
+- 门禁：`pytest -q` **486 passed in 7.77s**（#43 验收基线 484，净 +2：删 6 个已被等价覆盖的用例，
+  新增 8 个，其中 AST 守卫、遗留符号缺席、reasoning 剥离 3 个是改前不存在的保护）；`ruff check .`、
+  `compileall -q app`、`git diff --check` 通过。本轮未触碰 Web 侧，未跑前端门禁。
+- 生产行为零变化：被删函数在 #43 之后已无生产调用点。
+- 下一功能执行门：**blocked**（#46 验收通过前不得开始 P0-03 独立 Worker、持久任务队列与租约）。
+
+## 上一轮结论（2026-08-04，Issue #43 统一 Model Gateway 已验收）
 
 - 本轮唯一功能为
   [#43](https://github.com/LuzernRR/agent-workbench/issues/43)“Search Agent 统一 Model Gateway 与分层
@@ -29,14 +59,12 @@
 - 门禁：`pytest -q` **484 passed in 8.42s**（#41 验收基线 458，本轮 +26）；`ruff check .`、
   `compileall -q app`、`git diff --check` 通过；Web 侧 `runtime-config.test.ts` 4 passed、
   `npm run typecheck`、`npm run lint` 通过。全部测试用假 Provider + 假时钟，无真实网络、无真实等待。
-- **遗留（已在开发记录写明，建议单独立 Issue）**：`app/llm/deepseek.py` 里的 `invoke_structured`、
-  `stream_writer_answer`、`invoke_researcher_turn` 与 `_record_model_span` 已无生产调用点，仍被
-  `tests/test_structured_output_repair.py`、`tests/test_strict_schema_compatibility.py` 和
-  `scripts/intent_probe.py` 引用。本轮按「只清理自己造成的孤儿」未删除，也未改写既有测试。
+- **遗留（已由 #46 清理完毕）**：`app/llm/deepseek.py` 里的 `invoke_structured`、
+  `stream_writer_answer`、`invoke_researcher_turn` 与 `_record_model_span` 当轮按「只清理自己造成的
+  孤儿」保留，已在 #46 中全部删除，见本文件顶部。
 - 非目标仍未做：租户持久配额、Provider 健康度、熔断/隔离（P0-05/P0-08）；Worker/lease/fencing（P0-03）；
   未迁移 mock/旧预览 TypeScript DeepSeek 客户端；未改 X/小红书/Web Search provider。
-- 下一功能执行门：放行（用户 2026-08-04 回复「通过，继续」，#43 验收通过；下一项按清单顺序为 P0-03
-  独立 Worker、持久任务队列与租约，须先建 Issue 并置 `Execution Gate: allowed`）。
+- 下一功能执行门：当轮放行后已用于 #46；当前执行门以本文件顶部为准。
 
 ## 当前结论（2026-08-04，Issue #41 Web Search 绝对 Deadline 已验收合并）
 

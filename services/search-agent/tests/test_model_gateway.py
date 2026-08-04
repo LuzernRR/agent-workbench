@@ -276,6 +276,27 @@ async def test_schema_repair_failure_stays_invalid_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_schema_violation_without_repair_budget_fails_on_first_attempt() -> None:
+    """AC5：run 预算不允许修复时，格式不合法必须一次失败，不得偷偷重发。"""
+
+    clock = FakeClock()
+    provider = FakeProvider([result(None, input_tokens=10, output_tokens=2)])
+
+    with pytest.raises(StructuredOutputError) as raised:
+        await gateway(provider, clock).generate_structured(
+            request(),
+            DemoResult,
+            allow_repair=False,
+        )
+
+    assert len(provider.calls) == 1
+    assert raised.value.usage.attempts == 1
+    assert raised.value.usage.format_repairs == 0
+    assert raised.value.usage.network_retries == 0
+    assert raised.value.usage.input_tokens == 10
+
+
+@pytest.mark.asyncio
 async def test_stream_failure_after_first_delta_never_retries_or_fallbacks() -> None:
     clock = FakeClock()
     provider = FakeProvider([])
@@ -481,6 +502,32 @@ async def test_external_cancellation_still_records_a_span_and_propagates() -> No
         unbind_tracer(previous)
 
     assert model_spans(recorder)[0].status == "error"
+
+
+@pytest.mark.asyncio
+async def test_no_span_is_recorded_when_tracing_is_off() -> None:
+    """未绑定 tracer 时不取时间戳、不上报 span，行为与开启观测前完全一致。"""
+
+    clock = FakeClock()
+    provider = FakeProvider([result({"value": "ok"})])
+    calls: list[dict[str, Any]] = []
+
+    previous = bind_tracer(None)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                "app.llm.gateway.record_model_call",
+                lambda **kwargs: calls.append(kwargs),
+            )
+            _parsed, usage = await gateway(provider, clock).generate_structured(
+                request(),
+                DemoResult,
+            )
+    finally:
+        unbind_tracer(previous)
+
+    assert usage.attempts == 1
+    assert calls == []
 
 
 @pytest.mark.asyncio
