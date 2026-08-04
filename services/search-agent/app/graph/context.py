@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from app.config.agent import AgentConfig
 
 if TYPE_CHECKING:
+    from app.llm.ports import ModelGateway
     from app.memory.milvus_store import MilvusEvidenceStore
     from app.tools.gateway import ToolGateway
     from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
@@ -19,3 +20,4 @@ class RunContext:
     tool_gateway: ToolGateway
     milvus: MilvusEvidenceStore | None = None
     xiaohongshu_verifications: XiaohongshuVerificationRegistry | None = None
+    model_gateway: ModelGateway | None = None

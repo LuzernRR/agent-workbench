@@ -27,6 +27,7 @@ from app.graph.schemas import (
     VerifyResult,
 )
 from app.graph.state import initial_state
+from app.llm.contracts import ModelRequest
 from app.llm.deepseek import (
     ModelUsage,
     ResearcherTurn,
@@ -532,6 +533,9 @@ class Scenario:
     evidence_needed_by_plan: list[int] = field(default_factory=list)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
+    # 网络重试与格式修复分别记账：attempts 是真实 Provider 尝试数，
+    # format_repairs 只统计 schema feedback 修复。
+    structured_format_repairs: dict[str, int] = field(default_factory=dict)
     structured_repair_permissions: list[tuple[str, bool]] = field(default_factory=list)
     structured_messages: dict[str, list[Any]] = field(default_factory=dict)
     invalid_structured_roles: set[str] = field(default_factory=set)
@@ -553,15 +557,15 @@ class Scenario:
     verification_request_keys: list[str] = field(default_factory=list)
     interaction_wait_ms: int = 0
 
-    async def structured(
+    async def generate_structured(
         self,
-        role: str,
+        request: ModelRequest,
         schema: type[Any],
-        messages: Any,
         *,
-        model_id: str | None = None,
         allow_repair: bool = False,
     ) -> tuple[Any, ModelUsage]:
+        role = request.task_type
+        messages = list(request.messages)
         role_key = "source_curator" if schema is SourcePresentationResult else role
         self.structured_repair_permissions.append((role_key, allow_repair))
         self.structured_messages.setdefault(role_key, []).append(copy.deepcopy(messages))
@@ -569,11 +573,12 @@ class Scenario:
         self.structured_calls[role_key] = index + 1
         if role_key in self.invalid_structured_roles:
             raise StructuredOutputError(ModelUsage(
-                20,
-                4,
-                24,
-                0.000002,
+                input_tokens=20,
+                output_tokens=4,
+                total_tokens=24,
+                cost_usd=0.000002,
                 attempts=2 if allow_repair else 1,
+                format_repairs=1 if allow_repair else 0,
             ))
         if schema is SourcePresentationResult:
             urls = re.findall(
@@ -651,25 +656,31 @@ class Scenario:
             raise AssertionError(role)
         assert isinstance(result, schema)
         return result, ModelUsage(
-            10,
-            5,
-            15,
-            0.000001,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            cost_usd=0.000001,
             attempts=self.structured_attempts.get(role, 1),
+            format_repairs=self.structured_format_repairs.get(role, 0),
         )
 
-    async def stream_writer(
+    async def stream_text(
         self,
-        messages: Any,
-        *,
-        model_id: str | None = None,
+        request: ModelRequest,
     ) -> Any:
         """模拟 Writer 的 content 流：按 chunk 吐增量，末尾给真实 usage。"""
 
+        messages = list(request.messages)
         self.writer_stream_calls += 1
         self.writer_messages.append(copy.deepcopy(messages))
         if self.writer_stream_fails:
-            raise WriterStreamError(ModelUsage(10, 4, 14, 0.000002, attempts=1))
+            raise WriterStreamError(ModelUsage(
+                input_tokens=10,
+                output_tokens=4,
+                total_tokens=14,
+                cost_usd=0.000002,
+                attempts=1,
+            ))
         answer = (
             self.writer_answers[min(
                 self.writer_stream_calls - 1,
@@ -682,10 +693,10 @@ class Scenario:
         for offset in range(0, len(answer), chunk):
             yield answer[offset:offset + chunk]
         yield ModelUsage(
-            10,
-            len(answer),
-            10 + len(answer),
-            0.000001,
+            input_tokens=10,
+            output_tokens=len(answer),
+            total_tokens=10 + len(answer),
+            cost_usd=0.000001,
             attempts=1,
         )
 
@@ -701,7 +712,12 @@ class Scenario:
                 assistant_message={"role": "assistant", "content": "证据观察完成"},
                 tool_calls=(),
                 content="已读取并评估本轮证据",
-                usage=ModelUsage(10, 5, 15, 0.000001),
+                usage=ModelUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                    total_tokens=15,
+                    cost_usd=0.000001,
+                ),
                 finish_reason="stop",
             )
 
@@ -750,7 +766,12 @@ class Scenario:
             assistant_message=assistant_message,
             tool_calls=calls,
             content="",
-            usage=ModelUsage(10, 5, 15, 0.000001),
+            usage=ModelUsage(
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+                cost_usd=0.000001,
+            ),
             finish_reason="tool_calls",
         )
 
@@ -870,8 +891,6 @@ async def run_scenario(
     verification_registry: bool = False,
     **state_overrides: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    monkeypatch.setattr(nodes, "invoke_structured", scenario.structured)
-    monkeypatch.setattr(nodes, "stream_writer_answer", scenario.stream_writer)
     monkeypatch.setattr(nodes, "execute_search_tool", scenario.execute_tool)
 
     state = initial_state(
@@ -886,6 +905,8 @@ async def run_scenario(
         ToolGateway(MemoryLedger()),
         None,
         XiaohongshuVerificationRegistry() if verification_registry else None,
+        # 测试 double 通过 ModelGateway port 注入，不 monkeypatch 具体 provider 函数。
+        scenario,
     )
     graph_config = {
         "configurable": {"thread_id": f"thread_{uuid.uuid4().hex}"},
@@ -1404,7 +1425,11 @@ async def test_invalid_reflector_structure_uses_evidence_and_continues_to_verifi
 async def test_schema_repair_is_counted_and_disables_later_node_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scenario = Scenario(structured_attempts={"planner": 2})
+    # attempts=2 是真实 Provider 尝试；format_repairs=1 才是被计数的 schema 修复。
+    scenario = Scenario(
+        structured_attempts={"planner": 2},
+        structured_format_repairs={"planner": 1},
+    )
     output, _events = await run_scenario(monkeypatch, scenario)
 
     assert output["response_status"] == "completed"

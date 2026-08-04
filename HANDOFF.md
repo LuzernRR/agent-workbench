@@ -1,5 +1,43 @@
 # 项目交接
 
+## 当前结论（2026-08-04，Issue #43 统一 Model Gateway 已验收）
+
+- 本轮唯一功能为
+  [#43](https://github.com/LuzernRR/agent-workbench/issues/43)“Search Agent 统一 Model Gateway 与分层
+  重试”，用户 2026-08-04 回复“通过，继续”，验收通过。开发记录见
+  [040](docs/development/2026-08-04-040-issue-43-model-gateway.md)。
+- **接手时分支上是一次做了一半的迁移**：Gateway/contracts/ports/factory 已写完，`nodes.py` 的 import
+  已删但 7 处调用点还指向已删除的 `invoke_structured` / `stream_writer_answer`，是活的 `NameError`。
+  `pytest -q` 为 53 failed / 424 passed。本轮先补完这 7 处迁移，再逐条核对验收条件。
+- 改前有四个独立缺陷：SDK `max_retries=2` 让 429/超时在应用层不可见（重试叠加）；格式修复复用
+  `ModelUsage.attempts` 导致「限流 3 次」与「模型胡乱输出 3 次」无法区分；没有显式降级路径；业务节点
+  静态耦合具体 Provider，测试只能 monkeypatch 函数名。
+- **四个计数器彻底分开**：`attempts`（真实 Provider 尝试，唯一进 `model_calls`）、`network_retries`、
+  `format_repairs`（全程上限 1）、`fallbacks`。理由不是命名偏好——网络失败要退避后重发同一请求，
+  Schema 不合法则必须追加反馈重新请求，退避毫无意义；合并计数会让预算判断失去依据。
+- **备用模型 fail closed**：`_routes()` 只认配置里显式的 `model.fallbackModel`，没有配置就没有第二个
+  候选，不按名称相似度或列表下一项猜测。配置解析还要求备用模型的推理强度与媒体能力都不低于主模型，
+  Python 与 TypeScript 两侧同时校验。当前 `config/` 未声明任何 `fallbackModel`，线上行为与改前一致。
+- **Writer 首段正文之后不再重试或切模型**：流式回答 append-only，重试会产生重复正文，切模型会造成
+  风格断裂。`produced` 标记之后的任何故障直接抛 `WriterStreamError`。
+- Gateway 复用 #39 的 `RetryPolicy`（Retry-After、full jitter、attempt + elapsed 双上限）与 #41 的
+  `DeadlineBudget`；`_model_request()` 把 Run 剩余时间与剩余成本预算折成 `latency_slo_ms` 和
+  `max_provider_attempts` 传下去，因此模型调用真正受 Run 预算约束。
+- 补了 Gateway 路径缺失的 model span：`primary_model` / `effective_model` 分列为
+  `gen_ai.request.model` / `gen_ai.response.model`，另附 `networkRetries` / `formatRepairs` /
+  `fallbacks`。`except BaseException` 让 `CancelledError` 也留下观测记录，同时原样向上传播。
+- 门禁：`pytest -q` **484 passed in 8.42s**（#41 验收基线 458，本轮 +26）；`ruff check .`、
+  `compileall -q app`、`git diff --check` 通过；Web 侧 `runtime-config.test.ts` 4 passed、
+  `npm run typecheck`、`npm run lint` 通过。全部测试用假 Provider + 假时钟，无真实网络、无真实等待。
+- **遗留（已在开发记录写明，建议单独立 Issue）**：`app/llm/deepseek.py` 里的 `invoke_structured`、
+  `stream_writer_answer`、`invoke_researcher_turn` 与 `_record_model_span` 已无生产调用点，仍被
+  `tests/test_structured_output_repair.py`、`tests/test_strict_schema_compatibility.py` 和
+  `scripts/intent_probe.py` 引用。本轮按「只清理自己造成的孤儿」未删除，也未改写既有测试。
+- 非目标仍未做：租户持久配额、Provider 健康度、熔断/隔离（P0-05/P0-08）；Worker/lease/fencing（P0-03）；
+  未迁移 mock/旧预览 TypeScript DeepSeek 客户端；未改 X/小红书/Web Search provider。
+- 下一功能执行门：放行（用户 2026-08-04 回复「通过，继续」，#43 验收通过；下一项按清单顺序为 P0-03
+  独立 Worker、持久任务队列与租约，须先建 Issue 并置 `Execution Gate: allowed`）。
+
 ## 当前结论（2026-08-04，Issue #41 Web Search 绝对 Deadline 待验收）
 
 - 本轮唯一功能为

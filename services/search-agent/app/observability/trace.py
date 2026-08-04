@@ -62,8 +62,12 @@ _MODEL_ATTRIBUTE_KEYS = frozenset(
         "attempts",
         "costUsd",
         "durationMs",
+        "effectiveModelId",
+        "fallbacks",
+        "formatRepairs",
         "inputTokens",
         "modelId",
+        "networkRetries",
         "outputTokens",
         "provider",
         "reasonCode",
@@ -113,6 +117,7 @@ _RUN_TERMINALS = {
 # 只重命名；不在此列的字段按原名保留。
 _ATTR_RENAME: dict[str, str] = {
     "modelId": "gen_ai.request.model",
+    "effectiveModelId": "gen_ai.response.model",
     "inputTokens": "gen_ai.usage.input_tokens",
     "outputTokens": "gen_ai.usage.output_tokens",
     "toolName": "gen_ai.tool.name",

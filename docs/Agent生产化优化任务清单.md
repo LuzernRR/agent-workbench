@@ -62,12 +62,21 @@
 
 ### P0-02 统一 Model Gateway 与分层重试
 
-- 状态：`blocked`。
+- 状态：`accepted`，Issue [#43](https://github.com/LuzernRR/agent-workbench/issues/43)。
+- 验收：用户 2026-08-04 回复“通过，继续”。
 - 目标技术：内部 `ModelRequest/ModelResult` Pydantic 契约 + Provider adapters；Gateway 统一模型路由、
   租户配额、成本预算、Prompt/模型版本、timeout、fallback、健康度和 OTel 属性。
-- 当前问题：DeepSeek 调用和 Web BFF Provider 逻辑分散；SDK 重试与应用重试可能叠加放大。
-- 最小验收：Search Agent 业务节点不再导入具体 DeepSeek 客户端；只在一个层负责网络重试；格式修复重试
-  与网络重试分别记账；429/5xx、结构化输出失败和备用模型路径均有确定性测试。
+- 已实现：`app/llm/{contracts,ports,gateway,factory}.py`；`nodes.py` 只经 `RunContext.model_gateway`
+  调模型，AST 静态测试守住这条边界；DeepSeek 收进 `DeepSeekProviderAdapter` 且 SDK `max_retries=0`；
+  Gateway 复用 #39 `RetryPolicy` 与 #41 `DeadlineBudget`；`attempts`/`network_retries`/`format_repairs`/
+  `fallbacks` 四项分开记账，格式修复全程上限 1；备用模型只认显式配置且能力不得降低，未配置即 fail
+  closed；Writer 首段正文之后不再重试或切模型；model span 用 `gen_ai.request.model` 与
+  `gen_ai.response.model` 区分 primary/effective。
+- 未做（本项范围外）：租户持久配额与 Provider 健康度存储留在 P0-05/P0-08；未迁移 mock/旧预览
+  TypeScript DeepSeek 客户端；`invoke_researcher_turn` 需先扩展 `ModelResult` 表达工具调用才能纳入契约。
+- 遗留：`app/llm/deepseek.py` 的 `invoke_structured`、`stream_writer_answer`、`invoke_researcher_turn`、
+  `_record_model_span` 已无生产调用点，仍被两个既有测试文件和 `scripts/intent_probe.py` 引用，
+  建议单独立 Issue 清理，不要与本项混做。
 
 ### P0-03 独立 Worker、持久任务队列与租约
 
