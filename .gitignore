@@ -28,6 +28,14 @@ runtime/
 tmp/
 temp/
 
+# 本地基线快照与未入库的一次性探针脚本
+# 已入库的 robots_lock_probe.py 与 title_probe.py 是可复现验证资产，不在此列。
+services/search-agent/.baseline/
+services/search-agent/scripts/intent_probe.py
+services/search-agent/scripts/latency_baseline.py
+services/search-agent/scripts/run_local_live.py
+services/search-agent/scripts/ttft_probe.py
+
 # 编辑器与系统文件
 .idea/
 .vscode/

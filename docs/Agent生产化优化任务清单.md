@@ -52,7 +52,9 @@
 
 ### P0-01 Web Search 绝对 Deadline Propagation
 
-- 状态：`awaiting-acceptance`，Issue [#41](https://github.com/LuzernRR/agent-workbench/issues/41)。
+- 状态：`accepted`，Issue [#41](https://github.com/LuzernRR/agent-workbench/issues/41)，PR
+  [#42](https://github.com/LuzernRR/agent-workbench/pull/42) 已合并（`7b68016`）。
+- 验收：用户 2026-08-04 验收通过。
 - 诊断修正：Run 已有 `maxRunSeconds`、最终写作预留和工具外层硬 timeout；缺口是 Web 内部各层重置相对
   timeout，而不是缺少 Run 终止机制。
 - 已实现：进程内单调时钟 `DeadlineBudget` 从工具入口贯穿 WebChannel、Tavily Key 池、Provider retry、
