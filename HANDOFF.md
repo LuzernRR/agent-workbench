@@ -1,5 +1,41 @@
 # 项目交接
 
+## 当前结论（2026-08-05，Issue #48 PostgreSQL 持久队列与独立 Worker 已自主验收）
+
+- 本轮唯一功能为 [#48](https://github.com/LuzernRR/agent-workbench/issues/48)“P0-03：独立 Worker、
+  PostgreSQL 持久队列与租约 fencing”，`Status: ready`、`Execution Gate: allowed`。用户 2026-08-05
+  明确授权 Codex 依据 DoD 自主判定验收、自动提交并继续下一项；本轮逐条证据通过后标记为 `accepted`。
+  开发记录见 [042](docs/development/2026-08-05-042-issue-48-postgres-run-worker.md)。
+- **Web API 已无任务所有权**：`apps/web/src/server/live/engine.ts` 只校验模型、创建 `queued` Run 和用户
+  事件并返回 `runId`；旧全局 `Map`、`void execute()`、`ensureLiveRecovery()` 和 SSE 内存订阅全部删除。
+  SSE 每秒从 `wb_agent_events` 按持久 seq 补发，断线或切换 Web 实例不改变运行生命周期。
+- **PostgreSQL 是持久队列**：`wb_runs` 新增 `execution_input`、`available_at`、`lease_owner`、
+  `lease_epoch`、`lease_expires_at`、`heartbeat_at`、`worker_attempt` 和 `started_at`；claim 使用 FIFO
+  `ORDER BY available_at, created_at, id FOR UPDATE SKIP LOCKED`，每次领取单调递增 epoch。
+- **fencing 是数据库不变量，不是 Worker 自觉**：heartbeat、业务事件、release、finalize 均要求
+  owner + epoch 匹配且 lease 尚未过期；事件写入先 `SELECT ... FOR UPDATE` 锁定并验证 Run。用户 stop
+  先原子写唯一 `run.cancelled` 并清 lease，再 best-effort 通知 Search Agent，迟到 Worker 无法覆盖。
+- **独立 Worker 复用既有契约**：`apps/web/src/server/worker/` 负责领取、heartbeat、NDJSON 白名单映射、
+  有界重连和 LangGraph `resume=true`。lease 丢失立即 Abort 上游且不再持久化；SIGTERM/SIGINT 停止
+  领取、取消当前连接、交还有效 lease、关闭 PostgreSQL pool。单进程串行执行，可通过 Compose 横向扩容。
+- **镜像运行态发现并修复了两个单测捕获不到的问题**：外部化依赖时 standalone 镜像缺 `zod`；把 `pg`
+  打进 ESM 后又因动态 `require("events")` 失败。最终 Worker 使用 CommonJS bundle，内联纯 JS 依赖，仅
+  排除可选 `pg-native`。最终容器稳定 `Up`，日志有 `worker.started`；真实 SIGTERM 同时记录
+  `worker.shutdown.requested` 与 `worker.stopped`，随后用新 owner 正常重启。
+- 验证：Web 全量 **403 passed / 3 skipped**；Search Agent **486 passed**，Ruff、compileall 通过；
+  隔离临时 PostgreSQL 的 3 项集成测试验证 FIFO、双 Worker 唯一 claim、强制租约过期、epoch +1 接管、
+  旧 Worker heartbeat/event/release/finalize 全拒绝、唯一终态，以及已有表幂等补齐非负约束；类型检查、
+  目标 Lint、Worker/Next 构建、
+  Compose 静态解析和 diff check 通过；E2E 第二轮完整结果 **16 passed / 3 live skipped**。首轮仅“滚动到
+  底部”用例发生时序抖动，聚焦复跑与随后整套复跑均通过，没有修改无关 UI 或放宽断言。
+- 运行环境：Compose 现为 8 个服务，Worker 不开放端口；当前镜像重建通过，真实 SIGTERM 后容器以 0 退出，
+  requested/stopped 日志完整，重启 owner 更新；本地 Web、Search Agent `/health` 为 `ok`，活跃 Run 为 0。
+- 非目标保持：Checkpoint、AgentEvent、Tool Ledger/Outbox 尚未进入同一原子事务，属于 P0-04；本轮没有
+  引入 Redis、Celery/Dramatiq、Temporal、Kafka 或 Kubernetes，也没有处理 OIDC/RBAC、配额和 Migration Job。
+- 下一功能执行门：P0-04 仍为 `blocked`，必须先基于当前真实事务边界创建独立 Issue，写明
+  Problem/Goal/Scope/Non-Goals/DoD 并置 `Execution Gate: allowed`。用户已授权后续按完整 DoD 自主验收，
+  但该授权不允许跳过 Issue 门禁或并行开发。
+
 ## 当前结论（2026-08-04，Issue #46 单一模型路径已验收合并）
 
 - 本轮唯一功能为

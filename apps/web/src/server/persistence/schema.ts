@@ -95,7 +95,15 @@ CREATE TABLE IF NOT EXISTS wb_runs (
   agent_id text NOT NULL,
   model_id text NOT NULL,
   status text NOT NULL CHECK (status IN ('queued', 'running', 'waiting', 'completed', 'failed', 'stopped')),
+  execution_input jsonb NOT NULL DEFAULT '{}'::jsonb,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  lease_owner text,
+  lease_epoch bigint NOT NULL DEFAULT 0 CONSTRAINT wb_runs_lease_epoch_nonnegative CHECK (lease_epoch >= 0),
+  lease_expires_at timestamptz,
+  heartbeat_at timestamptz,
+  worker_attempt integer NOT NULL DEFAULT 0 CONSTRAINT wb_runs_worker_attempt_nonnegative CHECK (worker_attempt >= 0),
   created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
   completed_at timestamptz,
   archived_at timestamptz,
   UNIQUE (id, visitor_id),
@@ -104,6 +112,36 @@ CREATE TABLE IF NOT EXISTS wb_runs (
 
 CREATE INDEX IF NOT EXISTS wb_runs_thread_active_idx
   ON wb_runs(visitor_id, thread_id, created_at) WHERE archived_at IS NULL;
+
+ALTER TABLE wb_runs
+  ADD COLUMN IF NOT EXISTS execution_input jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS lease_owner text,
+  ADD COLUMN IF NOT EXISTS lease_epoch bigint NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+  ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz,
+  ADD COLUMN IF NOT EXISTS worker_attempt integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS started_at timestamptz;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_runs_lease_epoch_nonnegative'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_lease_epoch_nonnegative CHECK (lease_epoch >= 0);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_runs_worker_attempt_nonnegative'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_worker_attempt_nonnegative CHECK (worker_attempt >= 0);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS wb_runs_claim_idx
+  ON wb_runs(available_at, created_at, id)
+  WHERE archived_at IS NULL AND status IN ('queued', 'running', 'waiting');
 
 CREATE TABLE IF NOT EXISTS wb_agent_events (
   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

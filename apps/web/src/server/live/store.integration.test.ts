@@ -1,12 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
-import { query } from "@/server/persistence/database";
+import { closeDatabase, query } from "@/server/persistence/database";
 import {
+  claimNextLiveRun,
   createLiveProject,
   createLiveThread,
   deleteExpiredLiveThreads,
+  finalizeClaimedLiveRun,
   finalizeLiveRun,
+  persistClaimedLiveEvent,
   prepareLiveRun,
+  releaseLiveRunLease,
+  renewLiveRunLease,
   updateLiveThread,
   type PreparedRun
 } from "./store";
@@ -28,6 +33,7 @@ async function prepare(visitorId: string, threadId: string, message: string, rep
     threadId,
     message,
     modelId: "deepseek-v4-flash",
+    agentId: "search-agent",
     attachmentIds: [],
     replaceMessageId,
     memoryRecallItems: 24,
@@ -140,5 +146,82 @@ describe.skipIf(!runLiveIntegration)("真实 PostgreSQL 分层记忆契约", () 
         (SELECT count(*) FROM wb_project_memories WHERE source_thread_id = $1)::text AS memories
     `, [ttlThread!.id]);
     expect(ttlCounts.rows[0]).toEqual({ threads: "0", runs: "0", events: "0", memories: "2" });
+  });
+
+  it("验证 FIFO、并发 claim、租约过期接管和完整 fencing", async () => {
+    const visitorId = await createVisitor();
+    const project = await createLiveProject(visitorId, "Worker 队列项目");
+    const firstThread = await createLiveThread(visitorId, project.id, "先入队");
+    const secondThread = await createLiveThread(visitorId, project.id, "后入队");
+    const first = await prepare(visitorId, firstThread!.id, "第一个持久任务");
+    const second = await prepare(visitorId, secondThread!.id, "第二个持久任务");
+
+    const firstClaim = await claimNextLiveRun("worker-fifo-a", 30_000);
+    const secondClaim = await claimNextLiveRun("worker-fifo-b", 30_000);
+    expect(firstClaim?.run.id).toBe(first.run.id);
+    expect(secondClaim?.run.id).toBe(second.run.id);
+    await finalizeClaimedLiveRun(firstClaim!, "stopped", {});
+    await finalizeClaimedLiveRun(secondClaim!, "stopped", {});
+
+    const takeoverThread = await createLiveThread(visitorId, project.id, "故障接管");
+    const takeoverRun = await prepare(visitorId, takeoverThread!.id, "模拟 Worker kill");
+    const concurrent = await Promise.all([
+      claimNextLiveRun("worker-race-a", 30_000),
+      claimNextLiveRun("worker-race-b", 30_000)
+    ]);
+    const original = concurrent.find((claim) => claim?.run.id === takeoverRun.run.id);
+    expect(concurrent.filter(Boolean)).toHaveLength(1);
+    expect(original).toBeTruthy();
+
+    await query("UPDATE wb_runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [takeoverRun.run.id]);
+    const replacement = await claimNextLiveRun("worker-replacement", 30_000);
+    expect(replacement).toMatchObject({
+      run: { id: takeoverRun.run.id },
+      lease: { epoch: original!.lease.epoch + 1 },
+      resume: true,
+      attempt: original!.attempt + 1
+    });
+
+    await expect(renewLiveRunLease(original!, 30_000)).resolves.toBe(false);
+    await expect(releaseLiveRunLease(original!)).resolves.toBe(false);
+    await expect(persistClaimedLiveEvent(original!, "run.status", { status: "late" })).resolves.toBeNull();
+    await expect(finalizeClaimedLiveRun(original!, "completed", {})).resolves.toBeNull();
+
+    await expect(persistClaimedLiveEvent(replacement!, "run.status", { status: "running", recovered: true })).resolves.toMatchObject({
+      runId: takeoverRun.run.id,
+      type: "run.status"
+    });
+    await expect(finalizeClaimedLiveRun(replacement!, "completed", { finishReason: "stop" })).resolves.toEqual([
+      expect.objectContaining({ type: "run.completed" })
+    ]);
+    await expect(finalizeLiveRun(takeoverRun.run, "stopped", {})).resolves.toBeNull();
+
+    const terminalEvents = await query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM wb_agent_events
+      WHERE run_id = $1 AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+    `, [takeoverRun.run.id]);
+    expect(terminalEvents.rows[0].count).toBe("1");
+  });
+
+  it("已有运行表会幂等补齐 epoch 与 attempt 的非负约束", async () => {
+    await query(`
+      ALTER TABLE wb_runs
+        DROP CONSTRAINT IF EXISTS wb_runs_lease_epoch_nonnegative,
+        DROP CONSTRAINT IF EXISTS wb_runs_worker_attempt_nonnegative
+    `);
+    await closeDatabase();
+
+    const constraints = await query<{ conname: string }>(`
+      SELECT conname
+      FROM pg_constraint
+      WHERE conrelid = 'wb_runs'::regclass
+        AND conname IN ('wb_runs_lease_epoch_nonnegative', 'wb_runs_worker_attempt_nonnegative')
+      ORDER BY conname
+    `);
+    expect(constraints.rows.map((row) => row.conname)).toEqual([
+      "wb_runs_lease_epoch_nonnegative",
+      "wb_runs_worker_attempt_nonnegative"
+    ]);
   });
 });

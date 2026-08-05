@@ -6,7 +6,8 @@
 ## 使用规则
 
 1. 严格按 P0 → P1 → P2 和同级编号执行；同一时间只允许一个 GitHub Issue / 一个功能处于开发状态。
-2. 当前功能未获得用户明确验收前，下一项保持 `Execution Gate: blocked`，不得提前修改代码。
+2. 默认必须获得用户明确验收；若用户明确授权 Codex 依据 DoD 自主验收并连续推进，必须在开发记录中保存
+   该授权与逐项证据，未满足任一 DoD 时仍不得开启下一项。当前持续优化目标已于 2026-08-05 获得该授权。
 3. 每项开始前都要重新核对仓库现状和手册原文，把目标切成可独立验证、可回滚的最小 Issue。
 4. 技术栈是默认决策，不是无条件堆组件：初期优先模块化单体 + 独立 Worker；Temporal、Kafka、Kubernetes
    和专用向量库只有在长事务、吞吐、隔离或团队运维能力有证据支持时才引入。
@@ -32,14 +33,14 @@
 |---|---|---|---|
 | Web/BFF | Next.js + React + TypeScript，SSE 事件流 | 已使用 Next.js 16、React 19、TypeScript，BFF 对 AgentEvent 做 Zod 校验 | 基础匹配 |
 | Agent Runtime | Python 3.12 + FastAPI + Pydantic 2 + LangGraph | 已落地显式图、预算、事件、PostgreSQL Checkpoint | 主栈匹配，恢复边界仍不完整 |
-| 数据 | PostgreSQL 为权威状态；Redis 只做缓存/锁/限流；对象存储保存产物 | PostgreSQL 已保存运行账本和 Checkpoint；尚无完整 Outbox/Inbox、队列与备份恢复门禁 | 部分匹配 |
-| 模型层 | 统一 Model Gateway 负责路由、配额、重试、降级、成本和版本 | Search Agent 与 Web 仍各自直接调用 DeepSeek/Provider | 明显缺口 |
+| 数据 | PostgreSQL 为权威状态；Redis 只做缓存/锁/限流；对象存储保存产物 | PostgreSQL 已保存运行账本、Checkpoint 和带 lease/fencing 的持久队列；尚无完整 Outbox/Inbox 与备份恢复门禁 | 部分匹配 |
+| 模型层 | 统一 Model Gateway 负责路由、配额、重试、降级、成本和版本 | 生产 Search Agent 已统一走 Model Gateway；旧 mock/预览客户端仍独立，持久租户配额与健康熔断未完成 | 主路径匹配，治理待补 |
 | 工具层 | Tool Registry/Gateway 负责 Schema、鉴权、幂等、审批和审计 | 已有 Tool Ledger、稳定事件和部分安全门禁，但缺统一策略执行面 | 部分匹配 |
 | RAG | PostgreSQL FTS + pgvector 起步，Hybrid + RRF + Rerank，ACL 先过滤 | Compose 有 pgvector，但实际证据记忆走 Milvus + hashing embedding，尚无完整企业知识摄取和混合检索 | 技术路线未收敛 |
 | 身份与租户 | OIDC/SSO；RBAC + ABAC；每次工具/数据访问服务端复核 | 主要是内部静态 token、环境 tenant 和数据字段过滤，没有真实用户身份与策略引擎 | P0 缺口 |
 | 可观测性 | OTel SDK/Collector + Metric/Trace/Log，Prometheus/Grafana；可选 Langfuse | 已有隐私门控 span、OTel GenAI 属性和可选 LangSmith sink，未接 Collector、指标面板和 SLO 告警 | 部分匹配 |
 | 评测 | 30-100 条初始 Golden Cases，轨迹/恢复/安全/成本发布门禁 | 已有 replay/scorer 和大量确定性测试，但未形成足量 Golden Cases 与 CI 质量阈值 | 部分匹配 |
-| 代码架构 | domain/application/ports/adapters；模块化单体 + 独立 Worker | `graph/nodes.py` 已约 3122 行，编排、业务规则和适配逻辑仍集中 | 维护性风险 |
+| 代码架构 | domain/application/ports/adapters；模块化单体 + 独立 Worker | Node Run Worker 已与无状态 API 分离；`graph/nodes.py` 仍约 3014 行，编排、业务规则和适配逻辑集中 | 部分匹配，维护性风险 |
 
 ## P0：生产正确性与恢复
 
@@ -85,12 +86,17 @@
 
 ### P0-03 独立 Worker、持久任务队列与租约
 
-- 状态：`blocked`。
+- 状态：`accepted`，Issue [#48](https://github.com/LuzernRR/agent-workbench/issues/48)。
 - 目标技术：先用 PostgreSQL `FOR UPDATE SKIP LOCKED` 或 Redis + Dramatiq/Celery 承载短/中任务；
   API 与 Worker 进程分离；Run 表使用 `lease_owner/lease_epoch/lease_expires_at`、heartbeat 和 fencing token。
   只有跨小时/天、外部事件等待和复杂补偿达到实际需求时，才引入 Temporal 外层工作流。
-- 最小验收：kill Worker 后任务可被另一 Worker 接管；旧 Worker 的迟到提交被 fencing 拒绝；优雅停机停止
-  领取新任务、释放 lease、flush trace；同一 Run 不会被并行启动两次。
+- 已实现：API 只持久化 `queued` Run 与用户事件；独立 Node Worker 从 PostgreSQL FIFO 队列领取；每次
+  claim 单调递增 epoch，heartbeat、事件、release 和 finalize 都校验 owner + epoch + 未过期租约；SSE
+  只轮询持久事件。Compose 使用同一 Web 镜像启动可横向扩展且不开放端口的 Worker 服务。
+- 验收：隔离 PostgreSQL 故障注入证明并发 claim 唯一、过期后接管 `resume=true`、旧 Worker 的四类迟到
+  操作全部拒绝且终态唯一；容器实测 SIGTERM 停止领取、关闭连接并可重新启动。用户 2026-08-05 明确
+  授权 Codex 自主判定验收并自动继续；本项按完整 DoD 证据验收。
+- 未做：Checkpoint、AgentEvent 与 Outbox 的同事务原子边界明确留给 P0-04。
 
 ### P0-04 Checkpoint、AgentEvent 与 Outbox 原子边界
 
@@ -235,14 +241,19 @@
 
 - 状态：`blocked`。
 - 当前问题：README、HANDOFF、路线图和真实部署能力会随逐 Issue 开发发生状态漂移。
+- 当前依赖基线：2026-08-05 `npm audit --omit=dev` 报告 Next.js 内嵌 `postcss <= 8.5.22` 的 2 个
+  moderate 告警；自动修复要求越过当前版本范围升级 Next 16.3.0，须在独立依赖升级 Issue 中验证，禁止
+  在无关功能使用 `audit fix --force`。
 - 目标：从代码/配置生成可验证的能力清单和版本矩阵；CI 检查失效链接、过期状态、Schema/Prompt/Graph
   版本与迁移记录；发布生成 SBOM、镜像签名、变更清单和回滚说明。
 
 ## 后续模型接手步骤
 
 1. 先读 `AGENTS.md`、`HANDOFF.md`、本清单顶部和最后一个 `docs/development/` 记录。
-2. 核对上一 Issue 是否已由用户明确验收、PR 是否合并、Issue 是否关闭；没有则只做收口，不开下一项。
+2. 核对上一 Issue 是否已明确验收，或是否存在用户授予的自主验收授权；同时核对 PR 是否合并、Issue 是否
+   关闭。没有验收/授权或缺少 DoD 证据时只做收口，不开下一项。
 3. 从本清单取第一个非 `accepted` 且前置已满足的条目，先建立带 Problem/Goal/Scope/Non-Goals/DoD 的
    GitHub Issue；只有 `Status: ready` 且 `Execution Gate: allowed` 才能改功能代码。
 4. 用真实代码和故障注入验证，不因手册列出某组件就直接引入；任何偏离默认技术栈都写 ADR。
-5. 验证后将本清单条目标为 `awaiting-acceptance` 并停下，等待用户明确验收。
+5. 默认验证后标为 `awaiting-acceptance` 并停下；仅在已有明确自主验收授权且全部 DoD 有直接证据时，才可
+   标为 `accepted`、完成提交/PR/Issue 闭环并继续下一项。

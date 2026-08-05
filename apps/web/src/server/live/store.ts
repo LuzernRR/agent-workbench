@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+import { z } from "zod";
 import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
 import type { AgentEvent, AgentEventType, AgentThreadState, MessageAttachment, ProjectSummary, ThreadSnapshot, ThreadSummary } from "@/lib/agent-events/types";
 import { ImageInputError, MAX_IMAGE_INPUTS_PER_RUN, prepareImageInput, type PreparedImageInput } from "@/server/media/image-input";
 import { query, transaction } from "@/server/persistence/database";
+import type { SearchAgentExecutionInput } from "@/server/search-agent/mapper";
 
 type ProjectRow = { id: string; name: string; path: string; status: ProjectSummary["status"] };
 type ThreadRow = {
@@ -78,13 +80,47 @@ export type PreparedRun = {
   userMessageId: string;
 };
 
-export type RecoverableSearchRun = {
+const durableSearchRunInputSchema = z.object({
+  version: z.literal(1),
+  message: z.string().min(1),
+  history: z.array(z.object({
+    role: z.enum(["user", "assistant"]),
+    content: z.string()
+  }).strict()).max(40),
+  attachmentIds: z.array(z.string().min(1)).max(32),
+  projectMemoryContext: z.string(),
+  reasoningEffort: z.enum(["medium", "high", "xhigh", "max"])
+}).strict();
+
+type DurableSearchRunInput = z.infer<typeof durableSearchRunInputSchema>;
+
+export type LiveRunLease = {
+  owner: string;
+  epoch: number;
+};
+
+export type ClaimedLiveRun = {
   run: LiveRunRecord;
-  message: string;
-  history: Array<{ role: "user" | "assistant"; content: string }>;
-  attachmentContext: string;
-  projectMemoryContext: string;
-  reasoningEffort: "medium" | "high" | "xhigh" | "max";
+  lease: LiveRunLease;
+  input: SearchAgentExecutionInput;
+  resume: boolean;
+  attempt: number;
+  leaseExpiresAt: string;
+};
+
+type ClaimedRunIdentity = Pick<ClaimedLiveRun, "run" | "lease">;
+
+type ClaimRow = {
+  id: string;
+  visitor_id: string;
+  thread_id: string;
+  project_id: string | null;
+  model_id: string;
+  agent_id: string;
+  execution_input: unknown;
+  lease_epoch: string | number;
+  lease_expires_at: Date | string;
+  worker_attempt: number;
 };
 
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -270,9 +306,9 @@ export async function getLiveSnapshot(visitorId: string, threadId: string): Prom
   const [events, projects, activeRun] = await Promise.all([
     eventRows(visitorId, threadId),
     thread.project_id ? listLiveProjects(visitorId) : Promise.resolve([]),
-    query<{ id: string; status: "running" | "waiting" }>(`
+    query<{ id: string; status: "queued" | "running" | "waiting" }>(`
       SELECT id, status FROM wb_runs
-      WHERE visitor_id = $1 AND thread_id = $2 AND archived_at IS NULL AND status IN ('running', 'waiting')
+      WHERE visitor_id = $1 AND thread_id = $2 AND archived_at IS NULL AND status IN ('queued', 'running', 'waiting')
       ORDER BY created_at DESC LIMIT 1
     `, [visitorId, threadId])
   ]);
@@ -329,8 +365,38 @@ async function insertEventWithClient(client: PoolClient, run: LiveRunRecord, typ
   return agentEvent(result.rows[0]);
 }
 
-export async function persistLiveEvent(run: LiveRunRecord, type: AgentEventType, payload: Record<string, unknown>) {
-  return transaction((client) => insertEventWithClient(client, run, type, payload));
+function prepareRunAttachments(rows: AttachmentRow[]) {
+  const sections: string[] = [];
+  const imageInputs: PreparedImageInput[] = [];
+  for (const attachment of rows) {
+    if (attachment.kind === "image") {
+      try {
+        imageInputs.push(prepareImageInput({
+          id: attachment.id,
+          mimeType: attachment.mime_type,
+          sizeBytes: attachment.size_bytes,
+          bytes: attachment.bytes
+        }));
+      } catch {
+        // 旧附件或被篡改的 MIME 只能保留为用户附件，不得传给任何模型。
+      }
+    }
+    const textLike = attachment.mime_type.startsWith("text/") || ["application/json", "application/xml"].includes(attachment.mime_type);
+    if (textLike && attachment.bytes.byteLength <= 64 * 1024) {
+      try {
+        const content = new TextDecoder("utf-8", { fatal: true }).decode(attachment.bytes).trim();
+        sections.push(`附件《${attachment.name}》：\n${content}`);
+        continue;
+      } catch {
+        // A binary or invalid UTF-8 attachment is represented by metadata only.
+      }
+    }
+    sections.push(`附件《${attachment.name}》（${attachment.mime_type}，${attachment.size_bytes} 字节）`);
+  }
+  if (imageInputs.length > MAX_IMAGE_INPUTS_PER_RUN) {
+    throw new ImageInputError("IMAGE_INPUT_TOO_MANY", "单次最多处理 4 张图片");
+  }
+  return { attachmentContext: sections.join("\n\n"), imageInputs };
 }
 
 async function recallProjectMemory(client: PoolClient, input: {
@@ -553,36 +619,7 @@ export async function prepareLiveRun(input: {
       WHERE visitor_id = $1 AND thread_id = $2 AND id = ANY($3::text[])
       ORDER BY created_at
     `, [input.visitorId, input.threadId, input.attachmentIds]) : { rows: [] as AttachmentRow[] };
-    const sections: string[] = [];
-    const imageInputs: PreparedImageInput[] = [];
-    for (const attachment of attachmentResult.rows) {
-      if (attachment.kind === "image") {
-        try {
-          imageInputs.push(prepareImageInput({
-            id: attachment.id,
-            mimeType: attachment.mime_type,
-            sizeBytes: attachment.size_bytes,
-            bytes: attachment.bytes
-          }));
-        } catch {
-          // 旧附件或被篡改的 MIME 只能保留为用户附件，不得传给任何模型。
-        }
-      }
-      const textLike = attachment.mime_type.startsWith("text/") || ["application/json", "application/xml"].includes(attachment.mime_type);
-      if (textLike && attachment.bytes.byteLength <= 64 * 1024) {
-        try {
-          const content = new TextDecoder("utf-8", { fatal: true }).decode(attachment.bytes).trim();
-          sections.push(`附件《${attachment.name}》：\n${content}`);
-          continue;
-        } catch {
-          // A binary or invalid UTF-8 attachment is represented by metadata only.
-        }
-      }
-      sections.push(`附件《${attachment.name}》（${attachment.mime_type}，${attachment.size_bytes} 字节）`);
-    }
-    if (imageInputs.length > MAX_IMAGE_INPUTS_PER_RUN) {
-      throw new ImageInputError("IMAGE_INPUT_TOO_MANY", "单次最多处理 4 张图片");
-    }
+    const { attachmentContext, imageInputs } = prepareRunAttachments(attachmentResult.rows);
 
     const run: LiveRunRecord = {
       id: liveId("run"),
@@ -592,10 +629,18 @@ export async function prepareLiveRun(input: {
       modelId: input.modelId,
       agentId: input.agentId || "chat"
     };
+    const executionInput: DurableSearchRunInput = {
+      version: 1,
+      message: input.message,
+      history,
+      attachmentIds: attachmentResult.rows.map((attachment) => attachment.id),
+      projectMemoryContext,
+      reasoningEffort: input.reasoningEffort || "medium"
+    };
     await client.query(`
-      INSERT INTO wb_runs (id, visitor_id, thread_id, project_id, agent_id, model_id, status)
-      VALUES ($1, $2, $3, $4, $5, $6, 'running')
-    `, [run.id, run.visitorId, run.threadId, run.projectId, run.agentId, run.modelId]);
+      INSERT INTO wb_runs (id, visitor_id, thread_id, project_id, agent_id, model_id, status, execution_input, available_at)
+      VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb, now())
+    `, [run.id, run.visitorId, run.threadId, run.projectId, run.agentId, run.modelId, JSON.stringify(executionInput)]);
     const isFirstMessage = !selected.some((message) => message.role === "user");
     await client.query(`
       UPDATE wb_threads
@@ -609,7 +654,198 @@ export async function prepareLiveRun(input: {
     await insertEventWithClient(client, run, "run.created", { agentId: run.agentId, modelId: run.modelId, reasoningEffort: input.reasoningEffort || "medium" });
     await insertEventWithClient(client, run, "message.started", { messageId: userMessageId, role: "user", text: input.message, attachments });
     await insertEventWithClient(client, run, "message.completed", { messageId: userMessageId, text: input.message, attachments });
-    return { run, history, attachmentContext: sections.join("\n\n"), imageInputs, projectMemoryContext, userMessageId };
+    return { run, history, attachmentContext, imageInputs, projectMemoryContext, userMessageId };
+  });
+}
+
+type LiveRunCompletion = {
+  events: Array<{ type: AgentEventType; payload: Record<string, unknown> }>;
+  memory?: ProjectExchangeInput;
+};
+
+function leaseMilliseconds(value: number) {
+  if (!Number.isInteger(value) || value < 1 || value > 86_400_000) {
+    throw new Error("Worker lease 必须是 1 到 86400000 之间的整数毫秒");
+  }
+  return value;
+}
+
+function leaseOwner(value: string) {
+  const owner = value.trim();
+  if (!owner || owner.length > 240) throw new Error("Worker owner 必须是 1 到 240 字符");
+  return owner;
+}
+
+export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number): Promise<ClaimedLiveRun | null> {
+  const owner = leaseOwner(ownerInput);
+  const leaseMs = leaseMilliseconds(leaseMsInput);
+  const row = await transaction(async (client) => {
+    const result = await client.query<ClaimRow>(`
+      WITH candidate AS (
+        SELECT id
+        FROM wb_runs
+        WHERE archived_at IS NULL
+          AND agent_id = 'search-agent'
+          AND available_at <= now()
+          AND (
+            status = 'queued'
+            OR (
+              status IN ('running', 'waiting')
+              AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+            )
+          )
+        ORDER BY available_at, created_at, id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE wb_runs run
+      SET status = 'running',
+          lease_owner = $1,
+          lease_epoch = run.lease_epoch + 1,
+          lease_expires_at = now() + ($2::int * interval '1 millisecond'),
+          heartbeat_at = now(),
+          worker_attempt = run.worker_attempt + 1,
+          started_at = COALESCE(run.started_at, now())
+      FROM candidate
+      WHERE run.id = candidate.id
+      RETURNING run.id, run.visitor_id, run.thread_id, run.project_id, run.model_id,
+        run.agent_id, run.execution_input, run.lease_epoch, run.lease_expires_at, run.worker_attempt
+    `, [owner, leaseMs]);
+    return result.rows[0] ?? null;
+  });
+  if (!row) return null;
+
+  const epoch = Number(row.lease_epoch);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error("Worker lease epoch 无效");
+  const identity: ClaimedRunIdentity = {
+    run: {
+      id: row.id,
+      visitorId: row.visitor_id,
+      threadId: row.thread_id,
+      projectId: row.project_id,
+      modelId: row.model_id,
+      agentId: row.agent_id
+    },
+    lease: { owner, epoch }
+  };
+  const parsed = durableSearchRunInputSchema.safeParse(row.execution_input);
+  if (!parsed.success) {
+    await finalizeClaimedLiveRun(identity, "failed", {
+      message: "运行输入不可恢复，请重新发送",
+      reasonCode: "RUN_INPUT_INVALID"
+    });
+    return null;
+  }
+
+  const attachmentResult = parsed.data.attachmentIds.length ? await query<AttachmentRow>(`
+    SELECT id, name, mime_type, size_bytes, kind, bytes
+    FROM wb_attachments
+    WHERE visitor_id = $1 AND thread_id = $2 AND id = ANY($3::text[])
+    ORDER BY array_position($3::text[], id)
+  `, [row.visitor_id, row.thread_id, parsed.data.attachmentIds]) : { rows: [] as AttachmentRow[] };
+  const attachments = prepareRunAttachments(attachmentResult.rows);
+  const resume = epoch > 1 || row.worker_attempt > 1;
+  return {
+    ...identity,
+    input: {
+      message: parsed.data.message,
+      history: parsed.data.history,
+      attachmentContext: attachments.attachmentContext,
+      imageInputs: attachments.imageInputs,
+      projectMemoryContext: parsed.data.projectMemoryContext,
+      reasoningEffort: parsed.data.reasoningEffort,
+      resume
+    },
+    resume,
+    attempt: row.worker_attempt,
+    leaseExpiresAt: iso(row.lease_expires_at)
+  };
+}
+
+export async function renewLiveRunLease(claim: ClaimedRunIdentity, leaseMsInput: number) {
+  const leaseMs = leaseMilliseconds(leaseMsInput);
+  const result = await query(`
+    UPDATE wb_runs
+    SET lease_expires_at = now() + ($4::int * interval '1 millisecond'), heartbeat_at = now()
+    WHERE id = $1 AND lease_owner = $2 AND lease_epoch = $3
+      AND archived_at IS NULL
+      AND status IN ('running', 'waiting')
+      AND lease_expires_at > now()
+  `, [claim.run.id, claim.lease.owner, claim.lease.epoch, leaseMs]);
+  return result.rowCount === 1;
+}
+
+export async function releaseLiveRunLease(claim: ClaimedRunIdentity) {
+  const result = await query(`
+    UPDATE wb_runs
+    SET status = 'queued', available_at = now(), lease_owner = NULL, lease_expires_at = NULL
+    WHERE id = $1 AND lease_owner = $2 AND lease_epoch = $3
+      AND archived_at IS NULL
+      AND status IN ('running', 'waiting')
+      AND lease_expires_at > now()
+  `, [claim.run.id, claim.lease.owner, claim.lease.epoch]);
+  return result.rowCount === 1;
+}
+
+async function lockClaimedLiveRun(client: PoolClient, claim: ClaimedRunIdentity) {
+  const result = await client.query(`
+    SELECT 1
+    FROM wb_runs
+    WHERE id = $1 AND lease_owner = $2 AND lease_epoch = $3
+      AND archived_at IS NULL
+      AND status IN ('running', 'waiting')
+      AND lease_expires_at > now()
+    FOR UPDATE
+  `, [claim.run.id, claim.lease.owner, claim.lease.epoch]);
+  return result.rowCount === 1;
+}
+
+export async function persistClaimedLiveEvent(claim: ClaimedRunIdentity, type: AgentEventType, payload: Record<string, unknown>) {
+  return transaction(async (client) => {
+    if (!await lockClaimedLiveRun(client, claim)) return null;
+    return insertEventWithClient(client, claim.run, type, payload);
+  });
+}
+
+async function appendLiveRunFinalization(
+  client: PoolClient,
+  run: LiveRunRecord,
+  status: "completed" | "failed" | "stopped",
+  payload: Record<string, unknown>,
+  completion?: LiveRunCompletion
+) {
+  await client.query(
+    "UPDATE wb_threads SET status = $3, updated_at = now() WHERE id = $1 AND visitor_id = $2",
+    [run.threadId, run.visitorId, status === "completed" || status === "stopped" ? "idle" : "failed"]
+  );
+  if (completion?.memory) await rememberProjectExchangeWithClient(client, run, completion.memory);
+  const events: AgentEvent[] = [];
+  for (const event of completion?.events ?? []) {
+    events.push(await insertEventWithClient(client, run, event.type, event.payload));
+  }
+  const eventType: AgentEventType = status === "completed" ? "run.completed" : status === "stopped" ? "run.cancelled" : "run.failed";
+  events.push(await insertEventWithClient(client, run, eventType, payload));
+  return events;
+}
+
+export async function finalizeClaimedLiveRun(
+  claim: ClaimedRunIdentity,
+  status: "completed" | "failed" | "stopped",
+  payload: Record<string, unknown>,
+  completion?: LiveRunCompletion
+) {
+  return transaction(async (client) => {
+    const transitioned = await client.query(`
+      UPDATE wb_runs
+      SET status = $4, completed_at = now(), lease_owner = NULL, lease_expires_at = NULL
+      WHERE id = $1 AND lease_owner = $2 AND lease_epoch = $3
+        AND archived_at IS NULL
+        AND status IN ('running', 'waiting')
+        AND lease_expires_at > now()
+      RETURNING id
+    `, [claim.run.id, claim.lease.owner, claim.lease.epoch, status]);
+    if (!transitioned.rowCount) return null;
+    return appendLiveRunFinalization(client, claim.run, status, payload, completion);
   });
 }
 
@@ -617,92 +853,20 @@ export async function finalizeLiveRun(
   run: LiveRunRecord,
   status: "completed" | "failed" | "stopped",
   payload: Record<string, unknown>,
-  completion?: {
-    events: Array<{ type: AgentEventType; payload: Record<string, unknown> }>;
-    memory?: ProjectExchangeInput;
-  }
+  completion?: LiveRunCompletion
 ) {
   return transaction(async (client) => {
     const transitioned = await client.query(`
       UPDATE wb_runs
-      SET status = $3, completed_at = now()
+      SET status = $3, completed_at = now(), lease_owner = NULL, lease_expires_at = NULL
       WHERE id = $1 AND visitor_id = $2
         AND archived_at IS NULL
         AND status IN ('queued', 'running', 'waiting')
       RETURNING id
     `, [run.id, run.visitorId, status]);
-    // Stop, provider completion and provider failure can race. The first
-    // terminal transition owns the durable terminal event; late contenders do
-    // nothing and can never overwrite the winning status.
+    // User stop, provider completion and provider failure race for one durable terminal event.
     if (!transitioned.rowCount) return null;
-    await client.query(
-      "UPDATE wb_threads SET status = $3, updated_at = now() WHERE id = $1 AND visitor_id = $2",
-      [run.threadId, run.visitorId, status === "completed" || status === "stopped" ? "idle" : "failed"]
-    );
-    if (completion?.memory) await rememberProjectExchangeWithClient(client, run, completion.memory);
-    const events: AgentEvent[] = [];
-    for (const event of completion?.events ?? []) {
-      events.push(await insertEventWithClient(client, run, event.type, event.payload));
-    }
-    const eventType: AgentEventType = status === "completed" ? "run.completed" : status === "stopped" ? "run.cancelled" : "run.failed";
-    events.push(await insertEventWithClient(client, run, eventType, payload));
-    return events;
-  });
-}
-
-export async function recoverInterruptedLiveRuns(input: { memoryRecallItems: number; memoryMaxChars: number }) {
-  return transaction(async (client) => {
-    const interrupted = await client.query<{ id: string; visitor_id: string; thread_id: string; project_id: string | null; model_id: string; agent_id: string }>(`
-      SELECT id, visitor_id, thread_id, project_id, model_id, agent_id
-      FROM wb_runs
-      WHERE archived_at IS NULL AND status IN ('queued', 'running', 'waiting')
-      FOR UPDATE
-    `);
-    const resumable: RecoverableSearchRun[] = [];
-    let failed = 0;
-    for (const row of interrupted.rows) {
-      const run: LiveRunRecord = { id: row.id, visitorId: row.visitor_id, threadId: row.thread_id, projectId: row.project_id, modelId: row.model_id, agentId: row.agent_id };
-      if (row.agent_id === "search-agent") {
-        const eventResult = await client.query<EventRow>(`
-          SELECT id, seq, project_id, thread_id, run_id, created_at, event_type, payload
-          FROM wb_agent_events
-          WHERE visitor_id = $1 AND thread_id = $2 AND archived_at IS NULL
-          ORDER BY seq
-        `, [row.visitor_id, row.thread_id]);
-        const messages = completedMessages(eventResult.rows);
-        const currentIndex = messages.findLastIndex((message) => message.runId === row.id && message.role === "user");
-        if (currentIndex >= 0) {
-          const prior = messages.slice(0, currentIndex).slice(-40);
-          const projectMemoryContext = await recallProjectMemory(client, {
-            visitorId: row.visitor_id,
-            projectId: row.project_id,
-            query: messages[currentIndex].content,
-            excludedRunIds: [...new Set(prior.map((message) => message.runId))],
-            recallItems: input.memoryRecallItems,
-            maxChars: input.memoryMaxChars
-          });
-          const created = eventResult.rows.find((event) => event.run_id === row.id && event.event_type === "run.created");
-          const effort = created?.payload.reasoningEffort;
-          resumable.push({
-            run,
-            message: messages[currentIndex].content,
-            history: prior.map(({ role, content }) => ({ role, content })),
-            attachmentContext: "",
-            projectMemoryContext,
-            reasoningEffort: effort === "high" || effort === "xhigh" || effort === "max" ? effort : "medium"
-          });
-          continue;
-        }
-      }
-      await client.query("UPDATE wb_runs SET status = 'failed', completed_at = now() WHERE id = $1", [run.id]);
-      await client.query("UPDATE wb_threads SET status = 'failed', updated_at = now() WHERE id = $1 AND visitor_id = $2", [run.threadId, run.visitorId]);
-      await insertEventWithClient(client, run, "run.failed", {
-        message: row.agent_id === "search-agent" ? "Search Agent 恢复输入缺失，请重新发送" : "服务重启导致上次生成中断，请重新发送",
-        reasonCode: row.agent_id === "search-agent" ? "RECOVERY_INPUT_MISSING" : "LEGACY_RUN_INTERRUPTED"
-      });
-      failed += 1;
-    }
-    return { failed, resumable };
+    return appendLiveRunFinalization(client, run, status, payload, completion);
   });
 }
 

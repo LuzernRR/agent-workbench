@@ -295,6 +295,49 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  worker:
+    image: ${WEB_IMAGE:-agent-workbench/web:local}
+    restart: unless-stopped
+    init: true
+    command: ["node", "apps/web/dist/worker.cjs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      search-agent:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      AGENT_RUNTIME_CONFIG_PATH: /workspace/config/agent-runtime.local.json
+      SEARCH_AGENT_CONFIG_PATH: /workspace/config/search-agent.json
+      WORKBENCH_DATABASE_URL: ${WORKBENCH_DATABASE_URL:?WORKBENCH_DATABASE_URL is required}
+      WORKBENCH_DATABASE_SSL: ${WORKBENCH_DATABASE_SSL:-false}
+      WORKBENCH_DATABASE_POOL_MAX: ${WORKBENCH_WORKER_DATABASE_POOL_MAX:-5}
+      WORKBENCH_SEARCH_AGENT_ORIGIN: http://search-agent:8100
+      WORKBENCH_INTERNAL_TOKEN: ${WORKBENCH_INTERNAL_TOKEN:?WORKBENCH_INTERNAL_TOKEN is required}
+      WORKBENCH_RUN_LEASE_MS: ${WORKBENCH_RUN_LEASE_MS:-30000}
+      WORKBENCH_RUN_HEARTBEAT_MS: ${WORKBENCH_RUN_HEARTBEAT_MS:-10000}
+      WORKBENCH_RUN_POLL_MS: ${WORKBENCH_RUN_POLL_MS:-500}
+    volumes:
+      - type: bind
+        source: ../config
+        target: /workspace/config
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+    networks:
+      - agent-backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   agent-workbench-live-postgres:
     name: ${POSTGRES_VOLUME_NAME:-001-agent-live-postgres-v1}
