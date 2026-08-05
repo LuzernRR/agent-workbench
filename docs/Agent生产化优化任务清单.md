@@ -86,7 +86,8 @@
 
 ### P0-03 独立 Worker、持久任务队列与租约
 
-- 状态：`accepted`，Issue [#48](https://github.com/LuzernRR/agent-workbench/issues/48)。
+- 状态：`accepted`，Issue [#48](https://github.com/LuzernRR/agent-workbench/issues/48)，PR
+  [#49](https://github.com/LuzernRR/agent-workbench/pull/49)。
 - 目标技术：先用 PostgreSQL `FOR UPDATE SKIP LOCKED` 或 Redis + Dramatiq/Celery 承载短/中任务；
   API 与 Worker 进程分离；Run 表使用 `lease_owner/lease_epoch/lease_expires_at`、heartbeat 和 fencing token。
   只有跨小时/天、外部事件等待和复杂补偿达到实际需求时，才引入 Temporal 外层工作流。

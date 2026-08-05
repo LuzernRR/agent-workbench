@@ -223,6 +223,7 @@ owner、runId、attempt、epoch、outcome 与稳定错误文本，不记录 Prom
 
 - 状态：验收通过。A1-A11 均有本轮直接证据，Codex 依据用户授权判定为 `accepted`。
 - 验收授权：用户 2026-08-05 明确要求“自行判断是否通过，并自动提交继续下一个”。
-- GitHub 状态：等待本分支提交、PR 自审合并和 Issue 关闭；合并前不会开启 P0-04。
+- GitHub 状态：提交 `c6103bb` 已推送，PR [#49](https://github.com/LuzernRR/agent-workbench/pull/49)
+  已创建并关联 #48，等待自审合并；合并前不会开启 P0-04。
 - 下一功能执行门：P0-04 保持阻塞；#48 的 PR 合并且 Issue 关闭后，才创建 P0-04 独立 Issue 并重新设置
   `Status: ready`、`Execution Gate: allowed`。
