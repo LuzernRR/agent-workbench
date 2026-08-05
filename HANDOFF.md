@@ -5,7 +5,8 @@
 - 本轮唯一功能为 [#48](https://github.com/LuzernRR/agent-workbench/issues/48)“P0-03：独立 Worker、
   PostgreSQL 持久队列与租约 fencing”，`Status: ready`、`Execution Gate: allowed`。用户 2026-08-05
   明确授权 Codex 依据 DoD 自主判定验收、自动提交并继续下一项；本轮逐条证据通过后标记为 `accepted`。
-  PR [#49](https://github.com/LuzernRR/agent-workbench/pull/49)，开发记录见
+  PR [#49](https://github.com/LuzernRR/agent-workbench/pull/49) 已 squash 合入 main（`1f16041`），#48 以
+  completed 关闭；开发记录见
   [042](docs/development/2026-08-05-042-issue-48-postgres-run-worker.md)。
 - **Web API 已无任务所有权**：`apps/web/src/server/live/engine.ts` 只校验模型、创建 `queued` Run 和用户
   事件并返回 `runId`；旧全局 `Map`、`void execute()`、`ensureLiveRecovery()` 和 SSE 内存订阅全部删除。
