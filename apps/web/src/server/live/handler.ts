@@ -9,7 +9,7 @@ import {
   SearchAgentVerificationError
 } from "@/server/search-agent/client";
 import { resolveVisitor, VisitorSessionError } from "@/server/session/visitor";
-import { ensureLiveRecovery, startLiveRun, stopLiveRun, subscribeLiveRun } from "./engine";
+import { startLiveRun, stopLiveRun } from "./engine";
 import {
   activeEventsForRun,
   createLiveProject,
@@ -45,7 +45,6 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
   const record = await liveRun(visitorId, runId);
   if (!record) return fail("运行不存在", 404);
   const encoder = new TextEncoder();
-  let unsubscribe: (() => boolean) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let catchupTimer: ReturnType<typeof setInterval> | null = null;
   const stream = new ReadableStream<Uint8Array>({
@@ -57,7 +56,6 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
         closed = true;
         if (heartbeat) clearInterval(heartbeat);
         if (catchupTimer) clearInterval(catchupTimer);
-        unsubscribe?.();
       };
       const close = () => {
         cleanup();
@@ -73,9 +71,6 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
         }
         return ["run.completed", "run.failed", "run.cancelled"].includes(event.type);
       };
-      unsubscribe = subscribeLiveRun(runId, (event) => {
-        if (send(event)) close();
-      });
       let catchingUp = false;
       const catchup = async () => {
         if (closed || catchingUp) return;
@@ -98,8 +93,8 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
       };
       await catchup();
       if (closed) return;
-      // The in-memory subscriber is only a latency optimization. Polling the
-      // durable event table keeps SSE correct across disconnects and instances.
+      // SSE is deliberately backed only by the durable event ledger. It can
+      // reconnect to any Web instance without sharing Worker process memory.
       catchupTimer = setInterval(() => { void catchup(); }, 1_000);
       heartbeat = setInterval(() => {
         if (closed) return;
@@ -110,7 +105,6 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
     cancel() {
       if (heartbeat) clearInterval(heartbeat);
       if (catchupTimer) clearInterval(catchupTimer);
-      unsubscribe?.();
     }
   });
   return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", "x-accel-buffering": "no" } });
@@ -118,7 +112,6 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
 
 export async function handleLive(request: Request, rawPath: string): Promise<Response> {
   try {
-    await ensureLiveRecovery();
     const visitor = await resolveVisitor(request);
     const [path, search] = rawPath.split("?");
     const method = request.method.toUpperCase();

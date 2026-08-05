@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  ensureLiveRecovery: vi.fn(async () => 0),
   liveRun: vi.fn(),
   verificationStatus: vi.fn(),
   verificationQrcode: vi.fn(),
@@ -9,10 +8,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./engine", () => ({
-  ensureLiveRecovery: mocks.ensureLiveRecovery,
   startLiveRun: vi.fn(),
-  stopLiveRun: vi.fn(),
-  subscribeLiveRun: vi.fn(() => null)
+  stopLiveRun: vi.fn()
 }));
 
 vi.mock("./store", () => ({

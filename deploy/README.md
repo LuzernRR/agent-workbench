@@ -1,7 +1,8 @@
 # 部署与运维
 
-`deploy/compose.yaml` 管理当前可交付的七个服务：Web、Search Agent、PostgreSQL、
-Milvus、etcd、MinIO 与内部 `xiaohongshu-mcp`。Milvus 使用项目独立目录
+`deploy/compose.yaml` 管理当前可交付的八个服务：Web、独立 Run Worker、Search Agent、PostgreSQL、
+Milvus、etcd、MinIO 与内部 `xiaohongshu-mcp`。Worker 与 Web 使用同一镜像但运行不同入口；Worker 不
+开放端口，可用 `docker compose ... --scale worker=2` 横向扩展。Milvus 使用项目独立目录
 `D:\001-agent\milvus`，不会读取、停止、重建或删除既有 `D:\milvus` 实例和数据。
 
 ## 本地启动
@@ -27,11 +28,13 @@ docker compose --env-file config/deploy.local.env -f deploy/compose.yaml up -d -
 docker compose --env-file config/deploy.local.env -f deploy/compose.yaml ps
 ```
 
-验证 Web、Search Agent 与项目 Milvus：
+验证 Web、Search Agent、Run Worker 与项目 Milvus：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:3000/health
 Invoke-RestMethod http://127.0.0.1:8080/health
+docker compose --env-file config/deploy.local.env -f deploy/compose.yaml ps worker
+docker compose --env-file config/deploy.local.env -f deploy/compose.yaml logs --tail 20 worker
 docker compose --env-file config/deploy.local.env -f deploy/compose.yaml exec milvus `
   curl --fail http://127.0.0.1:9091/healthz
 ```
@@ -45,6 +48,12 @@ MCP 的公网 ingress。
 Search Agent 的 `/health` 在 Milvus 不可达时返回 `degraded`，进程仍可执行不带
 向量记忆的搜索。PostgreSQL 不可达时服务启动失败，这是有意的 fail-closed：
 checkpoint 与搜索幂等账本不能在生产环境静默丢失。
+
+Web API 只创建 `queued` Run 和用户事件，不直接调用模型或搜索。Worker 使用 PostgreSQL
+`FOR UPDATE SKIP LOCKED` 领取任务，默认 lease 30 秒、heartbeat 10 秒；每次接管递增 epoch，事件、
+续租、释放和终态提交都必须匹配 owner + epoch。SIGTERM/SIGINT 会停止领取、取消当前上游连接、交还
+未完成 lease 并关闭数据库连接。Worker 崩溃时不执行清理，租约到期后由其他实例以 `resume=true`
+从 LangGraph Checkpoint 接管。
 
 ## 小红书登录
 
@@ -76,11 +85,11 @@ Apache-2.0 许可证。项目补丁只把搜索页的全局 network-idle 等待�
 
 - 非密钥默认值集中在 `config/search-agent.json`；密钥只保存在被忽略的
   `config/*.local.json` 或生产密钥管理系统中。镜像构建不会复制 `config/`。
-- Compose 将 `config/` 只读挂载到 Web 与 Search Agent。生产环境必须设置随机的
+- Compose 将 `config/` 只读挂载到 Web、Run Worker 与 Search Agent。生产环境必须设置随机的
   `POSTGRES_PASSWORD`、与其一致且密码已 URL 编码的
   `SEARCH_AGENT_DATABASE_URL`，以及 `WORKBENCH_INTERNAL_TOKEN`。
 - `config/deploy.env.example` 只列变量名和非密钥占位值，不可作为生产密钥文件。
-- Web、PostgreSQL 和 Search Agent 的宿主机端口默认只绑定 `127.0.0.1`；
+- Web、PostgreSQL 和 Search Agent 的宿主机端口默认只绑定 `127.0.0.1`；Run Worker 不发布端口；
   Milvus、etcd、MinIO 与小红书 MCP 不发布宿主机端口，小红书 MCP 使用独立的
   私有/出站网络。
   不得直接暴露 MCP、数据库、对象存储或 gRPC 端口到公网。

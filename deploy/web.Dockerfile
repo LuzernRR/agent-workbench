@@ -30,6 +30,7 @@ WORKDIR /workspace
 COPY --from=builder --chown=workbench:workbench /workspace/apps/web/.next/standalone ./
 COPY --from=builder --chown=workbench:workbench /workspace/apps/web/public ./apps/web/public
 COPY --from=builder --chown=workbench:workbench /workspace/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=workbench:workbench /workspace/apps/web/dist ./apps/web/dist
 
 USER 10001:10001
 EXPOSE 3100

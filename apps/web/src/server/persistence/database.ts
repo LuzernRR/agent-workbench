@@ -69,3 +69,11 @@ export async function transaction<T>(operation: (client: PoolClient) => Promise<
     client.release();
   }
 }
+
+export async function closeDatabase() {
+  const activePool = databaseGlobal.__workbenchPool;
+  databaseGlobal.__workbenchPool = undefined;
+  databaseGlobal.__workbenchSchemaPromise = undefined;
+  databaseGlobal.__workbenchDatabaseUrl = undefined;
+  await activePool?.end();
+}

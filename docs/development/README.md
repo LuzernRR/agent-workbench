@@ -37,4 +37,5 @@
 - [Web Search 绝对 Deadline 贯穿 Key 池、fallback 与抓取](2026-08-04-039-issue-41-web-search-deadline.md)
 - [Search Agent 统一 Model Gateway 与分层重试](2026-08-04-040-issue-43-model-gateway.md)
 - [清理 deepseek.py 未受 Gateway 治理的第二模型路径](2026-08-04-041-issue-46-single-model-path.md)
+- [PostgreSQL 持久队列、独立 Worker 与租约 fencing](2026-08-05-042-issue-48-postgres-run-worker.md)
 - [开发记录模板](TEMPLATE.md)

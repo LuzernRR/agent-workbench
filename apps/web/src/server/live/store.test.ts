@@ -7,7 +7,20 @@ const database = vi.hoisted(() => ({
 
 vi.mock("@/server/persistence/database", () => database);
 
-import { buildProjectMemoryContext, deleteExpiredLiveThreads, finalizeLiveRun, prepareLiveRun, recoverInterruptedLiveRuns, rememberProjectExchange, updateLiveThread } from "./store";
+import {
+  buildProjectMemoryContext,
+  claimNextLiveRun,
+  deleteExpiredLiveThreads,
+  finalizeClaimedLiveRun,
+  finalizeLiveRun,
+  getLiveSnapshot,
+  persistClaimedLiveEvent,
+  prepareLiveRun,
+  releaseLiveRunLease,
+  rememberProjectExchange,
+  renewLiveRunLease,
+  updateLiveThread
+} from "./store";
 
 const timestamp = new Date("2026-07-26T00:00:00.000Z");
 
@@ -54,6 +67,27 @@ describe("live 数据保留与项目记忆", () => {
     expect(sql).toContain("updated_at < now() - ($1::int * interval '1 day')");
     expect(sql).toContain("status NOT IN ('running', 'waiting')");
     expect(values).toEqual([3]);
+  });
+
+  it("Worker 尚未领取时快照仍保留 queued Run 的活动状态", async () => {
+    database.query.mockImplementation((sql: string) => {
+      if (sql.includes("FROM wb_threads WHERE")) {
+        return Promise.resolve({
+          rowCount: 1,
+          rows: [{ id: "thread-one", project_id: null, title: "排队会话", status: "running", updated_at: timestamp, last_user_message_at: timestamp }]
+        });
+      }
+      if (sql.includes("FROM wb_agent_events")) return Promise.resolve({ rowCount: 0, rows: [] });
+      if (sql.includes("FROM wb_runs")) return Promise.resolve({ rowCount: 1, rows: [{ id: "run-queued", status: "queued" }] });
+      return Promise.resolve({ rowCount: 0, rows: [] });
+    });
+
+    const snapshot = await getLiveSnapshot("visitor-one", "thread-one");
+
+    expect(snapshot?.state.activeRunId).toBe("run-queued");
+    expect(snapshot?.state.runStatus).toBe("queued");
+    const activeSql = String(database.query.mock.calls.find(([sql]) => String(sql).includes("FROM wb_runs"))?.[0]);
+    expect(activeSql).toContain("status IN ('queued', 'running', 'waiting')");
   });
 
   it("按访客、项目、来源会话与运行保存完整共享记忆", async () => {
@@ -142,6 +176,85 @@ describe("live 数据保留与项目记忆", () => {
     }, "stopped", {})).resolves.toBeNull();
     expect(clientQuery).toHaveBeenCalledTimes(1);
     expect(String(clientQuery.mock.calls[0][0])).toContain("status IN ('queued', 'running', 'waiting')");
+  });
+
+  it("以 FIFO 和 SKIP LOCKED 原子领取运行并递增 fencing epoch", async () => {
+    const clientQuery = vi.fn().mockResolvedValue({
+      rowCount: 1,
+      rows: [{
+        id: "run-queue",
+        visitor_id: "visitor-one",
+        thread_id: "thread-one",
+        project_id: "project-one",
+        model_id: "deepseek-v4-flash",
+        agent_id: "search-agent",
+        execution_input: {
+          version: 1,
+          message: "排队问题",
+          history: [],
+          attachmentIds: [],
+          projectMemoryContext: "",
+          reasoningEffort: "high"
+        },
+        lease_epoch: "2",
+        lease_expires_at: timestamp,
+        worker_attempt: 2
+      }]
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    const claimed = await claimNextLiveRun("worker-two", 30_000);
+
+    expect(claimed).toMatchObject({
+      run: { id: "run-queue" },
+      lease: { owner: "worker-two", epoch: 2 },
+      attempt: 2,
+      resume: true,
+      input: { message: "排队问题", resume: true }
+    });
+    const [sql, values] = clientQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("FOR UPDATE SKIP LOCKED");
+    expect(sql).toContain("ORDER BY available_at, created_at, id");
+    expect(sql).toContain("lease_epoch = run.lease_epoch + 1");
+    expect(sql).toContain("lease_expires_at IS NULL OR lease_expires_at <= now()");
+    expect(values).toEqual(["worker-two", 30_000]);
+  });
+
+  it("heartbeat 与 release 都要求 owner、epoch 和未过期租约", async () => {
+    database.query.mockResolvedValue({ rowCount: 1, rows: [] });
+    const claimed = {
+      run: { id: "run-one", visitorId: "visitor-one", threadId: "thread-one", projectId: null, modelId: "deepseek-v4-flash" },
+      lease: { owner: "worker-one", epoch: 7 }
+    };
+
+    await expect(renewLiveRunLease(claimed, 30_000)).resolves.toBe(true);
+    await expect(releaseLiveRunLease(claimed)).resolves.toBe(true);
+
+    const renewSql = String(database.query.mock.calls[0][0]);
+    const releaseSql = String(database.query.mock.calls[1][0]);
+    expect(renewSql).toContain("lease_owner = $2 AND lease_epoch = $3");
+    expect(renewSql).toContain("lease_expires_at > now()");
+    expect(releaseSql).toContain("lease_owner = $2 AND lease_epoch = $3");
+    expect(releaseSql).toContain("lease_expires_at > now()");
+    expect(releaseSql).toContain("status = 'queued'");
+  });
+
+  it("迟到 Worker 无法写事件或抢占终态", async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+    const claimed = {
+      run: { id: "run-one", visitorId: "visitor-one", threadId: "thread-one", projectId: null, modelId: "deepseek-v4-flash" },
+      lease: { owner: "worker-old", epoch: 3 }
+    };
+
+    await expect(persistClaimedLiveEvent(claimed, "run.status", { status: "running" })).resolves.toBeNull();
+    await expect(finalizeClaimedLiveRun(claimed, "completed", {})).resolves.toBeNull();
+
+    expect(String(clientQuery.mock.calls[0][0])).toContain("FOR UPDATE");
+    expect(String(clientQuery.mock.calls[0][0])).toContain("lease_owner = $2 AND lease_epoch = $3");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("lease_owner = $2 AND lease_epoch = $3");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("lease_expires_at > now()");
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_agent_events"))).toBe(false);
   });
 
   it("同会话只拼接活动分支上已完成的历史消息", async () => {
@@ -352,39 +465,4 @@ describe("live 数据保留与项目记忆", () => {
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_project_memories"))).toBe(false);
   });
 
-  it("只恢复 search-agent 原 runId，普通 chat 仍按重启中断失败结算", async () => {
-    let sequence = 600;
-    const recoveryEvents = [
-      eventRow({ id: "601", runId: "run-search", type: "run.created", payload: { agentId: "search-agent", modelId: "deepseek-v4-flash", reasoningEffort: "high" } }),
-      eventRow({ id: "602", runId: "run-search", type: "message.started", payload: { messageId: "user-search", role: "user", text: "恢复这个搜索问题" } }),
-      eventRow({ id: "603", runId: "run-search", type: "message.completed", payload: { messageId: "user-search", text: "恢复这个搜索问题" } })
-    ];
-    const clientQuery = vi.fn().mockImplementation((sql: string, values?: unknown[]) => {
-      if (sql.includes("FROM wb_runs") && sql.includes("FOR UPDATE")) {
-        return Promise.resolve({ rowCount: 2, rows: [
-          { id: "run-search", visitor_id: "visitor-one", thread_id: "thread-current", project_id: null, model_id: "deepseek-v4-flash", agent_id: "search-agent" },
-          { id: "run-chat", visitor_id: "visitor-one", thread_id: "thread-current", project_id: null, model_id: "deepseek-v4-flash", agent_id: "chat" }
-        ] });
-      }
-      if (sql.includes("FROM wb_agent_events") && sql.includes("ORDER BY seq")) return Promise.resolve({ rowCount: recoveryEvents.length, rows: recoveryEvents });
-      if (sql.includes("INSERT INTO wb_agent_events")) {
-        sequence += 1;
-        return Promise.resolve({ rowCount: 1, rows: [{ id: `event-${sequence}`, seq: sequence, project_id: null, thread_id: "thread-current", run_id: "run-chat", created_at: timestamp, event_type: values?.[5], payload: JSON.parse(String(values?.[6])) }] });
-      }
-      return Promise.resolve({ rowCount: 1, rows: [] });
-    });
-    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
-
-    const recovered = await recoverInterruptedLiveRuns({ memoryRecallItems: 24, memoryMaxChars: 16_000 });
-
-    expect(recovered.failed).toBe(1);
-    expect(recovered.resumable).toEqual([expect.objectContaining({
-      run: expect.objectContaining({ id: "run-search", agentId: "search-agent" }),
-      message: "恢复这个搜索问题",
-      reasoningEffort: "high"
-    })]);
-    expect(clientQuery.mock.calls.some(([sql, values]) => String(sql).includes("UPDATE wb_runs SET status = 'failed'") && values?.[0] === "run-chat")).toBe(true);
-    const failureInsert = clientQuery.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO wb_agent_events"));
-    expect(JSON.parse(String(failureInsert?.[1]?.[6]))).toMatchObject({ reasonCode: "LEGACY_RUN_INTERRUPTED" });
-  });
 });

@@ -20,11 +20,11 @@ LangGraph、PostgreSQL 17、Milvus 与真实多渠道搜索；一次运行已形
 | 消息编辑 | 被编辑运行及下游分支归档，界面和 Prompt 只读取活动分支 | 归档数据保留用于审计 |
 | 附件 | 图片直接预览，文本附件以严格 UTF-8 拼入模型上下文 | 图片尚未作为多模态模型输入 |
 | 结果展示 | LLM 按内容选择短段落、列表、步骤或 Markdown 表格 | 移动端表格在内容区内横向滚动 |
-| 流式体验 | 页面关闭后服务端继续生成；后台标签立即追平；用户上滚后停止自动跟随，点击“滚动到底部”后恢复持续跟随 | 服务进程重启会把未完成运行标记失败，不自动重发模型请求 |
+| 流式体验 | API 持久入队，独立 Worker 执行；页面关闭后继续生成，刷新按 seq 补发 | Worker 故障后租约到期，由新 Worker 使用同一 runId 和 LangGraph Checkpoint 恢复 |
 | 停止运行 | 收到真实 `runId` 后才显示停止；AbortController 中断上游；数据库原子抢占唯一终态 | 重复停止幂等返回当前终态；取消事件后不再写正文、完成事件或项目记忆 |
 | 拖拽 | 项目直接拖动排序，会话可拖入、拖出或跨项目移动 | 使用专用手柄，排序和归属持久化 |
 | LangGraph 编排 | Supervisor、Planner、Researcher、Reflector、Writer、Verifier 通过条件边形成有界循环 | 公开的只是各 Agent 结构化 LLM 摘要，不保存或展示私有思维链 |
-| 真实搜索 | Researcher 自主选择 Web、X 或小红书；每个 `toolCallId` 保留 started/progress/completed 幂等账本 | 当前产品配置为 `forceSearch: true`；零结果或证据不足时可改写查询、换渠道并在三轮硬预算内补搜 |
+| 真实搜索 | Researcher 自主选择 Web、X 或小红书；每个 `toolCallId` 保留 started/progress/completed 幂等账本 | 当前产品配置为 `forceSearch: false`；需要实时事实或证据不足时可改写查询、换渠道并在三轮硬预算内补搜 |
 | 过程展示 | 按真实 seq 显示各 Agent 的公开自然语言文段，思考与核验通过持久 `thinking.delta` 渐进呈现 | 当前步骤展开；自身完成后不立即折叠，直到下一个不同步骤出现。连续同类输出留在同一区域，不折叠后重开；不展示私有 CoT |
 | 搜索展示 | 同一连续搜索段随真实 `tool.progress` 增加为“找到 N 条结果，读取 M 个来源”；相关且已读的来源由 Source Curator 生成 `tool.source.delta` 并逐字增长 | 规范 URL 与发现 URL 使用同一安全身份关联；展开链接是已读来源的相关安全子集，未读候选、无效过程文案及只作排除依据的来源不会投影到会话 |
 | 最终回答 | BFF 原子持久化 `message.started → message.delta → message.completed`，浏览器按多个绘制帧渐进显示 | 完成事件保留同一全文用于刷新恢复，不会在 delta 之前整段覆盖 |
@@ -36,17 +36,19 @@ LangGraph、PostgreSQL 17、Milvus 与真实多渠道搜索；一次运行已形
 flowchart LR
     U["用户输入、模型与附件"] --> API["POST /api/v1/threads/{id}/runs"]
     API --> TX["PostgreSQL 事务：run 与用户事件"]
+    TX --> Q["持久 FIFO 队列"]
+    Q --> W["独立 Node Worker：lease + epoch + heartbeat"]
     ID["本轮 Provider、模型名称和 ID"] --> PR["系统 Prompt 与上下文组装"]
     PM["同项目其他会话记忆"] --> PR
     TX --> PR
-    PR --> BFF["Next BFF"]
-    BFF --> LG["Python LangGraph StateGraph"]
+    W --> PR
+    PR --> LG["Python LangGraph StateGraph"]
     LG --> A["Supervisor → Planner → Researcher"]
     A --> T["真实网页搜索与证据读取"]
     T --> R["Reflector → Writer → Verifier"]
     R -->|"证据不足且预算允许"| A
-    R --> PE["公开 AgentEvent 先写 PostgreSQL"]
-    PE --> PS["可选 SSE 订阅者"]
+    R --> PE["Worker 以 fencing token 写 AgentEvent"]
+    PE --> PS["SSE 按持久 seq 轮询与补发"]
     PS --> Z["Zod 校验、序号去重、Reducer"]
     Z --> UI["对话、表格、代码与状态"]
     PE --> SNAP["会话快照"]
@@ -57,7 +59,7 @@ flowchart LR
     STOP --> LG
 ```
 
-模型运行属于服务端任务，不依赖页面或 SSE 是否存在。Next BFF 只接收 Python Agent 的严格 NDJSON 白名单事件，持久化后再发布 SSE；刷新时由 PostgreSQL 事件重放得到同一投影。每个真实工具调用仍保留独立 `toolCallId`、幂等账本和来源；前端只对相邻同类活动做连续段归并，因此既能压缩重复行，也不会破坏 `思考 → 搜索 → 思考 → 核验` 的真实顺序。最终回答也先以 durable `message.delta` 进入同一渲染队列，再用 `message.completed` 原子收口。
+模型运行属于 PostgreSQL 持久任务，不依赖页面、SSE 或 Web 进程生命周期。Next API 只入队；独立 Worker 领取后接收 Python Agent 的严格 NDJSON 白名单事件，所有业务事件和终态写入都校验 `lease_owner + lease_epoch`。刷新或切换 Web 实例时，SSE 只从 PostgreSQL 按 seq 补发。每个真实工具调用仍保留独立 `toolCallId`、幂等账本和来源；前端只对相邻同类活动做连续段归并，因此既能压缩重复行，也不会破坏 `思考 → 搜索 → 思考 → 核验` 的真实顺序。最终回答也先以 durable `message.delta` 进入同一渲染队列，再用 `message.completed` 原子收口。
 
 ## 本地运行
 
