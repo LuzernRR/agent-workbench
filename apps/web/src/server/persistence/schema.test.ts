@@ -29,4 +29,39 @@ describe("工作台数据库结构", () => {
     expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_worker_attempt_nonnegative");
     expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE INDEX IF NOT EXISTS wb_runs_claim_idx");
   });
+
+  it("checkpoint 权威引用、source inbox 与 event outbox 由数据库约束", () => {
+    expect(WORKBENCH_SCHEMA_SQL).toContain("revision bigint NOT NULL DEFAULT 0");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("checkpoint_id text");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("checkpoint_session_id text");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("checkpoint_ns text");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("checkpoint_step bigint");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_revision_nonnegative");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_checkpoint_reference_complete");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_checkpoint_id_valid");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_checkpoint_authority");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_runs_revision_monotonic");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("FROM pg_trigger");
+    expect(WORKBENCH_SCHEMA_SQL).not.toContain("DROP TRIGGER IF EXISTS wb_runs_revision_monotonic");
+
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS wb_checkpoint_commits");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("PRIMARY KEY (run_id, checkpoint_id)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("UNIQUE (run_id, revision)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("UNIQUE (run_id, revision, checkpoint_id)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_checkpoint_commits_revision_positive");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_checkpoint_commits_step_valid");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_checkpoint_commits_checkpoint_session_id_valid");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_checkpoint_commits_checkpoint_ns_valid");
+
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS wb_source_event_inbox");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("PRIMARY KEY (run_id, source_event_id)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("UNIQUE (run_id, source_stream_id, source_stream_seq)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("FOREIGN KEY (run_id, checkpoint_id) REFERENCES wb_checkpoint_commits(run_id, checkpoint_id)");
+
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS wb_agent_event_outbox");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("attempts integer NOT NULL DEFAULT 0");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_agent_event_outbox_attempts_nonnegative");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_agent_events_outbox_identity");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE INDEX IF NOT EXISTS wb_agent_event_outbox_pending_idx");
+  });
 });

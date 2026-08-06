@@ -88,6 +88,8 @@ Apache-2.0 许可证。项目补丁只把搜索页的全局 network-idle 等待�
 - Compose 将 `config/` 只读挂载到 Web、Run Worker 与 Search Agent。生产环境必须设置随机的
   `POSTGRES_PASSWORD`、与其一致且密码已 URL 编码的
   `SEARCH_AGENT_DATABASE_URL`，以及 `WORKBENCH_INTERNAL_TOKEN`。
+- Search Agent 容器固定启用 `LANGGRAPH_STRICT_MSGPACK=true`，只反序列化
+  LangGraph 内建安全类型；不要在生产环境关闭该限制。
 - `config/deploy.env.example` 只列变量名和非密钥占位值，不可作为生产密钥文件。
 - Web、PostgreSQL 和 Search Agent 的宿主机端口默认只绑定 `127.0.0.1`；Run Worker 不发布端口；
   Milvus、etcd、MinIO 与小红书 MCP 不发布宿主机端口，小红书 MCP 使用独立的

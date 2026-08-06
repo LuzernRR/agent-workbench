@@ -198,7 +198,11 @@ describe("live 数据保留与项目记忆", () => {
         },
         lease_epoch: "2",
         lease_expires_at: timestamp,
-        worker_attempt: 2
+        worker_attempt: 2,
+        checkpoint_id: null,
+        checkpoint_session_id: null,
+        checkpoint_ns: null,
+        checkpoint_step: null
       }]
     });
     database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
@@ -209,8 +213,9 @@ describe("live 数据保留与项目记忆", () => {
       run: { id: "run-queue" },
       lease: { owner: "worker-two", epoch: 2 },
       attempt: 2,
-      resume: true,
-      input: { message: "排队问题", resume: true }
+      resume: false,
+      checkpoint: null,
+      input: { message: "排队问题", resume: false }
     });
     const [sql, values] = clientQuery.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("FOR UPDATE SKIP LOCKED");

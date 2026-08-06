@@ -102,10 +102,24 @@ CREATE TABLE IF NOT EXISTS wb_runs (
   lease_expires_at timestamptz,
   heartbeat_at timestamptz,
   worker_attempt integer NOT NULL DEFAULT 0 CONSTRAINT wb_runs_worker_attempt_nonnegative CHECK (worker_attempt >= 0),
+  revision bigint NOT NULL DEFAULT 0 CONSTRAINT wb_runs_revision_nonnegative CHECK (revision >= 0),
+  checkpoint_id text,
+  checkpoint_session_id text,
+  checkpoint_ns text,
+  checkpoint_step bigint,
   created_at timestamptz NOT NULL DEFAULT now(),
   started_at timestamptz,
   completed_at timestamptz,
   archived_at timestamptz,
+  CONSTRAINT wb_runs_checkpoint_reference_complete CHECK (
+    (revision = 0 AND checkpoint_id IS NULL AND checkpoint_session_id IS NULL AND checkpoint_ns IS NULL AND checkpoint_step IS NULL)
+    OR
+    (revision > 0 AND checkpoint_id IS NOT NULL AND checkpoint_session_id IS NOT NULL AND checkpoint_ns IS NOT NULL AND checkpoint_step IS NOT NULL)
+  ),
+  CONSTRAINT wb_runs_checkpoint_id_valid CHECK (checkpoint_id IS NULL OR checkpoint_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+  CONSTRAINT wb_runs_checkpoint_session_id_valid CHECK (checkpoint_session_id IS NULL OR checkpoint_session_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+  CONSTRAINT wb_runs_checkpoint_ns_valid CHECK (checkpoint_ns IS NULL OR (length(checkpoint_ns) <= 256 AND checkpoint_ns !~ '[\\r\\n]')),
+  CONSTRAINT wb_runs_checkpoint_step_valid CHECK (checkpoint_step IS NULL OR checkpoint_step >= -1),
   UNIQUE (id, visitor_id),
   FOREIGN KEY (thread_id, visitor_id) REFERENCES wb_threads(id, visitor_id) ON DELETE CASCADE
 );
@@ -121,6 +135,11 @@ ALTER TABLE wb_runs
   ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
   ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz,
   ADD COLUMN IF NOT EXISTS worker_attempt integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS checkpoint_id text,
+  ADD COLUMN IF NOT EXISTS checkpoint_session_id text,
+  ADD COLUMN IF NOT EXISTS checkpoint_ns text,
+  ADD COLUMN IF NOT EXISTS checkpoint_step bigint,
   ADD COLUMN IF NOT EXISTS started_at timestamptz;
 
 DO $$
@@ -137,11 +156,211 @@ BEGIN
     ALTER TABLE wb_runs
       ADD CONSTRAINT wb_runs_worker_attempt_nonnegative CHECK (worker_attempt >= 0);
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_runs_revision_nonnegative'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_revision_nonnegative CHECK (revision >= 0);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_runs_checkpoint_reference_complete'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_reference_complete CHECK (
+        (revision = 0 AND checkpoint_id IS NULL AND checkpoint_session_id IS NULL AND checkpoint_ns IS NULL AND checkpoint_step IS NULL)
+        OR
+        (revision > 0 AND checkpoint_id IS NOT NULL AND checkpoint_session_id IS NOT NULL AND checkpoint_ns IS NOT NULL AND checkpoint_step IS NOT NULL)
+      );
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'wb_runs_checkpoint_step_valid'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_step_valid CHECK (checkpoint_step IS NULL OR checkpoint_step >= -1);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_runs'::regclass AND conname = 'wb_runs_checkpoint_id_valid'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_id_valid CHECK (checkpoint_id IS NULL OR checkpoint_id ~ '^[A-Za-z0-9_-]{1,128}$');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_runs'::regclass AND conname = 'wb_runs_checkpoint_session_id_valid'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_session_id_valid CHECK (checkpoint_session_id IS NULL OR checkpoint_session_id ~ '^[A-Za-z0-9_-]{1,128}$');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_runs'::regclass AND conname = 'wb_runs_checkpoint_ns_valid'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_ns_valid CHECK (checkpoint_ns IS NULL OR (length(checkpoint_ns) <= 256 AND checkpoint_ns !~ '[\\r\\n]'));
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION wb_enforce_run_revision_monotonic()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.revision < OLD.revision OR NEW.revision > OLD.revision + 1 THEN
+    RAISE EXCEPTION 'wb_runs revision must remain stable or advance by one';
+  END IF;
+  IF NEW.revision = OLD.revision AND ROW(
+    NEW.checkpoint_id,
+    NEW.checkpoint_session_id,
+    NEW.checkpoint_ns,
+    NEW.checkpoint_step
+  ) IS DISTINCT FROM ROW(
+    OLD.checkpoint_id,
+    OLD.checkpoint_session_id,
+    OLD.checkpoint_ns,
+    OLD.checkpoint_step
+  ) THEN
+    RAISE EXCEPTION 'wb_runs checkpoint reference cannot change without revision';
+  END IF;
+  IF NEW.revision = OLD.revision + 1 AND NEW.checkpoint_id IS NOT DISTINCT FROM OLD.checkpoint_id THEN
+    RAISE EXCEPTION 'wb_runs revision advance requires a new checkpoint';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgrelid = 'wb_runs'::regclass
+      AND tgname = 'wb_runs_revision_monotonic'
+      AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER wb_runs_revision_monotonic
+    BEFORE UPDATE OF revision, checkpoint_id, checkpoint_session_id, checkpoint_ns, checkpoint_step
+    ON wb_runs
+    FOR EACH ROW
+    EXECUTE FUNCTION wb_enforce_run_revision_monotonic();
+  END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS wb_runs_claim_idx
   ON wb_runs(available_at, created_at, id)
   WHERE archived_at IS NULL AND status IN ('queued', 'running', 'waiting');
+
+CREATE TABLE IF NOT EXISTS wb_checkpoint_commits (
+  run_id text NOT NULL,
+  visitor_id uuid NOT NULL,
+  revision bigint NOT NULL CONSTRAINT wb_checkpoint_commits_revision_positive CHECK (revision > 0),
+  checkpoint_id text NOT NULL CONSTRAINT wb_checkpoint_commits_checkpoint_id_valid CHECK (checkpoint_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+  checkpoint_session_id text NOT NULL CONSTRAINT wb_checkpoint_commits_checkpoint_session_id_valid CHECK (checkpoint_session_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+  checkpoint_ns text NOT NULL CONSTRAINT wb_checkpoint_commits_checkpoint_ns_valid CHECK (length(checkpoint_ns) <= 256 AND checkpoint_ns !~ '[\\r\\n]'),
+  parent_checkpoint_id text,
+  step bigint NOT NULL CONSTRAINT wb_checkpoint_commits_step_valid CHECK (step >= -1),
+  source_count integer NOT NULL CHECK (source_count >= 0),
+  event_count integer NOT NULL CHECK (event_count >= 0),
+  batch_hash char(64) NOT NULL CHECK (batch_hash ~ '^[a-f0-9]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, checkpoint_id),
+  UNIQUE (run_id, revision),
+  CONSTRAINT wb_checkpoint_commits_authority_key UNIQUE (run_id, revision, checkpoint_id),
+  FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, parent_checkpoint_id) REFERENCES wb_checkpoint_commits(run_id, checkpoint_id)
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_checkpoint_commits'::regclass
+      AND conname = 'wb_checkpoint_commits_checkpoint_id_valid'
+  ) THEN
+    ALTER TABLE wb_checkpoint_commits
+      ADD CONSTRAINT wb_checkpoint_commits_checkpoint_id_valid
+      CHECK (checkpoint_id ~ '^[A-Za-z0-9_-]{1,128}$');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_checkpoint_commits'::regclass
+      AND conname = 'wb_checkpoint_commits_checkpoint_session_id_valid'
+  ) THEN
+    ALTER TABLE wb_checkpoint_commits
+      ADD CONSTRAINT wb_checkpoint_commits_checkpoint_session_id_valid
+      CHECK (checkpoint_session_id ~ '^[A-Za-z0-9_-]{1,128}$');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_checkpoint_commits'::regclass
+      AND conname = 'wb_checkpoint_commits_checkpoint_ns_valid'
+  ) THEN
+    ALTER TABLE wb_checkpoint_commits
+      ADD CONSTRAINT wb_checkpoint_commits_checkpoint_ns_valid
+      CHECK (length(checkpoint_ns) <= 256 AND checkpoint_ns !~ '[\\r\\n]');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_checkpoint_commits'::regclass
+      AND conname = 'wb_checkpoint_commits_authority_key'
+  ) THEN
+    ALTER TABLE wb_checkpoint_commits
+      ADD CONSTRAINT wb_checkpoint_commits_authority_key
+      UNIQUE (run_id, revision, checkpoint_id);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_runs'::regclass AND conname = 'wb_runs_checkpoint_authority'
+  ) THEN
+    ALTER TABLE wb_runs
+      ADD CONSTRAINT wb_runs_checkpoint_authority
+      FOREIGN KEY (id, revision, checkpoint_id)
+      REFERENCES wb_checkpoint_commits(run_id, revision, checkpoint_id)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS wb_checkpoint_commits_run_revision_idx
+  ON wb_checkpoint_commits(run_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS wb_source_event_inbox (
+  run_id text NOT NULL,
+  visitor_id uuid NOT NULL,
+  checkpoint_id text NOT NULL,
+  source_event_id text NOT NULL CHECK (source_event_id ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+  source_stream_id text NOT NULL CHECK (source_stream_id ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+  source_stream_seq integer NOT NULL CHECK (source_stream_seq > 0),
+  source_type text NOT NULL,
+  content_hash char(64) NOT NULL CHECK (content_hash ~ '^[a-f0-9]{64}$'),
+  payload jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, source_event_id),
+  UNIQUE (run_id, source_stream_id, source_stream_seq),
+  FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, checkpoint_id) REFERENCES wb_checkpoint_commits(run_id, checkpoint_id) ON DELETE CASCADE
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_source_event_inbox'::regclass
+      AND conname = 'wb_source_event_inbox_event_id_valid'
+  ) THEN
+    ALTER TABLE wb_source_event_inbox
+      ADD CONSTRAINT wb_source_event_inbox_event_id_valid
+      CHECK (source_event_id ~ '^[A-Za-z0-9_.:-]{1,128}$');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_source_event_inbox'::regclass
+      AND conname = 'wb_source_event_inbox_stream_id_valid'
+  ) THEN
+    ALTER TABLE wb_source_event_inbox
+      ADD CONSTRAINT wb_source_event_inbox_stream_id_valid
+      CHECK (source_stream_id ~ '^[A-Za-z0-9_.:-]{1,128}$');
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS wb_agent_events (
   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -154,6 +373,7 @@ CREATE TABLE IF NOT EXISTS wb_agent_events (
   payload jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   archived_at timestamptz,
+  CONSTRAINT wb_agent_events_outbox_identity UNIQUE (id, visitor_id, run_id),
   FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE,
   FOREIGN KEY (thread_id, visitor_id) REFERENCES wb_threads(id, visitor_id) ON DELETE CASCADE
 );
@@ -162,6 +382,50 @@ CREATE INDEX IF NOT EXISTS wb_agent_events_thread_active_idx
   ON wb_agent_events(visitor_id, thread_id, seq) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS wb_agent_events_run_active_idx
   ON wb_agent_events(visitor_id, run_id, seq) WHERE archived_at IS NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_agent_events'::regclass AND conname = 'wb_agent_events_outbox_identity'
+  ) THEN
+    ALTER TABLE wb_agent_events
+      ADD CONSTRAINT wb_agent_events_outbox_identity UNIQUE (id, visitor_id, run_id);
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS wb_agent_event_outbox (
+  event_id text PRIMARY KEY,
+  visitor_id uuid NOT NULL,
+  run_id text NOT NULL,
+  attempts integer NOT NULL DEFAULT 0 CONSTRAINT wb_agent_event_outbox_attempts_nonnegative CHECK (attempts >= 0),
+  available_at timestamptz NOT NULL DEFAULT now(),
+  published_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT wb_agent_event_outbox_event_identity
+    FOREIGN KEY (event_id, visitor_id, run_id)
+    REFERENCES wb_agent_events(id, visitor_id, run_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_agent_event_outbox'::regclass
+      AND conname = 'wb_agent_event_outbox_event_identity'
+  ) THEN
+    ALTER TABLE wb_agent_event_outbox
+      ADD CONSTRAINT wb_agent_event_outbox_event_identity
+      FOREIGN KEY (event_id, visitor_id, run_id)
+      REFERENCES wb_agent_events(id, visitor_id, run_id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS wb_agent_event_outbox_pending_idx
+  ON wb_agent_event_outbox(available_at, created_at, event_id)
+  WHERE published_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS wb_attachments (
   id text PRIMARY KEY,

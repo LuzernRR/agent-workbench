@@ -18,7 +18,14 @@ from app.run_control import RunRegistry
 FIXED_TIME = "2026-08-01T00:00:00Z"
 
 
-def payload(*, run_id: str = "run_1", resume: bool = False) -> SearchRunRequest:
+def payload(
+    *,
+    run_id: str = "run_1",
+    resume: bool = False,
+    checkpoint_id: str | None = None,
+    checkpoint_ns: str = "",
+    checkpoint_session_id: str = "checkpoint_session_1",
+) -> SearchRunRequest:
     return SearchRunRequest.model_validate({
         "version": 1,
         "runId": run_id,
@@ -30,6 +37,9 @@ def payload(*, run_id: str = "run_1", resume: bool = False) -> SearchRunRequest:
         "modelId": "deepseek-v4-flash",
         "reasoningEffort": "high",
         "resume": resume,
+        "checkpointId": checkpoint_id or ("checkpoint_1" if resume else None),
+        "checkpointNs": checkpoint_ns if resume else None,
+        "checkpointSessionId": checkpoint_session_id,
     })
 
 
@@ -78,6 +88,8 @@ class FakeGraph:
         entered: asyncio.Event | None = None,
         blocker: asyncio.Event | None = None,
         emit_public_event: bool = False,
+        parts: list[dict[str, Any]] | None = None,
+        checkpoint_snapshots: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.state = state
         self.snapshot = snapshot
@@ -85,25 +97,43 @@ class FakeGraph:
         self.entered = entered
         self.blocker = blocker
         self.emit_public_event = emit_public_event
+        self.parts = parts
+        self.checkpoint_snapshots = checkpoint_snapshots or {}
         self.inputs: list[Any] = []
         self.configs: list[dict[str, Any]] = []
         self.contexts: list[Any] = []
+        self.stream_options: list[dict[str, Any]] = []
+        self.get_state_configs: list[dict[str, Any]] = []
         self.get_state_calls = 0
 
     async def aget_state(self, config: dict[str, Any]) -> Any:
         self.get_state_calls += 1
-        return SimpleNamespace(values=self.snapshot or {})
+        self.get_state_configs.append(config)
+        checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
+        values = self.checkpoint_snapshots.get(checkpoint_id, self.snapshot)
+        return SimpleNamespace(
+            values=values or {},
+            config=config,
+            metadata={"step": 1} if values is not None else None,
+            created_at=FIXED_TIME if values is not None else None,
+        )
 
     async def astream(self, graph_input: Any, **kwargs: Any):
         self.inputs.append(graph_input)
         self.configs.append(kwargs["config"])
         self.contexts.append(kwargs["context"])
+        self.stream_options.append(kwargs)
         if self.entered is not None:
             self.entered.set()
         if self.blocker is not None:
             await self.blocker.wait()
         if self.error is not None:
             raise self.error
+        if self.parts is not None:
+            for part in self.parts:
+                data = part.get("data")
+                yield {**part, "data": data() if callable(data) else data}
+            return
         if self.emit_public_event:
             yield {
                 "type": "custom",
@@ -117,6 +147,40 @@ class FakeGraph:
             }
         if self.state is not None:
             yield {"type": "values", "data": self.state}
+
+
+def checkpoint_part(
+    checkpoint_id: str,
+    *,
+    parent_checkpoint_id: str | None,
+    step: int,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    thread_id = "run:run_1:session:checkpoint_session_1"
+    parent_config = None if parent_checkpoint_id is None else {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": parent_checkpoint_id,
+        }
+    }
+    return {
+        "type": "checkpoints",
+        "data": {
+            "config": {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint_id,
+                }
+            },
+            "parent_config": parent_config,
+            "values": values,
+            "metadata": {"source": "loop", "step": step, "parents": {}},
+            "next": [],
+            "tasks": [],
+        },
+    }
 
 
 class ImmediateTimeout(AbstractAsyncContextManager[None]):
@@ -183,7 +247,9 @@ async def test_no_http_runner_is_deterministic_and_injects_runtime_dependencies(
     assert first[-1]["answerSource"] == "model"
     assert first[-1]["answerModelCalls"] == 1
     assert first_graph.inputs[0]["run_id"] == "run_1"
-    assert first_graph.configs[0]["configurable"]["thread_id"] == "run:run_1"
+    assert first_graph.configs[0]["configurable"]["thread_id"] == (
+        "run:run_1:session:checkpoint_session_1"
+    )
     assert first_graph.contexts[0].tool_gateway.ledger is first_ledger
     assert first_graph.contexts[0].config is agent_config()
 
@@ -308,12 +374,184 @@ async def test_model_layer_records_nothing_when_tracing_is_off() -> None:
 @pytest.mark.asyncio
 async def test_resume_uses_checkpoint_without_new_graph_input_and_replays_terminal() -> None:
     graph = FakeGraph(snapshot=completed_state("checkpoint answer"))
-    events = await collect(runner(graph), payload(resume=True))
+    events = await collect(
+        runner(graph),
+        payload(resume=True, checkpoint_ns="research/subgraph"),
+    )
 
     assert graph.inputs == [None]
     assert graph.get_state_calls == 2
+    assert graph.get_state_configs[0]["configurable"] == {
+        "thread_id": "run:run_1:session:checkpoint_session_1",
+        "checkpoint_ns": "research/subgraph",
+        "checkpoint_id": "checkpoint_1",
+    }
     assert [event["type"] for event in events] == ["run.completed"]
     assert events[0]["answerMarkdown"] == "checkpoint answer"
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_newer_orphan_and_uses_explicit_authoritative_checkpoint() -> None:
+    authoritative = completed_state("authoritative checkpoint answer")
+    newer_orphan = completed_state("newer orphan answer must not be selected")
+    graph = FakeGraph(
+        snapshot=newer_orphan,
+        checkpoint_snapshots={"checkpoint_authoritative": authoritative},
+    )
+
+    events = await collect(
+        runner(graph),
+        payload(
+            resume=True,
+            checkpoint_id="checkpoint_authoritative",
+            checkpoint_ns="research/subgraph",
+        ),
+    )
+
+    assert graph.inputs == [None]
+    assert all(
+        config["configurable"].get("checkpoint_id")
+        == "checkpoint_authoritative"
+        for config in graph.get_state_configs
+    )
+    assert all(
+        config["configurable"].get("checkpoint_ns") == "research/subgraph"
+        for config in graph.get_state_configs
+    )
+    assert [event["type"] for event in events] == ["run.completed"]
+    assert events[0]["answerMarkdown"] == "authoritative checkpoint answer"
+    assert "orphan" not in events[0]["answerMarkdown"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_missing_checkpoint_fails_closed_without_running_graph() -> None:
+    graph = FakeGraph()
+
+    events = await collect(runner(graph), payload(resume=True))
+
+    assert graph.inputs == []
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "CHECKPOINT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_snapshot_that_reports_a_different_namespace() -> None:
+    class WrongNamespaceGraph(FakeGraph):
+        async def aget_state(self, config: dict[str, Any]) -> Any:
+            snapshot = await super().aget_state(config)
+            snapshot.config = {
+                "configurable": {
+                    **config["configurable"],
+                    "checkpoint_ns": "other/subgraph",
+                }
+            }
+            return snapshot
+
+    graph = WrongNamespaceGraph(snapshot=completed_state())
+
+    events = await collect(
+        runner(graph),
+        payload(resume=True, checkpoint_ns="research/subgraph"),
+    )
+
+    assert graph.inputs == []
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "CHECKPOINT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_sync_checkpoint_boundary_is_private_readable_and_closes_terminal() -> None:
+    state = completed_state("checkpoint answer")
+    graph = FakeGraph(
+        parts=[
+            {
+                "type": "custom",
+                "data": lambda: runtime_event(
+                    "node.started",
+                    node="plan_research",
+                    nodeRunId="node_fixed",
+                    agent="planner",
+                    iteration=0,
+                ),
+            },
+            {"type": "values", "data": state},
+            checkpoint_part(
+                "checkpoint_2",
+                parent_checkpoint_id="checkpoint_1",
+                step=1,
+                values={"private": "must-not-cross-boundary", **state},
+            ),
+        ],
+        checkpoint_snapshots={"checkpoint_2": state},
+    )
+
+    events = await collect(runner(graph))
+
+    assert [event["type"] for event in events] == [
+        "node.started",
+        "run.completed",
+        "checkpoint.committed",
+    ]
+    boundary = events[-1]
+    assert boundary == {
+        "version": 1,
+        "eventId": "stream_fixed_000003",
+        "streamId": "stream_fixed",
+        "streamSeq": 3,
+        "seq": 3,
+        "createdAt": FIXED_TIME,
+        "type": "checkpoint.committed",
+        "checkpointId": "checkpoint_2",
+        "parentCheckpointId": "checkpoint_1",
+        "checkpointNs": "",
+        "checkpointSessionId": "checkpoint_session_1",
+        "step": 1,
+    }
+    assert "values" not in boundary
+    assert "metadata" not in boundary
+    assert "answer" not in str(boundary)
+    assert graph.stream_options[0]["durability"] == "sync"
+    assert graph.stream_options[0]["stream_mode"] == [
+        "custom",
+        "values",
+        "checkpoints",
+    ]
+    assert graph.get_state_configs[-1]["configurable"]["checkpoint_id"] == "checkpoint_2"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_checkpoint_boundary_is_never_emitted() -> None:
+    graph = FakeGraph(parts=[checkpoint_part(
+        "checkpoint_missing",
+        parent_checkpoint_id=None,
+        step=-1,
+        values={"private": "must-not-cross-boundary"},
+    )])
+
+    events = await collect(runner(graph))
+
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "CHECKPOINT_NOT_READABLE"
+    assert "checkpoint.committed" not in {event["type"] for event in events}
+
+
+@pytest.mark.asyncio
+async def test_invalid_checkpoint_identifier_is_rejected_even_when_state_exists() -> None:
+    state = completed_state()
+    graph = FakeGraph(
+        parts=[checkpoint_part(
+            "bad/checkpoint",
+            parent_checkpoint_id=None,
+            step=-1,
+            values=state,
+        )],
+        checkpoint_snapshots={"bad/checkpoint": state},
+    )
+
+    events = await collect(runner(graph))
+
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "CHECKPOINT_NOT_READABLE"
 
 
 @pytest.mark.asyncio

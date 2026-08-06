@@ -38,4 +38,5 @@
 - [Search Agent 统一 Model Gateway 与分层重试](2026-08-04-040-issue-43-model-gateway.md)
 - [清理 deepseek.py 未受 Gateway 治理的第二模型路径](2026-08-04-041-issue-46-single-model-path.md)
 - [PostgreSQL 持久队列、独立 Worker 与租约 fencing](2026-08-05-042-issue-48-postgres-run-worker.md)
+- [Checkpoint、AgentEvent 与 Outbox 原子确认边界](2026-08-06-043-issue-50-checkpoint-outbox.md)
 - [开发记录模板](TEMPLATE.md)

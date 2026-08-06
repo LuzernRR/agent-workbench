@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_CHECKPOINT_NAMESPACE_CONTROL = re.compile(r"[\r\n\x00]")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -15,6 +16,18 @@ def validate_run_id(value: str) -> str:
     if not _ID.fullmatch(value):
         raise ValueError("运行 ID 格式无效")
     return value
+
+
+def is_valid_checkpoint_identifier(value: object) -> bool:
+    return isinstance(value, str) and _ID.fullmatch(value) is not None
+
+
+def is_valid_checkpoint_namespace(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) <= 256
+        and _CHECKPOINT_NAMESPACE_CONTROL.search(value) is None
+    )
 
 
 class ApiModel(BaseModel):
@@ -73,6 +86,11 @@ class SearchRunRequest(ApiModel):
     )
     depth: Literal["quick", "balanced", "deep"] = "balanced"
     resume: bool = False
+    checkpoint_id: str | None = Field(default=None, alias="checkpointId")
+    checkpoint_ns: str | None = Field(default=None, alias="checkpointNs")
+    checkpoint_session_id: str = Field(
+        alias="checkpointSessionId", min_length=1, max_length=128
+    )
 
     @field_validator("run_id", "tenant_id", "visitor_id", "thread_id", "project_id")
     @classmethod
@@ -80,6 +98,30 @@ class SearchRunRequest(ApiModel):
         if value is not None and not _ID.fullmatch(value):
             raise ValueError("作用域 ID 格式无效")
         return value
+
+    @field_validator("checkpoint_id", "checkpoint_session_id")
+    @classmethod
+    def validate_checkpoint_id(cls, value: str | None) -> str | None:
+        if value is not None and not is_valid_checkpoint_identifier(value):
+            raise ValueError("Checkpoint 标识符格式无效")
+        return value
+
+    @field_validator("checkpoint_ns")
+    @classmethod
+    def validate_checkpoint_ns(cls, value: str | None) -> str | None:
+        if value is not None and not is_valid_checkpoint_namespace(value):
+            raise ValueError("Checkpoint namespace 格式无效")
+        return value
+
+    @model_validator(mode="after")
+    def validate_checkpoint_resume(self) -> SearchRunRequest:
+        has_checkpoint = self.checkpoint_id is not None
+        has_namespace = self.checkpoint_ns is not None
+        if has_checkpoint != has_namespace or self.resume != has_checkpoint:
+            raise ValueError(
+                "resume、checkpointId 与 checkpointNs 必须组成完整恢复引用"
+            )
+        return self
 
     def context_text(self) -> str:
         turns = "\n\n".join(

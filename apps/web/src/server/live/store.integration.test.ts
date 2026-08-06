@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { closeDatabase, query } from "@/server/persistence/database";
+import { commitClaimedCheckpointBatch, type ClaimedCheckpointBatch } from "./checkpoint-batches";
 import {
   claimNextLiveRun,
   createLiveProject,
@@ -18,6 +19,10 @@ import {
 
 const runLiveIntegration = process.env.WORKBENCH_LIVE_INTEGRATION === "1";
 const visitors: string[] = [];
+
+function identifier(prefix: string) {
+  return `${prefix}_${randomUUID().replaceAll("-", "")}`;
+}
 
 async function createVisitor() {
   const visitorId = randomUUID();
@@ -178,20 +183,62 @@ describe.skipIf(!runLiveIntegration)("真实 PostgreSQL 分层记忆契约", () 
     expect(replacement).toMatchObject({
       run: { id: takeoverRun.run.id },
       lease: { epoch: original!.lease.epoch + 1 },
-      resume: true,
+      resume: false,
+      checkpoint: null,
       attempt: original!.attempt + 1
+    });
+
+    const checkpointId = identifier("checkpoint");
+    const checkpointSessionId = identifier("session");
+    const checkpointBatch = {
+      sourceEvents: [],
+      boundary: {
+        version: 1,
+        eventId: identifier("checkpoint_event"),
+        streamId: identifier("stream"),
+        streamSeq: 1,
+        seq: 1,
+        createdAt: "2026-08-06T00:00:00Z",
+        type: "checkpoint.committed",
+        checkpointId,
+        parentCheckpointId: null,
+        checkpointNs: "",
+        checkpointSessionId,
+        step: -1
+      },
+      events: [{ type: "run.status", payload: { status: "running", recovered: true } }]
+    } satisfies ClaimedCheckpointBatch;
+    await expect(commitClaimedCheckpointBatch(replacement!, checkpointBatch)).resolves.toMatchObject({
+      status: "committed",
+      revision: 1
+    });
+    await query("UPDATE wb_runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [takeoverRun.run.id]);
+    const resumed = await claimNextLiveRun("worker-checkpoint-resume", 30_000);
+    expect(resumed).toMatchObject({
+      run: { id: takeoverRun.run.id },
+      lease: { epoch: replacement!.lease.epoch + 1 },
+      resume: true,
+      checkpoint: {
+        id: checkpointId,
+        sessionId: checkpointSessionId,
+        namespace: "",
+        step: -1
+      },
+      attempt: replacement!.attempt + 1
     });
 
     await expect(renewLiveRunLease(original!, 30_000)).resolves.toBe(false);
     await expect(releaseLiveRunLease(original!)).resolves.toBe(false);
     await expect(persistClaimedLiveEvent(original!, "run.status", { status: "late" })).resolves.toBeNull();
     await expect(finalizeClaimedLiveRun(original!, "completed", {})).resolves.toBeNull();
+    await expect(renewLiveRunLease(replacement!, 30_000)).resolves.toBe(false);
+    await expect(releaseLiveRunLease(replacement!)).resolves.toBe(false);
 
-    await expect(persistClaimedLiveEvent(replacement!, "run.status", { status: "running", recovered: true })).resolves.toMatchObject({
+    await expect(persistClaimedLiveEvent(resumed!, "run.status", { status: "running", recovered: true })).resolves.toMatchObject({
       runId: takeoverRun.run.id,
       type: "run.status"
     });
-    await expect(finalizeClaimedLiveRun(replacement!, "completed", { finishReason: "stop" })).resolves.toEqual([
+    await expect(finalizeClaimedLiveRun(resumed!, "completed", { finishReason: "stop" })).resolves.toEqual([
       expect.objectContaining({ type: "run.completed" })
     ]);
     await expect(finalizeLiveRun(takeoverRun.run, "stopped", {})).resolves.toBeNull();

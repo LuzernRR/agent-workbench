@@ -69,6 +69,7 @@ def _eval_request(case: GoldCase) -> SearchRunRequest:
         "reasoningEffort": case.reasoning_effort,
         "depth": case.depth,
         "resume": False,
+        "checkpointSessionId": f"evaluation_{case.case_id}",
     })
 
 

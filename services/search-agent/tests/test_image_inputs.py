@@ -19,6 +19,7 @@ def request(image_inputs: list[dict[str, object]]) -> dict[str, object]:
         "question": "请分析我上传的图片",
         "modelId": "deepseek-v4-flash",
         "reasoningEffort": "high",
+        "checkpointSessionId": "checkpoint_image_1",
         "imageInputs": image_inputs,
     }
 

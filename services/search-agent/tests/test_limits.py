@@ -60,6 +60,7 @@ def payload(run_id: str) -> SearchRunRequest:
         "question": "q",
         "modelId": "deepseek-v4-flash",
         "reasoningEffort": "high",
+        "checkpointSessionId": f"checkpoint_{run_id}",
     })
 
 

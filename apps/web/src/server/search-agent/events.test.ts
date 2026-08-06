@@ -98,6 +98,26 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     expect(() => parseSearchAgentEvent({ ...nodeStarted, prompt: "private" })).toThrow(/禁止字段/u);
   });
 
+  it("checkpoint 边界只接受可恢复元数据，不接受 State 正文", () => {
+    const boundary = {
+      ...sourceEnvelope,
+      type: "checkpoint.committed",
+      checkpointId: "1f1912ee-73b4-6fe6-8001-36fa8d23b2fd",
+      parentCheckpointId: "1f1912ee-73b4-6fe5-8000-72e1dd315f35",
+      checkpointNs: "",
+      checkpointSessionId: "checkpoint_session_1",
+      step: 1
+    };
+
+    expect(parseSearchAgentEvent(boundary)).toEqual(boundary);
+    expect(() => parseSearchAgentEvent({ ...boundary, values: { answer: "private" } })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...boundary, state: { messages: [] } })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...boundary, tasks: [] })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...boundary, parentCheckpointId: undefined })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...boundary, checkpointId: "bad:checkpoint" })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...boundary, step: -2 })).toThrow();
+  });
+
   it("拒绝 javascript、带凭据 URL 与危险候选来源", () => {
     const base = {
       ...sourceEnvelope,

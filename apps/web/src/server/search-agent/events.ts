@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const createdAt = z.string().min(20).max(40).refine((value) => Number.isFinite(Date.parse(value)), "createdAt 无效");
 const identifier = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u);
+const checkpointIdentifier = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/u);
 const sha256 = z.string().length(64).regex(/^[a-f0-9]{64}$/u);
 const verificationChallengeId = z.string().length(43).regex(/^[A-Za-z0-9_-]+$/u);
 const reasonCode = z.string().min(1).max(80).regex(/^[A-Z0-9_]+$/u);
@@ -129,6 +130,15 @@ const toolLedgerTerminal = {
 };
 
 const searchAgentEventUnion = z.discriminatedUnion("type", [
+  z.object({
+    ...base,
+    type: z.literal("checkpoint.committed"),
+    checkpointId: checkpointIdentifier,
+    parentCheckpointId: checkpointIdentifier.nullable(),
+    checkpointNs: z.string().max(256).refine((value) => !/[\r\n\u0000]/u.test(value)),
+    checkpointSessionId: checkpointIdentifier,
+    step: z.number().int().min(-1)
+  }).strict(),
   z.object({ ...base, type: z.literal("node.started"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative() }).strict(),
   z.object({ ...base, type: z.literal("node.completed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), durationMs: z.number().nonnegative(), publicSummary: optionalSummary, publicSummarySource: z.literal("model").nullable() }).strict(),
   z.object({ ...base, type: z.literal("node.failed"), node, nodeRunId: identifier, agent, iteration: z.number().int().nonnegative(), reasonCode }).strict(),
