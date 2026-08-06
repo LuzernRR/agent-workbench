@@ -32,8 +32,8 @@
 | 领域 | 手册目标 | 当前实现 | 判断 |
 |---|---|---|---|
 | Web/BFF | Next.js + React + TypeScript，SSE 事件流 | 已使用 Next.js 16、React 19、TypeScript，BFF 对 AgentEvent 做 Zod 校验 | 基础匹配 |
-| Agent Runtime | Python 3.12 + FastAPI + Pydantic 2 + LangGraph | 已落地显式图、预算、事件、PostgreSQL Checkpoint | 主栈匹配，恢复边界仍不完整 |
-| 数据 | PostgreSQL 为权威状态；Redis 只做缓存/锁/限流；对象存储保存产物 | PostgreSQL 已保存运行账本、Checkpoint 和带 lease/fencing 的持久队列；尚无完整 Outbox/Inbox 与备份恢复门禁 | 部分匹配 |
+| Agent Runtime | Python 3.12 + FastAPI + Pydantic 2 + LangGraph | 已落地显式图、预算、事件、PostgreSQL Checkpoint；恢复只从 Run 账本完整权威引用精确 fork | 主栈匹配，#50 等待验收 |
+| 数据 | PostgreSQL 为权威状态；Redis 只做缓存/锁/限流；对象存储保存产物 | PostgreSQL 已保存运行账本、Checkpoint、lease/fencing 持久队列、source Inbox 与 transactional Outbox；尚无备份恢复门禁 | 主路径匹配，灾备待补 |
 | 模型层 | 统一 Model Gateway 负责路由、配额、重试、降级、成本和版本 | 生产 Search Agent 已统一走 Model Gateway；旧 mock/预览客户端仍独立，持久租户配额与健康熔断未完成 | 主路径匹配，治理待补 |
 | 工具层 | Tool Registry/Gateway 负责 Schema、鉴权、幂等、审批和审计 | 已有 Tool Ledger、稳定事件和部分安全门禁，但缺统一策略执行面 | 部分匹配 |
 | RAG | PostgreSQL FTS + pgvector 起步，Hybrid + RRF + Rerank，ACL 先过滤 | Compose 有 pgvector，但实际证据记忆走 Milvus + hashing embedding，尚无完整企业知识摄取和混合检索 | 技术路线未收敛 |
@@ -101,13 +101,18 @@
 
 ### P0-04 Checkpoint、AgentEvent 与 Outbox 原子边界
 
-- 状态：`blocked`。
-- 目标技术：PostgreSQL 权威事务同时提交 Run revision、Checkpoint 引用、连续 AgentEvent `seq` 与
-  Transactional Outbox；消费者使用 Inbox/业务唯一键去重。
-- 当前问题：已有 PostgreSQL Checkpoint、事件账本和 Tool Ledger，但尚未证明状态提交、事件发布与消息
-  派发处于同一原子边界。
-- 最小验收：在业务提交后/Outbox 发布前、Checkpoint 写入中、事件 append 前后注入崩溃；恢复后状态不
-  回退、事件不丢不重、已确认工具不重复；SSE 可按 `Last-Event-ID` 补发。
+- 状态：`awaiting-acceptance`。Issue
+  [#50](https://github.com/LuzernRR/agent-workbench/issues/50) 已技术完成，等待用户显式验收。
+- 已实现：Python 以 `durability="sync"` 提交 LangGraph Checkpoint；Node 仅从 `wb_runs` 的
+  `checkpointSessionId + checkpointNs + checkpointId` 权威引用恢复，并在另一个 PostgreSQL 事务内同时
+  确认 Run revision、checkpoint commit、source Inbox、连续 AgentEvent 和 transactional Outbox。该协议
+  明确是两个本地事务，不宣称 XA 或跨服务原子性。
+- 已验证：真实 PostgreSQL 微图证明较新孤儿 checkpoint 不会越过旧权威引用；lease/parent/revision、重复
+  批次、冲突 Inbox、各写入阶段回滚、Worker kill、稳定 Tool Ledger 重放、`SKIP LOCKED` Outbox 与无
+  listener 的 SSE cursor 补发均有直接测试。完整证据见
+  [开发记录 043](development/2026-08-06-043-issue-50-checkpoint-outbox.md)。
+- 发布约束：Search Agent 固定 `LANGGRAPH_STRICT_MSGPACK=true`；Outbox `NOTIFY` 只负责唤醒，持久事件表
+  始终是可靠来源。验收前不得关闭 #50、合并 PR 或启动 P0-05。
 
 ### P0-05 OIDC、多租户授权、配额与审计
 

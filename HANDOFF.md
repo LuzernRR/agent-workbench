@@ -1,5 +1,50 @@
 # 项目交接
 
+## 当前结论（2026-08-06，Issue #50 技术完成，等待用户显式验收）
+
+- 本轮唯一活跃功能为 [#50](https://github.com/LuzernRR/agent-workbench/issues/50)
+  “P0-04：Checkpoint、AgentEvent 与 Outbox 原子确认边界”，`Status: ready`、
+  `Execution Gate: allowed`；分支为 `codex/issue-50-checkpoint-outbox`。A1-A11 已取得直接证据，当前状态为
+  `awaiting-acceptance`，不得关闭 Issue、合并 PR 或启动下一功能。
+- **准确事务边界是两个本地事务组成的可恢复确认协议**：Python 以 `durability="sync"` 提交 LangGraph
+  Checkpoint；Node 在另一个 PostgreSQL 事务内确认 Run revision、权威 checkpoint 引用、source Inbox、
+  连续 AgentEvent 投影和 transactional Outbox。没有 XA、两阶段提交或跨服务原子事务。
+- **恢复权威是 Run 账本中的完整引用**：`checkpointSessionId + checkpointNs + checkpointId`。Worker
+  领取或重连都只发送 `wb_runs` 已确认的引用，不让 LangGraph 自动选择线程中较新的孤立 checkpoint；
+  namespace 在首个权威 checkpoint 后固定，跨 namespace continuation 由 parent continuity 拒绝。
+- Python 的私有 `checkpoint.committed` 边界只在该完整 config 可被精确读取后输出，包含 ID、parent、
+  namespace 与 step，不泄露 State 正文。Compose 固定 `LANGGRAPH_STRICT_MSGPACK=true`，生产恢复只接受
+  msgpack serializer，不允许 pickle fallback。
+- Worker 在 checkpoint 边界前缓冲 source events；单批最多 10,000 条（含 boundary）和 8 MiB UTF-8。
+  超限以 `SEARCH_AGENT_CHECKPOINT_BUFFER_LIMIT` fail closed，不提交半批。若批次收口，source 终态与对应的
+  公开投影终态都必须恰有一个、类型匹配且分别位于各自序列末尾。
+- `commitCheckpointBatch` 在行锁内校验有效 lease/epoch、parent continuity、revision + 1、Inbox 业务键与
+  canonical hash；同批重投返回 `duplicate` 且不增加任何计数，内容冲突、断裂 parent、旧 lease 或重复终态
+  均在写入前拒绝。故障注入证明 Run/Inbox/AgentEvent/Outbox 任一阶段抛错时整个 Node 事务不可见并可重试。
+- Outbox dispatcher 使用有界批次和 `FOR UPDATE SKIP LOCKED`，`pg_notify` 与 attempts/published_at 在同一
+  PostgreSQL 事务结算；失败回滚通知并保留消息。`NOTIFY` 只负责低延迟唤醒，持久事件表和 SSE
+  `Last-Event-ID` polling 始终是可靠补发依据。
+- 真实 LangGraph/PostgreSQL 微图先写旧权威 checkpoint，再写较新孤儿，然后以旧完整 config 执行
+  `graph.astream(None, ..., stream_mode=["values", "checkpoints"], durability="sync")`。首个 fork 的 parent
+  精确等于旧权威 config，最终状态为 `finalized:authority`，没有读入 `newer-orphan`。
+- Tool Ledger 重放测试使用稳定 toolCallId，证明“工具成功、Python checkpoint 已提交、Node 尚未确认”后
+  恢复命中 cached result，不再次调用外部 operation；unknown outcome 继续 fail closed。
+- 最终门禁：Web **424 passed / 10 skipped**，typecheck、ESLint、Next/Worker production build 通过；
+  Search Agent **501 passed / 1 skipped**，Ruff、compileall 通过；四个 Web PostgreSQL integration 文件
+  **10 passed**，真实 checkpoint fork **1 passed**；Playwright **16 passed / 3 live-only skipped**；Compose
+  静态解析、Web/Search Agent 镜像构建和 `git diff --check` 均通过。
+- 运行态：新镜像下 Web `http://127.0.0.1:3000/health` 与 Search Agent
+  `http://127.0.0.1:8080/health` 均返回 `ok`；Worker SIGTERM 记录 requested/stopped、退出码 0，重启后新
+  owner 正常运行；真实 Outbox smoke 为 `claimed=1, published=1, failed=0`。隔离数据清理后
+  `pending_outbox=0, active_runs=0`。
+- 回滚优先 `git revert <merge-sha>` 并先停 Worker；数据库新增表、列和约束保持向后兼容，可在旧版本暂留。
+  若必须 contract，应另立 migration，在确认没有活跃 Run、pending Outbox 且完成备份后执行。
+- 用户于 2026-08-06 新增“查询理解、关键词拆解与结果反馈驱动的迭代检索”完整功能要求。该需求已记录为
+  #50 验收后的下一候选，但尚未创建 Issue、未研究或修改功能代码；必须先取得 #50 显式验收，再按单 Issue
+  门禁进行大规模方案检索、定义可测试 DoD 并实现。
+- 中文开发记录见
+  [043](docs/development/2026-08-06-043-issue-50-checkpoint-outbox.md)。
+
 ## 当前结论（2026-08-05，Issue #48 PostgreSQL 持久队列与独立 Worker 已自主验收）
 
 - 本轮唯一功能为 [#48](https://github.com/LuzernRR/agent-workbench/issues/48)“P0-03：独立 Worker、
