@@ -1,4 +1,5 @@
 import { closeDatabase } from "@/server/persistence/database";
+import { runAgentEventOutboxDispatcher } from "@/server/live/event-outbox";
 import { loadWorkerOptions, runWorkerLoop, type WorkerLog } from "./loop";
 
 const shutdown = new AbortController();
@@ -33,7 +34,25 @@ async function main() {
       heartbeatMs: options.heartbeatMs,
       pollMs: options.pollMs
     });
-    await runWorkerLoop(options, shutdown.signal, log);
+    const loops = [
+      runWorkerLoop(options, shutdown.signal, log),
+      runAgentEventOutboxDispatcher(
+        { batchSize: 100, pollMs: Math.min(options.pollMs, 500) },
+        shutdown.signal,
+        log
+      )
+    ].map(async (loop) => {
+      try {
+        await loop;
+      } finally {
+        if (!shutdown.signal.aborted) {
+          shutdown.abort(new DOMException("Worker 子循环已停止", "AbortError"));
+        }
+      }
+    });
+    const results = await Promise.allSettled(loops);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
   } catch (error) {
     log("error", "worker.fatal", { error: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;

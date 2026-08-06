@@ -44,7 +44,61 @@ def payload(*, run_id: str = "run_1", resume: bool = False) -> SearchRunRequest:
         "modelId": "deepseek-v4-flash",
         "reasoningEffort": "high",
         "resume": resume,
+        "checkpointId": "checkpoint_1" if resume else None,
+        "checkpointNs": "" if resume else None,
+        "checkpointSessionId": "checkpoint_session_1",
     })
+
+
+def request_data(**overrides: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "version": 1,
+        "runId": "run_1",
+        "tenantId": "tenant_1",
+        "visitorId": "visitor_1",
+        "projectId": "project_1",
+        "threadId": "thread_1",
+        "question": "测试问题",
+        "modelId": "deepseek-v4-flash",
+        "reasoningEffort": "high",
+        "resume": False,
+        "checkpointId": None,
+        "checkpointNs": None,
+        "checkpointSessionId": "checkpoint_session_1",
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"checkpointSessionId": None},
+        {"checkpointSessionId": "bad/session"},
+        {"resume": False, "checkpointId": "checkpoint_1"},
+        {"resume": False, "checkpointNs": ""},
+        {"resume": True, "checkpointId": None},
+        {"resume": True, "checkpointId": "checkpoint_1", "checkpointNs": None},
+        {"resume": True, "checkpointId": "bad/checkpoint"},
+        {"resume": True, "checkpointId": "checkpoint_1", "checkpointNs": "bad\nnamespace"},
+    ],
+)
+def test_checkpoint_resume_contract_fails_closed(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        SearchRunRequest.model_validate(request_data(**overrides))
+
+
+def test_checkpoint_resume_contract_accepts_an_exact_authority() -> None:
+    request = SearchRunRequest.model_validate(request_data(
+        resume=True,
+        checkpointId="checkpoint_1",
+        checkpointNs="research/subgraph",
+    ))
+
+    assert request.resume is True
+    assert request.checkpoint_id == "checkpoint_1"
+    assert request.checkpoint_ns == "research/subgraph"
+    assert request.checkpoint_session_id == "checkpoint_session_1"
 
 
 def test_internal_auth_fails_closed_without_token_or_explicit_loopback(

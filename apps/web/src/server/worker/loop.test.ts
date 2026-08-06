@@ -29,6 +29,7 @@ const claim: ClaimedLiveRun = {
     reasoningEffort: "medium"
   },
   resume: false,
+  checkpoint: null,
   attempt: 1,
   leaseExpiresAt: "2026-08-05T00:01:00Z"
 };

@@ -65,7 +65,7 @@ export type LiveRunRecord = {
 
 export type LiveRunStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "stopped";
 
-type ProjectExchangeInput = {
+export type ProjectExchangeInput = {
   userMessage: string;
   assistantMessage: string;
 };
@@ -99,11 +99,19 @@ export type LiveRunLease = {
   epoch: number;
 };
 
+export type LiveCheckpointReference = {
+  id: string;
+  namespace: string;
+  sessionId: string;
+  step: number;
+};
+
 export type ClaimedLiveRun = {
   run: LiveRunRecord;
   lease: LiveRunLease;
   input: SearchAgentExecutionInput;
   resume: boolean;
+  checkpoint: LiveCheckpointReference | null;
   attempt: number;
   leaseExpiresAt: string;
 };
@@ -121,6 +129,10 @@ type ClaimRow = {
   lease_epoch: string | number;
   lease_expires_at: Date | string;
   worker_attempt: number;
+  checkpoint_id: string | null;
+  checkpoint_session_id: string | null;
+  checkpoint_ns: string | null;
+  checkpoint_step: string | number | null;
 };
 
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -355,13 +367,17 @@ function completedMessages(rows: EventRow[]) {
   return completed;
 }
 
-async function insertEventWithClient(client: PoolClient, run: LiveRunRecord, type: AgentEventType, payload: Record<string, unknown>) {
+export async function insertEventWithClient(client: PoolClient, run: LiveRunRecord, type: AgentEventType, payload: Record<string, unknown>) {
   const id = liveId("evt");
   const result = await client.query<EventRow>(`
     INSERT INTO wb_agent_events (id, visitor_id, run_id, project_id, thread_id, event_type, payload)
     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
     RETURNING id, seq, project_id, thread_id, run_id, created_at, event_type, payload
   `, [id, run.visitorId, run.id, run.projectId, run.threadId, type, JSON.stringify(payload)]);
+  await client.query(`
+    INSERT INTO wb_agent_event_outbox (event_id, visitor_id, run_id)
+    VALUES ($1, $2, $3)
+  `, [id, run.visitorId, run.id]);
   return agentEvent(result.rows[0]);
 }
 
@@ -523,7 +539,7 @@ export function buildProjectMemoryContext(rows: ProjectMemoryRow[], queryText: s
   return { context, rowIds: ordered.slice(0, blocks.length).flatMap((exchange) => exchange.rowIds) };
 }
 
-async function rememberProjectExchangeWithClient(client: PoolClient, run: LiveRunRecord, input: ProjectExchangeInput) {
+export async function rememberProjectExchangeWithClient(client: PoolClient, run: LiveRunRecord, input: ProjectExchangeInput) {
   if (!run.projectId) return 0;
   const entries = [
     { role: "user" as const, content: input.userMessage.trim() },
@@ -676,6 +692,42 @@ function leaseOwner(value: string) {
   return owner;
 }
 
+function checkpointReference(row: {
+  checkpoint_id: string | null;
+  checkpoint_session_id: string | null;
+  checkpoint_ns: string | null;
+  checkpoint_step: string | number | null;
+}): LiveCheckpointReference | null {
+  const fields = [
+    row.checkpoint_id,
+    row.checkpoint_session_id,
+    row.checkpoint_ns,
+    row.checkpoint_step
+  ];
+  if (fields.every((value) => value === null)) return null;
+  const step = Number(row.checkpoint_step);
+  if (
+    fields.some((value) => value === null)
+    || typeof row.checkpoint_id !== "string"
+    || !/^[A-Za-z0-9_-]{1,128}$/u.test(row.checkpoint_id)
+    || typeof row.checkpoint_session_id !== "string"
+    || !/^[A-Za-z0-9_-]{1,128}$/u.test(row.checkpoint_session_id)
+    || typeof row.checkpoint_ns !== "string"
+    || row.checkpoint_ns.length > 256
+    || /[\r\n\u0000]/u.test(row.checkpoint_ns)
+    || !Number.isSafeInteger(step)
+    || step < -1
+  ) {
+    throw new Error("Run checkpoint 权威引用无效");
+  }
+  return {
+    id: row.checkpoint_id,
+    namespace: row.checkpoint_ns,
+    sessionId: row.checkpoint_session_id,
+    step
+  };
+}
+
 export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number): Promise<ClaimedLiveRun | null> {
   const owner = leaseOwner(ownerInput);
   const leaseMs = leaseMilliseconds(leaseMsInput);
@@ -709,7 +761,8 @@ export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number)
       FROM candidate
       WHERE run.id = candidate.id
       RETURNING run.id, run.visitor_id, run.thread_id, run.project_id, run.model_id,
-        run.agent_id, run.execution_input, run.lease_epoch, run.lease_expires_at, run.worker_attempt
+        run.agent_id, run.execution_input, run.lease_epoch, run.lease_expires_at, run.worker_attempt,
+        run.checkpoint_id, run.checkpoint_session_id, run.checkpoint_ns, run.checkpoint_step
     `, [owner, leaseMs]);
     return result.rows[0] ?? null;
   });
@@ -744,7 +797,8 @@ export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number)
     ORDER BY array_position($3::text[], id)
   `, [row.visitor_id, row.thread_id, parsed.data.attachmentIds]) : { rows: [] as AttachmentRow[] };
   const attachments = prepareRunAttachments(attachmentResult.rows);
-  const resume = epoch > 1 || row.worker_attempt > 1;
+  const checkpoint = checkpointReference(row);
+  const resume = checkpoint !== null;
   return {
     ...identity,
     input: {
@@ -757,9 +811,32 @@ export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number)
       resume
     },
     resume,
+    checkpoint,
     attempt: row.worker_attempt,
     leaseExpiresAt: iso(row.lease_expires_at)
   };
+}
+
+export async function readClaimedLiveCheckpoint(claim: ClaimedRunIdentity): Promise<{
+  valid: boolean;
+  checkpoint: LiveCheckpointReference | null;
+}> {
+  const result = await query<{
+    checkpoint_id: string | null;
+    checkpoint_session_id: string | null;
+    checkpoint_ns: string | null;
+    checkpoint_step: string | number | null;
+  }>(`
+    SELECT checkpoint_id, checkpoint_session_id, checkpoint_ns, checkpoint_step
+    FROM wb_runs
+    WHERE id = $1 AND lease_owner = $2 AND lease_epoch = $3
+      AND archived_at IS NULL
+      AND status IN ('running', 'waiting')
+      AND lease_expires_at > now()
+  `, [claim.run.id, claim.lease.owner, claim.lease.epoch]);
+  const row = result.rows[0];
+  if (!row) return { valid: false, checkpoint: null };
+  return { valid: true, checkpoint: checkpointReference(row) };
 }
 
 export async function renewLiveRunLease(claim: ClaimedRunIdentity, leaseMsInput: number) {

@@ -71,6 +71,9 @@ function verifiedSource(result: SearchResultEvent | null) {
 }
 
 function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): SearchAgentProjection {
+  if (event.type === "checkpoint.committed") {
+    return { events: [] };
+  }
   if (event.type === "node.started") {
     // 节点开始时还没有可公开的模型摘要。若此时先创建思考项，工具事件会
     // 排在它后面，而 node.completed 又会回填上方旧项，破坏真实时间顺序。

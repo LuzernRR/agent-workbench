@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -11,7 +12,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from langgraph.errors import GraphRecursionError
 
-from app.api.schemas import SearchRunRequest
+from app.api.schemas import (
+    SearchRunRequest,
+    is_valid_checkpoint_identifier,
+    is_valid_checkpoint_namespace,
+)
 from app.config.agent import AgentConfig
 from app.events.runtime import (
     EventClock,
@@ -103,6 +108,18 @@ class HarnessDependencies:
 
 class ResumeScopeError(RuntimeError):
     """恢复请求与持久 checkpoint 的安全作用域不一致。"""
+
+
+class CheckpointNotFoundError(RuntimeError):
+    """显式权威 checkpoint 不存在。"""
+
+    code = "CHECKPOINT_NOT_FOUND"
+
+
+class CheckpointNotReadableError(RuntimeError):
+    """Checkpoint stream 边界尚不能被精确读取。"""
+
+    code = "CHECKPOINT_NOT_READABLE"
 
 
 async def _never_disconnected() -> bool:
@@ -202,8 +219,29 @@ class HarnessRunner:
         if not payload.resume:
             return self._new_state(payload)
         snapshot = await self._dependencies.graph.aget_state(graph_config)
-        if not snapshot or not snapshot.values:
-            return self._new_state(payload)
+        if (
+            not snapshot
+            or getattr(snapshot, "metadata", None) is None
+            or getattr(snapshot, "created_at", None) is None
+        ):
+            raise CheckpointNotFoundError
+        snapshot_config = getattr(snapshot, "config", None)
+        snapshot_configurable = (
+            snapshot_config.get("configurable")
+            if isinstance(snapshot_config, dict)
+            else None
+        )
+        requested_configurable = graph_config["configurable"]
+        if (
+            not isinstance(snapshot_configurable, dict)
+            or snapshot_configurable.get("thread_id")
+            != requested_configurable.get("thread_id")
+            or snapshot_configurable.get("checkpoint_ns")
+            != requested_configurable.get("checkpoint_ns")
+            or snapshot_configurable.get("checkpoint_id")
+            != requested_configurable.get("checkpoint_id")
+        ):
+            raise CheckpointNotFoundError
         values = snapshot.values
         expected = {
             "run_id": payload.run_id,
@@ -216,6 +254,95 @@ class HarnessRunner:
         if any(values.get(key) != value for key, value in expected.items()):
             raise ResumeScopeError("checkpoint scope mismatch")
         return None
+
+    @staticmethod
+    def _checkpoint_thread_id(payload: SearchRunRequest) -> str:
+        thread_id = f"run:{payload.run_id}:session:{payload.checkpoint_session_id}"
+        if len(thread_id) < 240:
+            return thread_id
+        run_hash = hashlib.sha256(payload.run_id.encode()).hexdigest()
+        session_hash = hashlib.sha256(
+            payload.checkpoint_session_id.encode()
+        ).hexdigest()
+        return f"run:{run_hash}:session:{session_hash}"
+
+    async def _read_checkpoint_boundary(
+        self,
+        payload: SearchRunRequest,
+        graph_config: dict[str, Any],
+        data: object,
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise CheckpointNotReadableError
+        config = data.get("config")
+        configurable = config.get("configurable") if isinstance(config, dict) else None
+        if not isinstance(configurable, dict):
+            raise CheckpointNotReadableError
+        checkpoint_id = configurable.get("checkpoint_id")
+        checkpoint_ns = configurable.get("checkpoint_ns")
+        thread_id = configurable.get("thread_id")
+        metadata = data.get("metadata")
+        step = metadata.get("step") if isinstance(metadata, dict) else None
+        expected_thread_id = graph_config["configurable"]["thread_id"]
+        if (
+            not is_valid_checkpoint_identifier(checkpoint_id)
+            or not is_valid_checkpoint_namespace(checkpoint_ns)
+            or thread_id != expected_thread_id
+            or not isinstance(step, int)
+            or isinstance(step, bool)
+            or step < -1
+        ):
+            raise CheckpointNotReadableError
+
+        parent_config = data.get("parent_config")
+        parent_checkpoint_id: str | None = None
+        if parent_config is not None:
+            parent_configurable = (
+                parent_config.get("configurable")
+                if isinstance(parent_config, dict)
+                else None
+            )
+            if not isinstance(parent_configurable, dict):
+                raise CheckpointNotReadableError
+            parent_checkpoint_id = parent_configurable.get("checkpoint_id")
+            if (
+                not is_valid_checkpoint_identifier(parent_checkpoint_id)
+                or parent_configurable.get("thread_id") != expected_thread_id
+                or parent_configurable.get("checkpoint_ns") != checkpoint_ns
+            ):
+                raise CheckpointNotReadableError
+
+        exact_config = {
+            "configurable": {
+                "thread_id": expected_thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint_id,
+            }
+        }
+        snapshot = await self._dependencies.graph.aget_state(exact_config)
+        snapshot_config = getattr(snapshot, "config", None)
+        snapshot_configurable = (
+            snapshot_config.get("configurable")
+            if isinstance(snapshot_config, dict)
+            else None
+        )
+        if (
+            not snapshot
+            or getattr(snapshot, "metadata", None) is None
+            or getattr(snapshot, "created_at", None) is None
+            or not isinstance(snapshot_configurable, dict)
+            or snapshot_configurable.get("checkpoint_id") != checkpoint_id
+            or snapshot_configurable.get("checkpoint_ns") != checkpoint_ns
+            or snapshot_configurable.get("thread_id") != expected_thread_id
+        ):
+            raise CheckpointNotReadableError
+        return {
+            "checkpointId": checkpoint_id,
+            "parentCheckpointId": parent_checkpoint_id,
+            "checkpointNs": checkpoint_ns,
+            "checkpointSessionId": payload.checkpoint_session_id,
+            "step": step,
+        }
 
     async def _stream_scoped(
         self,
@@ -234,7 +361,17 @@ class HarnessRunner:
             model_gateway=dependencies.model_gateway or model_gateway(),
         )
         graph_config = {
-            "configurable": {"thread_id": f"run:{payload.run_id}"},
+            "configurable": {
+                "thread_id": self._checkpoint_thread_id(payload),
+                **(
+                    {
+                        "checkpoint_id": payload.checkpoint_id,
+                        "checkpoint_ns": payload.checkpoint_ns,
+                    }
+                    if payload.checkpoint_id is not None
+                    else {}
+                ),
+            },
             "recursion_limit": config.graph.recursion_limit,
         }
         task = asyncio.current_task()
@@ -247,6 +384,7 @@ class HarnessRunner:
             return
 
         last_state: dict[str, Any] | None = None
+        pending_checkpoint: dict[str, Any] | None = None
         try:
             graph_input = await self._resolve_graph_input(payload, graph_config)
             timeout_context = self._timeout_factory(config.graph.max_run_seconds + 10)
@@ -256,11 +394,24 @@ class HarnessRunner:
                     graph_input,
                     config=graph_config,
                     context=run_context,
-                    stream_mode=["custom", "values"],
+                    stream_mode=["custom", "values", "checkpoints"],
+                    durability="sync",
                     version="v2",
                 ):
                     if await is_disconnected():
                         raise asyncio.CancelledError("CLIENT_DISCONNECTED")
+                    if part["type"] == "checkpoints":
+                        if pending_checkpoint is not None:
+                            yield runtime_event(
+                                "checkpoint.committed", **pending_checkpoint
+                            )
+                        pending_checkpoint = await self._read_checkpoint_boundary(
+                            payload, graph_config, part.get("data")
+                        )
+                        continue
+                    if pending_checkpoint is not None:
+                        yield runtime_event("checkpoint.committed", **pending_checkpoint)
+                        pending_checkpoint = None
                     if part["type"] == "custom":
                         event = part["data"]
                         event_type = event.get("type")
@@ -310,6 +461,8 @@ class HarnessRunner:
                 reasonCode="RUN_TIMEOUT",
                 message="Agent 运行超时",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         except GraphRecursionError:
             yield runtime_event(
@@ -317,6 +470,8 @@ class HarnessRunner:
                 reasonCode="RECURSION_LIMIT",
                 message="Agent 循环达到上限",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         except ResumeScopeError:
             yield runtime_event(
@@ -324,6 +479,8 @@ class HarnessRunner:
                 reasonCode="RESUME_SCOPE_MISMATCH",
                 message="恢复请求与已有运行作用域不一致",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         except asyncio.CancelledError as exc:
             if task and hasattr(task, "uncancel"):
@@ -338,6 +495,8 @@ class HarnessRunner:
                 responseStatus="partial",
                 reasonCode="CLIENT_DISCONNECTED" if disconnected else "USER_STOPPED",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         except Exception as exc:  # noqa: BLE001 - 只返回稳定错误，不泄露 Provider body
             reason_code = str(getattr(exc, "code", "") or "").strip()
@@ -352,6 +511,8 @@ class HarnessRunner:
                 reasonCode=reason_code,
                 message="Search Agent 运行失败",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         finally:
             await dependencies.run_registry.finish(payload.run_id, task)
@@ -376,6 +537,8 @@ class HarnessRunner:
                 reasonCode=reason_code,
                 message="Agent 没有生成可交付的模型回答",
             )
+            if pending_checkpoint is not None:
+                yield runtime_event("checkpoint.committed", **pending_checkpoint)
             return
         yield runtime_event(
             "run.completed",
@@ -392,6 +555,8 @@ class HarnessRunner:
             toolCalls=int(last_state.get("tool_calls") or 0),
             evidenceCount=len(last_state.get("evidence") or []),
         )
+        if pending_checkpoint is not None:
+            yield runtime_event("checkpoint.committed", **pending_checkpoint)
 
     @staticmethod
     def _shift_timeout(timeout_context: Any, seconds: float) -> None:

@@ -21,6 +21,19 @@ const provenance = {
 };
 
 describe("Search Agent v1 白名单投影", () => {
+  it("checkpoint 边界只参与 Worker 提交协议，不投影为公开 AgentEvent", () => {
+    const projection = mapSearchAgentEvent(source({
+      type: "checkpoint.committed",
+      checkpointId: "1f1912ee-73b4-6fe6-8001-36fa8d23b2fd",
+      parentCheckpointId: null,
+      checkpointNs: "",
+      checkpointSessionId: "checkpoint_session_1",
+      step: -1
+    }), "run_one");
+
+    expect(projection).toEqual({ events: [] });
+  });
+
   it("node.started 不提前创建稍后会被回填的思考项", () => {
     const first = mapSearchAgentEvent(source({ type: "node.started", node: "compose", nodeRunId: "compose_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", agent: "writer", iteration: 1 }), "run_one");
     const second = mapSearchAgentEvent(source({ type: "node.started", node: "verify", nodeRunId: "verify_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", agent: "verifier", iteration: 1 }), "run_one");

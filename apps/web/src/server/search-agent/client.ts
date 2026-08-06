@@ -19,12 +19,42 @@ export type SearchAgentRunRequest = {
   imageInputs?: ImageInputReference[];
   depth?: "quick" | "balanced" | "deep";
   resume?: boolean;
+  checkpointId?: string;
+  checkpointNs?: string;
+  checkpointSessionId: string;
 };
 
 export class SearchAgentRequestError extends Error {
   constructor(message: string, readonly code: string) {
     super(message);
     this.name = "SearchAgentRequestError";
+  }
+}
+
+const checkpointIdentifier = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/u);
+const checkpointNamespace = z.string().max(256).refine((value) => !/[\r\n\u0000]/u.test(value));
+
+function validateCheckpointResume(input: SearchAgentRunRequest) {
+  const session = checkpointIdentifier.safeParse(input.checkpointSessionId);
+  const checkpoint = input.checkpointId === undefined
+    ? { success: true as const }
+    : checkpointIdentifier.safeParse(input.checkpointId);
+  const namespace = input.checkpointNs === undefined
+    ? { success: true as const }
+    : checkpointNamespace.safeParse(input.checkpointNs);
+  const hasCheckpoint = input.checkpointId !== undefined;
+  const hasNamespace = input.checkpointNs !== undefined;
+  if (
+    !session.success
+    || !checkpoint.success
+    || !namespace.success
+    || hasCheckpoint !== hasNamespace
+    || Boolean(input.resume) !== hasCheckpoint
+  ) {
+    throw new SearchAgentRequestError(
+      "Search Agent checkpoint 恢复引用无效",
+      "SEARCH_AGENT_INVALID_CHECKPOINT"
+    );
   }
 }
 
@@ -132,6 +162,7 @@ export async function cancelXiaohongshuVerification(runId: string, challengeId: 
 }
 
 export async function* streamSearchAgentRun(input: SearchAgentRunRequest, signal: AbortSignal): AsyncGenerator<SearchAgentEvent> {
+  validateCheckpointResume(input);
   const config = await loadSearchAgentServiceConfig();
   const timeout = AbortSignal.timeout(config.requestTimeoutMs);
   const combinedSignal = AbortSignal.any([signal, timeout]);

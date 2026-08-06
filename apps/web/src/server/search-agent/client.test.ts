@@ -36,7 +36,8 @@ const request = {
   modelId: "deepseek-v4-flash",
   reasoningEffort: "high" as const,
   history: [],
-  projectMemoryContext: ""
+  projectMemoryContext: "",
+  checkpointSessionId: "checkpoint_session_1"
 };
 
 describe("Search Agent 服务端 client", () => {
@@ -65,8 +66,54 @@ describe("Search Agent 服务端 client", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1:8100/v1/runs/stream");
     expect(new Headers(init.headers).get("X-Workbench-Token")).toBe("internal-test-token");
-    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({ version: 1, runId: "run_one", question: "需要搜索的问题", resume: false }));
+    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({
+      version: 1,
+      runId: "run_one",
+      question: "需要搜索的问题",
+      resume: false,
+      checkpointSessionId: "checkpoint_session_1"
+    }));
     expect(String(init.body)).not.toMatch(/apiKey|Authorization|reasoning_content/u);
+  });
+
+  it("只接受成对且格式合法的权威 checkpoint 恢复引用", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ndjsonResponse([{
+      ...sourceEnvelope,
+      type: "run.failed",
+      reasonCode: "SEARCH_UNAVAILABLE",
+      message: "搜索不可用"
+    }]));
+
+    const invalid = [
+      { ...request, checkpointSessionId: "bad/session" },
+      { ...request, resume: false, checkpointId: "checkpoint_1" },
+      { ...request, resume: false, checkpointNs: "" },
+      { ...request, resume: true },
+      { ...request, resume: true, checkpointId: "checkpoint_1" },
+      { ...request, resume: true, checkpointId: "bad/checkpoint", checkpointNs: "" },
+      { ...request, resume: true, checkpointId: "checkpoint_1", checkpointNs: "bad\nnamespace" }
+    ];
+    for (const candidate of invalid) {
+      const consume = async () => {
+        for await (const _event of streamSearchAgentRun(candidate, new AbortController().signal)) void _event;
+      };
+      await expect(consume()).rejects.toMatchObject({ code: "SEARCH_AGENT_INVALID_CHECKPOINT" });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const exact = {
+      ...request,
+      resume: true,
+      checkpointId: "checkpoint_1",
+      checkpointNs: "research/subgraph"
+    };
+    for await (const _event of streamSearchAgentRun(exact, new AbortController().signal)) void _event;
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toMatchObject({
+      resume: true,
+      checkpointId: "checkpoint_1",
+      checkpointNs: "research/subgraph",
+      checkpointSessionId: "checkpoint_session_1"
+    });
   });
 
   it("图片只传递不可逆引用，不传 bytes、base64 或附件地址", async () => {

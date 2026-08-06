@@ -149,7 +149,7 @@ def test_safe_result_payload_removes_inputs_and_private_provider_fields() -> Non
 
 
 @pytest.mark.asyncio
-async def test_completed_tool_operation_is_reused_without_provider_replay(
+async def test_unconfirmed_checkpoint_replay_reuses_ledger_without_provider_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ledger = Ledger()
@@ -179,26 +179,38 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
     )
     arguments = SearchToolInput(query="query one", channel="web", max_results=5)
 
-    _first, first_trace = await nodes._run_one_search(
+    first_result, first_trace = await nodes._run_one_search(
         state(), runtime, "call_1", arguments
     )
-    _second, second_trace = await nodes._run_one_search(
+
+    # LangGraph 已提交 checkpoint，但 Node 尚未确认对应 source batch；恢复会从
+    # Web 账本中的较旧权威 checkpoint 重放同一工具节点，首轮公开事件不可复用。
+    unconfirmed_events = list(events)
+    events.clear()
+    recovered_result, second_trace = await nodes._run_one_search(
         state(), runtime, "call_1", arguments
     )
 
     assert executions == 1
+    assert first_result == recovered_result
     assert first_trace["status"] == "completed"
     assert second_trace["status"] == "cached"
-    assert [event["type"] for event in events] == [
+    assert first_trace["tool_call_id"] == second_trace["tool_call_id"] == "call_1"
+    assert first_trace["idempotency_key"] == second_trace["idempotency_key"]
+    assert [event["type"] for event in unconfirmed_events] == [
         "tool.started",
         "tool.completed",
+    ]
+    assert [event["type"] for event in events] == [
         "tool.started",
         "tool.completed",
     ]
     assert events[-1]["cached"] is True
-    assert events[0]["operationRef"] == first_trace["operation_ref"]
-    assert events[0]["attempt"] == 1
-    assert events[0]["inputHash"] == first_trace["input_hash"]
+    assert unconfirmed_events[0]["operationRef"] == first_trace["operation_ref"]
+    assert unconfirmed_events[0]["attempt"] == 1
+    assert unconfirmed_events[0]["inputHash"] == first_trace["input_hash"]
+    assert unconfirmed_events[1]["resultRef"] == first_trace["result_ref"]
+    assert unconfirmed_events[1]["outputHash"] == first_trace["output_hash"]
     assert events[1]["resultRef"] == first_trace["result_ref"]
     assert events[1]["outputHash"] == first_trace["output_hash"]
     assert events[1]["usage"]["calls"] == 1
@@ -206,7 +218,11 @@ async def test_completed_tool_operation_is_reused_without_provider_replay(
     persisted = next(iter(ledger.rows.values())).result
     assert persisted is not None
     assert "query one" not in str(persisted)
-    completed_events = [event for event in events if event["type"] == "tool.completed"]
+    completed_events = [
+        event
+        for event in [*unconfirmed_events, *events]
+        if event["type"] == "tool.completed"
+    ]
     assert all(isinstance(event["durationMs"], int) for event in completed_events)
     assert all(event["durationMs"] >= 0 for event in completed_events)
 
