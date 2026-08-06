@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-08-06 |
 | Issue | https://github.com/LuzernRR/agent-workbench/issues/50 |
-| PR | https://github.com/LuzernRR/agent-workbench/pull/51（验收后待合并） |
+| PR | https://github.com/LuzernRR/agent-workbench/pull/51（merged: `048774f`） |
 | 分支 | `codex/issue-50-checkpoint-outbox` |
 | 状态 | accepted |
 | 目标环境 | local / Compose dev / 隔离 PostgreSQL |
@@ -203,7 +203,7 @@ LANGGRAPH_STRICT_MSGPACK: "true"
   integration `10 passed`；真实 LangGraph/PostgreSQL exact-fork `1 passed`；Playwright
   `16 passed / 3 live-only skipped`；typecheck、ESLint、Ruff、compileall、Next/Worker build、Compose config、
   `git diff --check` 和 high/critical 依赖门禁通过；Web/Search Agent health 均为 `ok`。
-- GitHub 状态：PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 等待转为 ready 并合并；Issue #50
-  在合并前保持 open。
-- 下一功能执行门：仍阻塞到 #51 合并并确认 #50 closed。随后才能创建查询理解/迭代检索的独立 Issue，
-  写明可测试 DoD，设置 `Status: ready` 与 `Execution Gate: allowed`，再开始方案检索和实现。
+- GitHub 状态：PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 已于 2026-08-06 squash 合入
+  `main`（`048774f70cb5778575cb44e20129ce47ebc05e67`）；Issue #50 以 `completed` 关闭。
+- 下一功能执行门：已解锁，但当前尚无新活动 Feature。必须先创建查询理解/迭代检索的独立 Issue，写明
+  可测试 DoD，设置 `Status: ready` 与 `Execution Gate: allowed`，再开始方案检索和实现。

@@ -1,12 +1,12 @@
 # 项目交接
 
-## 当前结论（2026-08-06，Issue #50 已验收，正在完成合并闭环）
+## 当前结论（2026-08-06，Issue #50 已验收并合并）
 
-- 本轮唯一活跃功能为 [#50](https://github.com/LuzernRR/agent-workbench/issues/50)
-  “P0-04：Checkpoint、AgentEvent 与 Outbox 原子确认边界”；分支为
-  `codex/issue-50-checkpoint-outbox`，PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51)。A1-A11
-  已取得直接证据。用户于 2026-08-06 明确回复“验收通过，测试后你自己通过当前验收”，Codex 随后重新执行
-  完整门禁并将本项标为 `accepted`；当前只剩 PR ready/merge、Issue close 与 main 交接同步。
+- 本轮刚完成的唯一功能为 [#50](https://github.com/LuzernRR/agent-workbench/issues/50)
+  “P0-04：Checkpoint、AgentEvent 与 Outbox 原子确认边界”。用户于 2026-08-06 明确回复“验收通过，测试后
+  你自己通过当前验收”，Codex 随后重新执行完整门禁并将本项标为 `accepted`。PR
+  [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 已 squash 合入 `main`
+  （`048774f70cb5778575cb44e20129ce47ebc05e67`），Issue #50 以 `completed` 关闭；A1-A11 全部有直接证据。
 - **准确事务边界是两个本地事务组成的可恢复确认协议**：Python 以 `durability="sync"` 提交 LangGraph
   Checkpoint；Node 在另一个 PostgreSQL 事务内确认 Run revision、权威 checkpoint 引用、source Inbox、
   连续 AgentEvent 投影和 transactional Outbox。没有 XA、两阶段提交或跨服务原子事务。
@@ -41,8 +41,8 @@
 - 回滚优先 `git revert <merge-sha>` 并先停 Worker；数据库新增表、列和约束保持向后兼容，可在旧版本暂留。
   若必须 contract，应另立 migration，在确认没有活跃 Run、pending Outbox 且完成备份后执行。
 - 用户于 2026-08-06 新增“查询理解、关键词拆解与结果反馈驱动的迭代检索”完整功能要求。该需求已记录为
-  #50 合并后的下一候选，但尚未创建 Issue、未研究或修改功能代码；必须先完成 #51 合并并确认 #50 closed，
-  再按单 Issue 门禁进行大规模方案检索、定义可测试 DoD 并实现。
+  下一候选，尚未创建 Issue、未研究或修改功能代码。#50 闭环后单 Issue 门禁已解锁；下一步必须先创建
+  独立 Issue、定义可测试 DoD 并设置 `Status: ready` 与 `Execution Gate: allowed`，再进行大规模方案检索与实现。
 - 中文开发记录见
   [043](docs/development/2026-08-06-043-issue-50-checkpoint-outbox.md)。
 

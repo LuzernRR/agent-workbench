@@ -4,10 +4,12 @@
 
 Issue [#50](https://github.com/LuzernRR/agent-workbench/issues/50) establishes a recoverable two-transaction protocol between the Python LangGraph checkpoint transaction and the Node PostgreSQL projection transaction. The Node run ledger is the only authority for resume; source events stay buffered until a readable checkpoint boundary can atomically advance the run revision, checkpoint reference, inbox, projected AgentEvents, and transactional outbox.
 
-Issue status is `ready` and `Execution Gate: allowed`. Implementation and technical
-verification are complete. The user explicitly accepted the feature on 2026-08-06 and
-authorized Codex to pass the current acceptance after fresh verification; delivery is
-finishing the PR/Issue merge closure. This plan covers only Issue #50.
+Issue #50 entered execution with `Status: ready` and `Execution Gate: allowed`.
+Implementation and technical verification are complete. The user explicitly accepted
+the feature on 2026-08-06 and authorized Codex to pass the current acceptance after
+fresh verification. PR #51 was squash-merged to `main` as
+`048774f70cb5778575cb44e20129ce47ebc05e67`, and Issue #50 closed as completed. This plan
+covers only Issue #50.
 
 ## Architecture Decisions
 
@@ -54,6 +56,7 @@ finishing the PR/Issue merge closure. This plan covers only Issue #50.
 - [x] Web and Search Agent full verification gates pass.
 - [x] Runtime/Compose checks and `git diff --check` pass.
 - [x] User acceptance recorded after fresh full verification; no next feature has started.
+- [x] PR #51 merged, Issue #50 closed, and main handoff synchronized.
 
 ## Task Details
 
