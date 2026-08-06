@@ -6,9 +6,9 @@
 |---|---|
 | 日期 | 2026-08-06 |
 | Issue | https://github.com/LuzernRR/agent-workbench/issues/50 |
-| PR | https://github.com/LuzernRR/agent-workbench/pull/51（draft） |
+| PR | https://github.com/LuzernRR/agent-workbench/pull/51（验收后待合并） |
 | 分支 | `codex/issue-50-checkpoint-outbox` |
-| 状态 | awaiting-acceptance |
+| 状态 | accepted |
 | 目标环境 | local / Compose dev / 隔离 PostgreSQL |
 
 ## 手册与架构约束
@@ -196,8 +196,14 @@ LANGGRAPH_STRICT_MSGPACK: "true"
 
 ## 用户验收
 
-- 状态：等待用户显式验收。
-- 验收反馈：待填写。
-- GitHub 状态：Draft PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 已创建；Issue #50 保持 open。
-- 下一功能执行门：阻塞。收到 #50 明确验收后，才创建查询理解/迭代检索的独立 Issue，写明可测试 DoD，
-  设置 `Status: ready` 与 `Execution Gate: allowed`，再开始方案检索和实现。
+- 状态：`accepted`。
+- 验收反馈：用户于 2026-08-06 明确回复“验收通过，测试后你自己通过当前验收”，授权 Codex 在复验后
+  自主通过本项。
+- 复验证据：Web `424 passed / 10 skipped`；Search Agent `501 passed / 1 skipped`；Web PostgreSQL
+  integration `10 passed`；真实 LangGraph/PostgreSQL exact-fork `1 passed`；Playwright
+  `16 passed / 3 live-only skipped`；typecheck、ESLint、Ruff、compileall、Next/Worker build、Compose config、
+  `git diff --check` 和 high/critical 依赖门禁通过；Web/Search Agent health 均为 `ok`。
+- GitHub 状态：PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 等待转为 ready 并合并；Issue #50
+  在合并前保持 open。
+- 下一功能执行门：仍阻塞到 #51 合并并确认 #50 closed。随后才能创建查询理解/迭代检索的独立 Issue，
+  写明可测试 DoD，设置 `Status: ready` 与 `Execution Gate: allowed`，再开始方案检索和实现。

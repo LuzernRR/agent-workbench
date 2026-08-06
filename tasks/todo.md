@@ -14,3 +14,5 @@
 - [x] Full Web gate
 - [x] Compose/runtime smoke and `git diff --check`
 - [x] Present A1-A11 evidence and stop for explicit user acceptance
+- [x] Record 2026-08-06 user acceptance after fresh full verification
+- [ ] Merge PR #51, confirm Issue #50 closed, and sync main handoff

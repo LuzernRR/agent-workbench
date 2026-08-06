@@ -101,8 +101,9 @@
 
 ### P0-04 Checkpoint、AgentEvent 与 Outbox 原子边界
 
-- 状态：`awaiting-acceptance`。Issue
-  [#50](https://github.com/LuzernRR/agent-workbench/issues/50) 已技术完成，等待用户显式验收。
+- 状态：`accepted`。Issue [#50](https://github.com/LuzernRR/agent-workbench/issues/50)，PR
+  [#51](https://github.com/LuzernRR/agent-workbench/pull/51)。用户于 2026-08-06 明确回复“验收通过，测试后
+  你自己通过当前验收”；Codex 重新执行完整门禁后按 A1-A11 自主判定通过。
 - 已实现：Python 以 `durability="sync"` 提交 LangGraph Checkpoint；Node 仅从 `wb_runs` 的
   `checkpointSessionId + checkpointNs + checkpointId` 权威引用恢复，并在另一个 PostgreSQL 事务内同时
   确认 Run revision、checkpoint commit、source Inbox、连续 AgentEvent 和 transactional Outbox。该协议
@@ -112,7 +113,7 @@
   listener 的 SSE cursor 补发均有直接测试。完整证据见
   [开发记录 043](development/2026-08-06-043-issue-50-checkpoint-outbox.md)。
 - 发布约束：Search Agent 固定 `LANGGRAPH_STRICT_MSGPACK=true`；Outbox `NOTIFY` 只负责唤醒，持久事件表
-  始终是可靠来源。验收前不得关闭 #50、合并 PR 或启动 P0-05。
+  始终是可靠来源。完成 #51 合并、确认 #50 closed 并同步 main 前，不启动下一功能。
 
 ### P0-05 OIDC、多租户授权、配额与审计
 
