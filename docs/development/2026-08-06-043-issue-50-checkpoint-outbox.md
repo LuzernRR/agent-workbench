@@ -6,6 +6,7 @@
 |---|---|
 | 日期 | 2026-08-06 |
 | Issue | https://github.com/LuzernRR/agent-workbench/issues/50 |
+| PR | https://github.com/LuzernRR/agent-workbench/pull/51（draft） |
 | 分支 | `codex/issue-50-checkpoint-outbox` |
 | 状态 | awaiting-acceptance |
 | 目标环境 | local / Compose dev / 隔离 PostgreSQL |
@@ -197,5 +198,6 @@ LANGGRAPH_STRICT_MSGPACK: "true"
 
 - 状态：等待用户显式验收。
 - 验收反馈：待填写。
+- GitHub 状态：Draft PR [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 已创建；Issue #50 保持 open。
 - 下一功能执行门：阻塞。收到 #50 明确验收后，才创建查询理解/迭代检索的独立 Issue，写明可测试 DoD，
   设置 `Status: ready` 与 `Execution Gate: allowed`，再开始方案检索和实现。

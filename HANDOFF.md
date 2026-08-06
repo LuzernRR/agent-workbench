@@ -4,8 +4,9 @@
 
 - 本轮唯一活跃功能为 [#50](https://github.com/LuzernRR/agent-workbench/issues/50)
   “P0-04：Checkpoint、AgentEvent 与 Outbox 原子确认边界”，`Status: ready`、
-  `Execution Gate: allowed`；分支为 `codex/issue-50-checkpoint-outbox`。A1-A11 已取得直接证据，当前状态为
-  `awaiting-acceptance`，不得关闭 Issue、合并 PR 或启动下一功能。
+  `Execution Gate: allowed`；分支为 `codex/issue-50-checkpoint-outbox`，Draft PR
+  [#51](https://github.com/LuzernRR/agent-workbench/pull/51) 已创建。A1-A11 已取得直接证据，当前状态为
+  `awaiting-acceptance`，不得关闭 Issue、将 PR 转为 ready/合并或启动下一功能。
 - **准确事务边界是两个本地事务组成的可恢复确认协议**：Python 以 `durability="sync"` 提交 LangGraph
   Checkpoint；Node 在另一个 PostgreSQL 事务内确认 Run revision、权威 checkpoint 引用、source Inbox、
   连续 AgentEvent 投影和 transactional Outbox。没有 XA、两阶段提交或跨服务原子事务。
