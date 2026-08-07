@@ -329,14 +329,20 @@ export function reduceAgentEvent(state: AgentThreadState, event: AgentEvent): Ag
 
   switch (event.type) {
     case "run.created":
-    case "run.started":
+    case "run.started": {
+      // The send path may install a client-side start anchor before the first
+      // SSE event arrives. Keep that earlier anchor so the visible elapsed
+      // time includes request setup instead of starting at the first token.
+      const existingTiming = next.runTimings[event.runId];
+      const startedAt = existingTiming?.startedAt || event.createdAt;
       return {
         ...next,
         runStatus: "running",
-        runStartedAt: event.createdAt,
+        runStartedAt: startedAt,
         runStatuses: { ...next.runStatuses, [event.runId]: "running" },
-        runTimings: { ...next.runTimings, [event.runId]: { startedAt: event.createdAt } }
+        runTimings: { ...next.runTimings, [event.runId]: { ...existingTiming, startedAt } }
       };
+    }
     case "run.status": {
       const status = stringValue(payload.status, "running") as AgentThreadState["runStatus"];
       const timing = next.runTimings[event.runId];

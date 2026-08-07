@@ -6,12 +6,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.evaluation.runner import CaseRun
 from app.events.runtime import _FORBIDDEN_KEYS, _assert_public
+from app.graph.query_strategy import (
+    QueryBrief,
+    constraint_signature,
+    hard_constraint_ids,
+    is_near_duplicate,
+)
 
 # 证据状态机的合法迁移；起点只能是 read。
 _LEGAL_EVIDENCE_TRANSITIONS = {
@@ -32,6 +38,7 @@ class ScoreResult:
     passed: bool
     detail: str
     failures: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 Scorer = Callable[[CaseRun], ScoreResult]
@@ -408,6 +415,368 @@ def score_latency_budget(run: CaseRun) -> ScoreResult:
     )
 
 
+_QUERY_STATE_KEYS = frozenset({"query_brief", "search_attempts", "evidence_gaps"})
+_MIN_FACET_COVERAGE = 0.9
+
+
+def _private_query_state(run: CaseRun) -> dict[str, Any] | None:
+    """返回私有查询状态；旧用例与直接回答明确视为不适用。"""
+    raw = run.final_state
+    if raw is None:
+        raw = run.case.final_state
+    if not isinstance(raw, dict) or not (_QUERY_STATE_KEYS & raw.keys()):
+        return None
+    attempts = raw.get("search_attempts")
+    gaps = raw.get("evidence_gaps")
+    if raw.get("query_brief") is None and not attempts and not gaps:
+        return None
+    return raw
+
+
+def _not_applicable(name: str) -> ScoreResult:
+    return ScoreResult(
+        name=name,
+        passed=True,
+        detail="不适用：最终状态没有查询策略数据",
+        metrics={"applicable": False},
+    )
+
+
+def _query_brief(
+    state: Mapping[str, Any],
+) -> tuple[QueryBrief | None, list[str]]:
+    raw = state.get("query_brief")
+    if raw is None:
+        return None, ["查询策略状态缺少 QueryBrief"]
+    try:
+        return QueryBrief.model_validate(raw), []
+    except (TypeError, ValueError):
+        # 不把验证异常带入报告，避免回显私有查询内容。
+        return None, ["查询策略状态中的 QueryBrief 无法验证"]
+
+
+def _mapping_list(
+    state: Mapping[str, Any],
+    key: str,
+    label: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    raw = state.get(key, [])
+    if not isinstance(raw, list):
+        return [], [f"{label} 必须是列表"]
+    values: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            failures.append(f"{label}[{index}] 必须是对象")
+            continue
+        values.append(dict(item))
+    return values, failures
+
+
+def score_constraint_retention(run: CaseRun) -> ScoreResult:
+    """统计每次真实尝试对 QueryBrief 硬约束集合的保留率。"""
+    state = _private_query_state(run)
+    if state is None:
+        return _not_applicable("constraint_retention")
+
+    brief, failures = _query_brief(state)
+    attempts, attempt_failures = _mapping_list(
+        state, "search_attempts", "SearchAttempt"
+    )
+    failures.extend(attempt_failures)
+    expected = set(hard_constraint_ids(brief)) if brief is not None else set()
+    expected_signature = constraint_signature(brief) if brief is not None else ""
+    retained_count = 0
+    required_count = len(expected) * len(attempts)
+
+    for index, attempt in enumerate(attempts):
+        raw_retained = attempt.get("retained_constraint_ids")
+        if not isinstance(raw_retained, list) or any(
+            not isinstance(item, str) for item in raw_retained
+        ):
+            failures.append(f"SearchAttempt[{index}] 的硬约束集合无效")
+            retained: set[str] = set()
+        else:
+            retained = set(raw_retained)
+            if len(retained) != len(raw_retained):
+                failures.append(f"SearchAttempt[{index}] 的硬约束集合含重复项")
+        retained_count += len(expected & retained)
+        missing = expected - retained
+        if missing:
+            failures.append(
+                f"SearchAttempt[{index}] 未保留 {len(missing)} 个硬约束"
+            )
+        if str(attempt.get("constraint_signature") or "") != expected_signature:
+            failures.append(f"SearchAttempt[{index}] 的硬约束签名不匹配")
+
+    rate = retained_count / required_count if required_count else 1.0
+    metrics = {
+        "applicable": True,
+        "retained": retained_count,
+        "required": required_count,
+        "rate": rate,
+    }
+    if rate < 1.0 and not any("未保留" in failure for failure in failures):
+        failures.append("硬约束保留率低于 100%")
+    return ScoreResult(
+        name="constraint_retention",
+        passed=not failures,
+        detail=(
+            f"硬约束保留率 {rate:.1%}（{retained_count}/{required_count}）"
+            if not failures
+            else "；".join(failures)
+        ),
+        failures=failures,
+        metrics=metrics,
+    )
+
+
+def score_facet_coverage(run: CaseRun) -> ScoreResult:
+    """统计实际 SearchAttempt 覆盖的 QueryBrief 证据分面。"""
+    state = _private_query_state(run)
+    if state is None:
+        return _not_applicable("facet_coverage")
+
+    brief, failures = _query_brief(state)
+    attempts, attempt_failures = _mapping_list(
+        state, "search_attempts", "SearchAttempt"
+    )
+    failures.extend(attempt_failures)
+    expected = (
+        {facet.facet_id for facet in brief.evidence_facets}
+        if brief is not None
+        else set()
+    )
+    attempted = {str(item.get("facet_id") or "") for item in attempts}
+    attempted.discard("")
+    unknown = attempted - expected
+    if unknown:
+        failures.append(f"SearchAttempt 引用了 {len(unknown)} 个未知分面")
+    covered = len(expected & attempted)
+    total = len(expected)
+    rate = covered / total if total else 1.0
+    if rate < _MIN_FACET_COVERAGE:
+        failures.append(
+            f"分面覆盖率 {rate:.1%} 低于门槛 {_MIN_FACET_COVERAGE:.1%}"
+        )
+    metrics = {
+        "applicable": True,
+        "covered": covered,
+        "total": total,
+        "rate": rate,
+    }
+    return ScoreResult(
+        name="facet_coverage",
+        passed=not failures,
+        detail=(
+            f"分面覆盖率 {rate:.1%}（{covered}/{total}）"
+            if not failures
+            else "；".join(failures)
+        ),
+        failures=failures,
+        metrics=metrics,
+    )
+
+
+def score_duplicate_query(run: CaseRun) -> ScoreResult:
+    """统计稳定 ID 重复或同一策略作用域内的近重复执行。"""
+    state = _private_query_state(run)
+    if state is None:
+        return _not_applicable("duplicate_query")
+
+    attempts, failures = _mapping_list(state, "search_attempts", "SearchAttempt")
+    seen_ids: set[str] = set()
+    prior: list[dict[str, Any]] = []
+    duplicate_indexes: set[int] = set()
+    required_fields = (
+        "query",
+        "channel",
+        "facet_id",
+        "strategy",
+        "constraint_signature",
+    )
+    for index, attempt in enumerate(attempts):
+        attempt_id = str(attempt.get("attempt_id") or "")
+        if not attempt_id:
+            failures.append(f"SearchAttempt[{index}] 缺少 attemptId")
+        elif attempt_id in seen_ids:
+            duplicate_indexes.add(index)
+        else:
+            seen_ids.add(attempt_id)
+        if any(not str(attempt.get(key) or "") for key in required_fields):
+            failures.append(f"SearchAttempt[{index}] 缺少重复判定字段")
+        elif is_near_duplicate(attempt, prior):
+            duplicate_indexes.add(index)
+        prior.append(attempt)
+
+    duplicate_count = len(duplicate_indexes)
+    execution_count = len(attempts)
+    rate = duplicate_count / execution_count if execution_count else 0.0
+    if duplicate_count:
+        failures.append(f"检测到 {duplicate_count} 次重复查询执行")
+    metrics = {
+        "applicable": True,
+        "duplicates": duplicate_count,
+        "executions": execution_count,
+        "rate": rate,
+    }
+    return ScoreResult(
+        name="duplicate_query",
+        passed=not failures,
+        detail=(
+            f"重复查询执行率 {rate:.1%}（{duplicate_count}/{execution_count}）"
+            if not failures
+            else "；".join(failures)
+        ),
+        failures=failures,
+        metrics=metrics,
+    )
+
+
+def score_gap_closure(run: CaseRun) -> ScoreResult:
+    """进展尝试已绑定的 gap 必须闭合，闭合 resolver 必须真实且有增益。"""
+    state = _private_query_state(run)
+    if state is None:
+        return _not_applicable("gap_closure")
+
+    attempts, failures = _mapping_list(state, "search_attempts", "SearchAttempt")
+    gaps, gap_failures = _mapping_list(state, "evidence_gaps", "EvidenceGap")
+    failures.extend(gap_failures)
+    attempts_by_id = {
+        str(item.get("attempt_id") or ""): item
+        for item in attempts
+        if str(item.get("attempt_id") or "")
+    }
+    progressing_gaps = {
+        str(item.get("gap_id") or "")
+        for item in attempts
+        if item.get("gap_id") and item.get("progress") is True
+    }
+    seen_gap_ids: set[str] = set()
+    expected_closable = 0
+    closed = 0
+    globally_sufficient = bool(
+        state.get("verification_passed") is True
+        or state.get("sufficient") is True
+    )
+
+    for index, gap in enumerate(gaps):
+        gap_id = str(gap.get("gap_id") or "")
+        if not gap_id:
+            failures.append(f"EvidenceGap[{index}] 缺少 gapId")
+            continue
+        if gap_id in seen_gap_ids:
+            failures.append(f"EvidenceGap[{index}] 的 gapId 重复")
+            continue
+        seen_gap_ids.add(gap_id)
+        status = str(gap.get("status") or "")
+        has_progress = gap_id in progressing_gaps
+        if status == "closed":
+            expected_closable += 1
+            if not isinstance(gap.get("closed_iteration"), int):
+                failures.append(
+                    f"EvidenceGap[{index}] 已闭合但缺少 closedIteration"
+                )
+            resolver_id = str(gap.get("resolved_by_attempt_id") or "")
+            resolver = attempts_by_id.get(resolver_id)
+            if not resolver_id and globally_sufficient:
+                closed += 1
+            elif (
+                resolver is None
+                or str(resolver.get("gap_id") or "") != gap_id
+                or resolver.get("progress") is not True
+            ):
+                failures.append(
+                    f"EvidenceGap[{index}] 的闭合 resolver 无绑定进展"
+                )
+            else:
+                closed += 1
+        elif status == "open":
+            if gap.get("resolved_by_attempt_id") is not None:
+                failures.append(f"EvidenceGap[{index}] 仍 open 却已有 resolver")
+            if gap.get("closed_iteration") is not None:
+                failures.append(f"EvidenceGap[{index}] 仍 open 却已有 closedIteration")
+            if has_progress:
+                expected_closable += 1
+                failures.append(f"EvidenceGap[{index}] 已有绑定进展但仍为 open")
+        else:
+            failures.append(f"EvidenceGap[{index}] 的状态无效")
+
+    rate = closed / expected_closable if expected_closable else 1.0
+    metrics = {
+        "applicable": True,
+        "closed": closed,
+        "expectedClosable": expected_closable,
+        "rate": rate,
+    }
+    return ScoreResult(
+        name="gap_closure",
+        passed=not failures,
+        detail=(
+            f"预期可闭合缺口完成率 {rate:.1%}（{closed}/{expected_closable}）"
+            if not failures
+            else "；".join(failures)
+        ),
+        failures=failures,
+        metrics=metrics,
+    )
+
+
+def score_evidence_gain(run: CaseRun) -> ScoreResult:
+    """输出每次搜索的新增 Evidence 总量、正增益次数与均值。"""
+    state = _private_query_state(run)
+    if state is None:
+        return _not_applicable("evidence_gain")
+
+    attempts, failures = _mapping_list(state, "search_attempts", "SearchAttempt")
+    total_gain = 0
+    positive_attempts = 0
+    for index, attempt in enumerate(attempts):
+        gain = attempt.get("new_evidence_count")
+        evidence_count = attempt.get("evidence_count")
+        if (
+            not isinstance(gain, int)
+            or isinstance(gain, bool)
+            or gain < 0
+            or not isinstance(evidence_count, int)
+            or isinstance(evidence_count, bool)
+            or evidence_count < 0
+        ):
+            failures.append(f"SearchAttempt[{index}] 的 Evidence 计数无效")
+            continue
+        if gain > evidence_count:
+            failures.append(f"SearchAttempt[{index}] 的新增 Evidence 超过结果计数")
+        total_gain += gain
+        positive_attempts += int(gain > 0)
+
+    attempt_count = len(attempts)
+    average = total_gain / attempt_count if attempt_count else 0.0
+    requires_positive_gain = (
+        state.get("verification_passed") is True
+        or str(state.get("response_status") or "") == "completed"
+    )
+    if requires_positive_gain and total_gain <= 0:
+        failures.append("已完成且核验的查询运行没有正 Evidence 增益")
+    metrics = {
+        "applicable": True,
+        "attempts": attempt_count,
+        "totalNewEvidence": total_gain,
+        "positiveAttempts": positive_attempts,
+        "averageNewEvidence": average,
+    }
+    return ScoreResult(
+        name="evidence_gain",
+        passed=not failures,
+        detail=(
+            f"新增 Evidence {total_gain} 条，单次搜索均值 {average:.2f}"
+            if not failures
+            else "；".join(failures)
+        ),
+        failures=failures,
+        metrics=metrics,
+    )
+
+
 ALL_SCORERS: tuple[Scorer, ...] = (
     score_terminal_uniqueness,
     score_route_and_channel,
@@ -416,6 +785,11 @@ ALL_SCORERS: tuple[Scorer, ...] = (
     score_citation_traceability,
     score_tool_ledger_completeness,
     score_plan_legality,
+    score_constraint_retention,
+    score_facet_coverage,
+    score_duplicate_query,
+    score_gap_closure,
+    score_evidence_gain,
     score_forbidden_field_scan,
     score_latency_budget,
 )

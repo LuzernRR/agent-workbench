@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -14,14 +15,24 @@ from app.evaluation.scorers import (
     ALL_SCORERS,
     score_case,
     score_citation_traceability,
+    score_constraint_retention,
+    score_duplicate_query,
+    score_evidence_gain,
     score_evidence_lifecycle,
+    score_facet_coverage,
     score_forbidden_field_scan,
+    score_gap_closure,
     score_latency_budget,
     score_node_pairing,
     score_plan_legality,
     score_route_and_channel,
     score_terminal_uniqueness,
     score_tool_ledger_completeness,
+)
+from app.graph.query_strategy import (
+    QueryBrief,
+    constraint_signature,
+    hard_constraint_ids,
 )
 from app.observability.span import Span
 
@@ -39,9 +50,15 @@ def make_run(
     events: list[dict[str, Any]],
     *,
     spans: list[Span] | None = None,
+    final_state: dict[str, Any] | None = None,
     **expect: Any,
 ) -> CaseRun:
-    return CaseRun(case=case(**expect), events=events, spans=spans or [])
+    return CaseRun(
+        case=case(**expect),
+        events=events,
+        spans=spans or [],
+        final_state=final_state,
+    )
 
 
 def evidence(evidence_id: str, status: str, url: str = "https://a.com") -> dict[str, Any]:
@@ -55,6 +72,123 @@ def evidence(evidence_id: str, status: str, url: str = "https://a.com") -> dict[
 
 def terminal(**payload: Any) -> dict[str, Any]:
     return {"type": "run.completed", "citations": [], **payload}
+
+
+def query_quality_state() -> dict[str, Any]:
+    brief = QueryBrief.model_validate({
+        "version": 1,
+        "objective": "核验 AlphaPhone 的新品价格和官方保修期",
+        "complexity": "multi_faceted",
+        "entities": ["AlphaPhone"],
+        "must": [
+            {
+                "constraint_id": "must_product",
+                "text": "必须是 AlphaPhone",
+                "terms": ["AlphaPhone"],
+            }
+        ],
+        "should": [],
+        "exclude": [
+            {
+                "constraint_id": "exclude_used",
+                "text": "排除二手商品",
+                "terms": ["二手"],
+            }
+        ],
+        "time_range": None,
+        "locations": [],
+        "languages": ["zh-CN"],
+        "required_channels": ["web"],
+        "requested_fields": ["价格", "保修期"],
+        "evidence_facets": [
+            {
+                "facet_id": "price",
+                "description": "新品价格",
+                "evidence_type": "official",
+                "required_fields": ["价格"],
+            },
+            {
+                "facet_id": "warranty",
+                "description": "官方保修期",
+                "evidence_type": "official",
+                "required_fields": ["保修期"],
+            },
+        ],
+    })
+    retained = list(hard_constraint_ids(brief))
+    signature = constraint_signature(brief)
+    return {
+        "query_brief": brief.model_dump(mode="json"),
+        "search_attempts": [
+            {
+                "attempt_id": "attempt_initial",
+                "tool_call_id": "tc_initial",
+                "plan_step_id": "step_price",
+                "facet_id": "price",
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "strategy": "initial_precise",
+                "query_terms": ["AlphaPhone", "新品", "价格"],
+                "query": "AlphaPhone 新品 价格 -二手",
+                "channel": "web",
+                "retained_constraint_ids": list(retained),
+                "relaxed_should_ids": [],
+                "constraint_signature": signature,
+                "status": "completed",
+                "result_count": 3,
+                "evidence_count": 1,
+                "unique_source_domains": ["shop.example"],
+                "new_candidate_count": 3,
+                "new_evidence_count": 1,
+                "new_constraint_ids": ["must_product", "exclude_used"],
+                "progress": True,
+                "error_code": None,
+            },
+            {
+                "attempt_id": "attempt_follow_up",
+                "tool_call_id": "tc_follow_up",
+                "plan_step_id": "step_warranty",
+                "facet_id": "warranty",
+                "gap_id": "gap_warranty",
+                "parent_attempt_id": "attempt_initial",
+                "strategy": "field_completion",
+                "query_terms": ["AlphaPhone", "官方", "保修期"],
+                "query": "AlphaPhone 官方 保修期 -二手",
+                "channel": "web",
+                "retained_constraint_ids": list(retained),
+                "relaxed_should_ids": [],
+                "constraint_signature": signature,
+                "status": "completed",
+                "result_count": 2,
+                "evidence_count": 2,
+                "unique_source_domains": ["support.example"],
+                "new_candidate_count": 2,
+                "new_evidence_count": 2,
+                "new_constraint_ids": [],
+                "progress": True,
+                "error_code": None,
+            },
+        ],
+        "evidence_gaps": [
+            {
+                "gap_id": "gap_warranty",
+                "facet_id": "warranty",
+                "kind": "missing_field",
+                "subject": "保修期",
+                "description": "缺少官方保修期",
+                "missing_constraint_ids": [],
+                "required_channel": "web",
+                "evidence_type": "official",
+                "priority": 90,
+                "status": "closed",
+                "opened_iteration": 1,
+                "closed_iteration": 2,
+                "resolved_by_attempt_id": "attempt_follow_up",
+            }
+        ],
+        "verification_passed": True,
+        "response_status": "completed",
+    }
 
 
 # --- terminal_uniqueness ---
@@ -497,13 +631,204 @@ def test_latency_budget_without_budget_always_passes() -> None:
     assert "未设预算" in result.detail
 
 
+# --- private query-quality metrics ---
+
+
+def test_constraint_retention_reports_full_hard_constraint_retention() -> None:
+    result = score_constraint_retention(
+        make_run([terminal()], final_state=query_quality_state())
+    )
+
+    assert result.passed
+    assert result.metrics == {
+        "applicable": True,
+        "retained": 6,
+        "required": 6,
+        "rate": 1.0,
+    }
+
+
+def test_constraint_retention_rejects_a_dropped_hard_constraint() -> None:
+    state = query_quality_state()
+    state["search_attempts"][1]["retained_constraint_ids"].remove("exclude_used")
+
+    result = score_constraint_retention(make_run([], final_state=state))
+
+    assert not result.passed
+    assert result.metrics["rate"] == 5 / 6
+    assert "硬约束" in result.detail
+
+
+def test_facet_coverage_reports_all_query_brief_facets() -> None:
+    result = score_facet_coverage(
+        make_run([terminal()], final_state=query_quality_state())
+    )
+
+    assert result.passed
+    assert result.metrics == {
+        "applicable": True,
+        "covered": 2,
+        "total": 2,
+        "rate": 1.0,
+    }
+
+
+def test_facet_coverage_rejects_an_unsearched_facet() -> None:
+    state = query_quality_state()
+    state["search_attempts"] = state["search_attempts"][:1]
+
+    result = score_facet_coverage(make_run([], final_state=state))
+
+    assert not result.passed
+    assert result.metrics["rate"] == 0.5
+    assert "覆盖率" in result.detail
+
+
+def test_duplicate_query_reports_zero_for_complementary_facets() -> None:
+    state = query_quality_state()
+    # 表面词汇相近，但不同 facet/gap/strategy 的互补查询不能被误判为重复。
+    state["search_attempts"][1]["query"] = "AlphaPhone 新品 价格 官方 -二手"
+
+    result = score_duplicate_query(make_run([], final_state=state))
+
+    assert result.passed
+    assert result.metrics == {
+        "applicable": True,
+        "duplicates": 0,
+        "executions": 2,
+        "rate": 0.0,
+    }
+
+
+def test_duplicate_query_rejects_a_near_duplicate_execution() -> None:
+    state = query_quality_state()
+    duplicate = copy.deepcopy(state["search_attempts"][0])
+    duplicate["attempt_id"] = "attempt_duplicate"
+    duplicate["tool_call_id"] = "tc_duplicate"
+    duplicate["query"] = "  alphaphone   新品 价格 -二手  "
+    state["search_attempts"].append(duplicate)
+
+    result = score_duplicate_query(make_run([], final_state=state))
+
+    assert not result.passed
+    assert result.metrics["duplicates"] == 1
+    assert result.metrics["rate"] == 1 / 3
+    assert "重复" in result.detail
+
+
+def test_gap_closure_accepts_progress_linked_resolver() -> None:
+    result = score_gap_closure(
+        make_run([terminal()], final_state=query_quality_state())
+    )
+
+    assert result.passed
+    assert result.metrics == {
+        "applicable": True,
+        "closed": 1,
+        "expectedClosable": 1,
+        "rate": 1.0,
+    }
+
+
+def test_gap_closure_rejects_progress_that_left_gap_open() -> None:
+    state = query_quality_state()
+    state["evidence_gaps"][0]["status"] = "open"
+    state["evidence_gaps"][0]["closed_iteration"] = None
+    state["evidence_gaps"][0]["resolved_by_attempt_id"] = None
+
+    result = score_gap_closure(make_run([], final_state=state))
+
+    assert not result.passed
+    assert result.metrics["rate"] == 0.0
+    assert "仍为 open" in result.detail
+
+
+def test_gap_closure_accepts_global_sufficiency_without_specific_resolver() -> None:
+    state = query_quality_state()
+    state["evidence_gaps"][0]["resolved_by_attempt_id"] = None
+    state["verification_passed"] = True
+
+    result = score_gap_closure(make_run([], final_state=state))
+
+    assert result.passed
+    assert result.metrics["rate"] == 1.0
+
+
+def test_gap_closure_rejects_unexplained_close_without_global_sufficiency() -> None:
+    state = query_quality_state()
+    state["evidence_gaps"][0]["resolved_by_attempt_id"] = None
+    state["verification_passed"] = False
+    state["sufficient"] = False
+
+    result = score_gap_closure(make_run([], final_state=state))
+
+    assert not result.passed
+    assert "resolver" in result.detail
+
+
+def test_evidence_gain_reports_positive_per_search_gain() -> None:
+    result = score_evidence_gain(
+        make_run([terminal()], final_state=query_quality_state())
+    )
+
+    assert result.passed
+    assert result.metrics == {
+        "applicable": True,
+        "attempts": 2,
+        "totalNewEvidence": 3,
+        "positiveAttempts": 2,
+        "averageNewEvidence": 1.5,
+    }
+
+
+def test_evidence_gain_rejects_verified_run_without_new_evidence() -> None:
+    state = query_quality_state()
+    for attempt in state["search_attempts"]:
+        attempt["new_evidence_count"] = 0
+
+    result = score_evidence_gain(make_run([], final_state=state))
+
+    assert not result.passed
+    assert result.metrics["totalNewEvidence"] == 0
+    assert "正 Evidence 增益" in result.detail
+
+
+def test_query_quality_metrics_are_not_applicable_to_legacy_final_state() -> None:
+    run = make_run([terminal()], final_state={"verification_passed": True})
+
+    results = [
+        score_constraint_retention(run),
+        score_facet_coverage(run),
+        score_duplicate_query(run),
+        score_gap_closure(run),
+        score_evidence_gain(run),
+    ]
+
+    assert all(result.passed for result in results)
+    assert all(result.metrics == {"applicable": False} for result in results)
+    assert all("不适用" in result.detail for result in results)
+
+
+def test_query_quality_metrics_fail_closed_on_attempts_without_query_brief() -> None:
+    state = query_quality_state()
+    state["query_brief"] = None
+
+    results = [
+        score_constraint_retention(make_run([], final_state=state)),
+        score_facet_coverage(make_run([], final_state=state)),
+    ]
+
+    assert all(not result.passed for result in results)
+    assert all("QueryBrief" in result.detail for result in results)
+
+
 # --- 聚合与报告 ---
 
 
 def test_score_case_runs_every_dimension_in_stable_order() -> None:
     run = make_run([terminal()])
     assert [score.name for score in score_case(run)] == [scorer(run).name for scorer in ALL_SCORERS]
-    assert len(ALL_SCORERS) == 9
+    assert len(ALL_SCORERS) == 14
 
 
 async def test_report_aggregates_shipped_dataset_to_all_pass() -> None:
@@ -538,7 +863,46 @@ async def test_report_serialization_is_deterministic_and_machine_readable() -> N
         "plan_legality",
         "forbidden_field_scan",
         "latency_budget",
+        "constraint_retention",
+        "facet_coverage",
+        "duplicate_query",
+        "gap_closure",
+        "evidence_gain",
     }
+    assert all(
+        "metrics" in score
+        for case_payload in payload["cases"]
+        for score in case_payload["scores"]
+    )
+
+
+async def test_shipped_query_quality_fixture_meets_regression_thresholds() -> None:
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "evaluation"
+        / "gold"
+        / "query-quality.json"
+    )
+    dataset = load_dataset(fixture)
+    report = build_report(dataset.name, await run_dataset(dataset))
+
+    assert report.passed
+    query_scores = {
+        score.name: score.metrics
+        for score in report.cases[0].scores
+        if score.name in {
+            "constraint_retention",
+            "facet_coverage",
+            "duplicate_query",
+            "gap_closure",
+            "evidence_gain",
+        }
+    }
+    assert query_scores["constraint_retention"]["rate"] == 1.0
+    assert query_scores["facet_coverage"]["rate"] == 1.0
+    assert query_scores["duplicate_query"]["rate"] == 0.0
+    assert query_scores["gap_closure"]["rate"] == 1.0
+    assert query_scores["evidence_gain"]["totalNewEvidence"] > 0
 
 
 def test_report_markdown_lists_failures_and_marks_verdict() -> None:

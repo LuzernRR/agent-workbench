@@ -116,6 +116,34 @@
 - 发布约束：Search Agent 固定 `LANGGRAPH_STRICT_MSGPACK=true`；Outbox `NOTIFY` 只负责唤醒，持久事件表
   始终是可靠来源。若需回滚，先停止 Worker 领取并 `git revert 048774f`；保留新增表、列和事件用于恢复审计。
 
+### P1-00 查询理解与反馈驱动检索
+
+- 状态：`accepted`（Issue [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，当前分支
+  `codex/issue-52-query-strategy`；PR 与合并信息在发布后回填）。用户已明确授权 Codex 在全量测试与
+  真实 smoke 通过后自主验收、合并并关闭本 Issue。
+- 目标：把自然语言搜索要求规范化为私有 `QueryBrief`，拆出实体、must/should/exclude、绝对日期、地域、
+  渠道、字段和证据分面；让每次查询都带稳定 `attemptId`，由真实结果形成 typed `EvidenceGap`，只在有
+  缺口、有预算且能产生客观增益时迭代补搜。
+- 已实现：严格 Pydantic 合同、web/X/小红书渠道语法门禁、硬约束签名与 near-duplicate/no-progress 熔断；
+  首轮最多两个互补分面，整体覆盖全部 `should`；后续查询必须绑定 open gap、允许策略、父尝试和约束签名；
+  `SearchAttempt` 记录候选/正文/域名/约束增益；gap 只在绑定尝试有客观进展后闭合。`facet_discovery` 是唯一
+  跨分面父尝试例外，且只在目标 facet 没有历史尝试时生效。
+- 评测与隐私：固定 A10 场景矩阵覆盖中文、英文、相对日期、精确版本、多实体、地域、排除、字段、web/X/
+  小红书、零结果、冲突和 gap 闭合；A11 五个离线指标只读私有 final state；QueryBrief、查询词、签名、gap
+  描述和 provider body 不进入 AgentEvent、span、日志或前端过程文案。
+- 直接证据：Search Agent 625 passed / 1 skipped；最新真实 Web Provider `/v1/runs/stream` smoke
+  `issue52accept_3d56d8258084` 创建 PostgreSQL checkpoint，首轮结果反馈后两个
+  `facet_discovery` gap 分别绑定真实父尝试，新增 2/1 条 Evidence 并 closed；公开终态因硬迭代预算
+  正确为 partial，而不是伪造充分结论。Web 438 passed / 10 skipped，Playwright 17 passed / 3 live-only
+  skipped，生产依赖 high/critical 门禁、Python pip-audit、Compose health 和 diff check 均通过。详见开发记录
+  [044](development/2026-08-07-044-issue-52-query-strategy.md)。
+- 采用：Self-Ask/Step-Back 的问题分面、Adaptive-RAG 的深度路由、IRCoT/ReAct 的检索-观察交替、CRAG 的
+  证据缺口纠偏。拒绝无限 query expansion、无预算 beam/RRF 依赖、默认 Query2doc 伪文档、token 级 FLARE
+  触发和训练型 Search-R1；这些方案会扩大成本、引入伪证据或超出本 Issue 的可回滚边界。
+- 回滚：停止 Worker 领取后 `git revert <issue-52-merge-sha>`；新增 state 字段按可选/稳定默认兼容旧
+  checkpoint，若必须移除字段先完成隔离恢复演练。非目标是新增 Provider、付费 reranker、向量库迁移、身份
+  系统或无限自主搜索。
+
 ### P0-05 OIDC、多租户授权、配额与审计
 
 - 状态：`blocked`。

@@ -47,6 +47,7 @@ from app.observability.trace import OTHER_GEN_AI_SYSTEM, gen_ai_system
 from app.reliability.retry import parse_retry_after
 
 WRITER_MAX_TOKENS = 2048
+_STRICT_STRING_FORMATS = frozenset({"email", "hostname", "ipv4", "ipv6", "uuid"})
 
 
 def add_usage(
@@ -110,6 +111,15 @@ def validate_strict_schema(schema: type[BaseModel]) -> None:
 
     def visit(value: Any, path: str) -> None:
         if isinstance(value, dict):
+            string_format = value.get("format")
+            if (
+                isinstance(string_format, str)
+                and string_format not in _STRICT_STRING_FORMATS
+            ):
+                raise StrictSchemaError(
+                    f"{schema.__name__} strict schema uses unsupported format "
+                    f"{string_format!r} at {path}"
+                )
             if value.get("type") == "object":
                 properties = set((value.get("properties") or {}).keys())
                 required = set(value.get("required") or [])

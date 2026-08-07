@@ -118,6 +118,20 @@ async def test_eval_run_derives_spans_without_touching_the_event_stream() -> Non
     assert [span.kind for span in with_spans.spans] == ["node", "run"]
 
 
+async def test_eval_run_keeps_private_final_state_out_of_public_events() -> None:
+    source = minimal_case()
+    assert source.final_state is not None
+    source.final_state["query_brief"] = {"private": "query analysis"}
+    source.final_state["search_attempts"] = [{"attempt_id": "attempt_private"}]
+
+    result = await run_case(source)
+
+    assert result.final_state == source.final_state
+    encoded_events = json.dumps(result.events, ensure_ascii=False)
+    assert "query_brief" not in encoded_events
+    assert "attempt_private" not in encoded_events
+
+
 async def test_terminal_property_returns_the_last_run_event() -> None:
     result = await run_case(minimal_case())
     terminal = result.terminal

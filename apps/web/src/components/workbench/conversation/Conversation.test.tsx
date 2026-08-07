@@ -1,11 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyThreadState } from "@/lib/agent-events/reducer";
 import type { ThinkingItem } from "@/lib/agent-events/types";
 import type { S01ProcessFixtureCatalog } from "@/lib/agent-events/v2/process-view-model";
 import { createS01ProcessFixtureCatalog } from "@/server/mock/s01-event-fixtures";
-import { Conversation, formatAssistantReply, ThinkingResult } from "./Conversation";
+import { Conversation, ConversationSkeleton, formatAssistantReply, ThinkingResult } from "./Conversation";
 
 vi.mock("@/lib/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/client")>();
@@ -33,12 +33,13 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
 
 function renderConversation(
   fixture: S01ProcessFixtureCatalog | null,
-  onStartRun = vi.fn(async () => undefined)
+  onStartRun = vi.fn(async () => undefined),
+  options: { state?: ReturnType<typeof createEmptyThreadState>; isStarting?: boolean; pendingStartedAt?: string | null } = {}
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } }
   });
-  const state = createEmptyThreadState(null, "thread-product");
+  const state = options.state || createEmptyThreadState(null, "thread-product");
 
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -49,13 +50,272 @@ function renderConversation(
         onStopRun={vi.fn(async () => undefined)}
         onResolveApproval={vi.fn(async () => undefined)}
         isResolvingApproval={false}
-        isStarting={false}
+        isStarting={options.isStarting ?? false}
+        pendingStartedAt={options.pendingStartedAt}
         s01ProcessFixture={fixture}
       />
     </QueryClientProvider>
   );
-  return { ...view, onStartRun };
+  return { ...view, onStartRun, queryClient };
 }
+
+describe("即时运行反馈", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("在模型首个事件到达前立即显示已处理计时", () => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const state = {
+      ...createEmptyThreadState(null, "thread-product"),
+      activeRunId: "run-live",
+      runStatus: "running" as const,
+      runStartedAt: startedAt,
+      runTimings: { "run-live": { startedAt } }
+    };
+
+    renderConversation(null, undefined, { state });
+
+    const elapsed = screen.getByTestId("run-elapsed");
+    const responseRoot = document.querySelector('[data-assistant-response-run-id="run-live"]');
+    expect(elapsed).toHaveTextContent("已处理 0 秒");
+    expect(responseRoot).toContainElement(elapsed);
+    expect(responseRoot).toHaveAttribute("data-assistant-response-placeholder", "true");
+    expect(responseRoot?.firstElementChild).toBe(elapsed);
+    expect(responseRoot).toHaveClass("group", "max-w-none");
+  });
+
+  it("把计时放在助手回答容器左上角、首个回答活动之前", () => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const userMessage = {
+      kind: "message" as const,
+      id: "user-live",
+      runId: "run-live",
+      role: "user" as const,
+      text: "请检索并核验奖学金信息",
+      status: "completed" as const,
+      createdAt: startedAt
+    };
+    const thinking = {
+      kind: "thinking" as const,
+      id: "thinking-live",
+      runId: "run-live",
+      activityKind: "thinking" as const,
+      paragraphs: [{ id: "paragraph-live", text: "正在拆解搜索约束。" }],
+      status: "streaming" as const,
+      createdAt: startedAt
+    };
+    const state = {
+      ...createEmptyThreadState(null, "thread-product"),
+      activeRunId: "run-live",
+      runStatus: "running" as const,
+      runStartedAt: startedAt,
+      items: { [userMessage.id]: userMessage, [thinking.id]: thinking },
+      itemOrder: [userMessage.id, thinking.id],
+      runTimings: { "run-live": { startedAt } },
+      runStatuses: { "run-live": "running" as const }
+    };
+
+    renderConversation(null, undefined, { state });
+
+    const elapsed = screen.getByTestId("run-elapsed");
+    const userRoot = document.querySelector('[data-message-id="user-live"]');
+    const userText = screen.getByText(userMessage.text);
+    const thinkingRoot = document.querySelector<HTMLElement>('[data-thinking-id="thinking-live"]');
+    const responseRoot = document.querySelector('[data-assistant-response-run-id="run-live"]');
+    expect(userRoot).not.toContainElement(elapsed);
+    expect(responseRoot).toContainElement(elapsed);
+    expect(responseRoot).toContainElement(thinkingRoot);
+    expect(userText.compareDocumentPosition(elapsed) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(elapsed.compareDocumentPosition(thinkingRoot!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("正式用户锚点与临时开始时间并存时只显示一个计时", () => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const userMessage = {
+      kind: "message" as const,
+      id: "user-handoff",
+      runId: "run-handoff",
+      role: "user" as const,
+      text: "接管计时锚点",
+      status: "completed" as const,
+      createdAt: startedAt
+    };
+    const state = {
+      ...createEmptyThreadState(null, "thread-product"),
+      activeRunId: "run-handoff",
+      runStatus: "running" as const,
+      runStartedAt: startedAt,
+      items: { [userMessage.id]: userMessage },
+      itemOrder: [userMessage.id],
+      runTimings: { "run-handoff": { startedAt } },
+      runStatuses: { "run-handoff": "running" as const }
+    };
+    renderConversation(null, undefined, {
+      state,
+      pendingStartedAt: startedAt
+    });
+
+    const elapsed = screen.getAllByTestId("run-elapsed");
+    const userRoot = document.querySelector('[data-message-id="user-handoff"]');
+    const responseRoot = document.querySelector('[data-assistant-response-run-id="run-handoff"]');
+    expect(elapsed).toHaveLength(1);
+    expect(userRoot).not.toContainElement(elapsed[0]);
+    expect(responseRoot).toContainElement(elapsed[0]);
+    expect(userRoot!.compareDocumentPosition(responseRoot!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("会话身份切换骨架把同一运行计时放在回答占位左上角", () => {
+    render(<ConversationSkeleton pendingStartedAt="2026-08-07T00:00:00.000Z" />);
+
+    const elapsed = screen.getByTestId("run-elapsed");
+    const userPlaceholder = document.querySelector("[data-skeleton-user-message]");
+    const responseRoot = document.querySelector('[data-assistant-response-run-id="pending"]');
+    expect(elapsed).toHaveTextContent("已处理 0 秒");
+    expect(userPlaceholder).not.toBeNull();
+    expect(responseRoot).toContainElement(elapsed);
+    expect(responseRoot).toHaveAttribute("data-assistant-response-placeholder", "true");
+    expect(responseRoot?.firstElementChild).toBe(elapsed);
+    expect(userPlaceholder!.compareDocumentPosition(elapsed) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByRole("status", { name: "正在加载会话" })).toBeInTheDocument();
+  });
+
+  it("等待期间递增，并在运行结束后冻结最终耗时", () => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const userMessage = {
+      kind: "message" as const,
+      id: "user-live",
+      runId: "run-live",
+      role: "user" as const,
+      text: "整理计划",
+      status: "completed" as const,
+      createdAt: startedAt
+    };
+    const running = {
+      ...createEmptyThreadState(null, "thread-product"),
+      activeRunId: "run-live",
+      runStatus: "running" as const,
+      runStartedAt: startedAt,
+      items: { [userMessage.id]: userMessage },
+      itemOrder: [userMessage.id],
+      runTimings: { "run-live": { startedAt } },
+      runStatuses: { "run-live": "running" as const }
+    };
+    const view = renderConversation(null, undefined, { state: running });
+
+    act(() => {
+      vi.advanceTimersByTime(2_100);
+    });
+    expect(screen.getByTestId("run-elapsed")).toHaveTextContent("已处理 2 秒");
+
+    const completedAt = "2026-08-07T00:00:03.000Z";
+    view.rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <Conversation
+          state={{
+            ...running,
+            activeRunId: null,
+            runStatus: "completed",
+            runTimings: { "run-live": { startedAt, completedAt } },
+            runStatuses: { "run-live": "completed" }
+          }}
+          composerThreadId="thread-product"
+          onStartRun={vi.fn(async () => undefined)}
+          onStopRun={vi.fn(async () => undefined)}
+          onResolveApproval={vi.fn(async () => undefined)}
+          isResolvingApproval={false}
+          isStarting={false}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.queryByTestId("run-elapsed")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-elapsed-history")).toHaveTextContent("已处理 3 秒");
+    expect(document.querySelector('[data-message-id="user-live"]')).not.toContainElement(screen.getByTestId("run-elapsed-history"));
+    expect(document.querySelector('[data-assistant-response-run-id="run-live"]')).toContainElement(screen.getByTestId("run-elapsed-history"));
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(screen.getByTestId("run-elapsed-history")).toHaveTextContent("已处理 3 秒");
+  });
+
+  it.each(["failed", "stopped"] as const)("%s 终态冻结并保留该轮耗时", (terminalStatus) => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const completedAt = "2026-08-07T00:00:04.000Z";
+    const userMessage = {
+      kind: "message" as const,
+      id: `user-${terminalStatus}`,
+      runId: `run-${terminalStatus}`,
+      role: "user" as const,
+      text: `${terminalStatus} 请求`,
+      status: "completed" as const,
+      createdAt: startedAt
+    };
+    const state = {
+      ...createEmptyThreadState(null, "thread-product"),
+      runStatus: terminalStatus,
+      items: { [userMessage.id]: userMessage },
+      itemOrder: [userMessage.id],
+      runTimings: { [userMessage.runId]: { startedAt, completedAt } },
+      runStatuses: { [userMessage.runId]: terminalStatus }
+    };
+
+    renderConversation(null, undefined, { state });
+
+    const elapsed = screen.getByTestId("run-elapsed-history");
+    expect(elapsed).toHaveTextContent("已处理 4 秒");
+    expect(document.querySelector(`[data-message-id="${userMessage.id}"]`)).not.toContainElement(elapsed);
+    const responseRoot = document.querySelector(`[data-assistant-response-run-id="${userMessage.runId}"]`);
+    expect(responseRoot).toContainElement(elapsed);
+    expect(responseRoot).toHaveAttribute("data-assistant-response-placeholder", "true");
+    expect(responseRoot?.firstElementChild).toBe(elapsed);
+  });
+
+  it("多轮会话把每个冻结计时绑定到各自助手回答", () => {
+    const firstUser = {
+      kind: "message" as const,
+      id: "user-first",
+      runId: "run-first",
+      role: "user" as const,
+      text: "第一轮",
+      status: "completed" as const,
+      createdAt: "2026-08-07T00:00:00.000Z"
+    };
+    const secondUser = {
+      ...firstUser,
+      id: "user-second",
+      runId: "run-second",
+      text: "第二轮",
+      createdAt: "2026-08-07T00:01:00.000Z"
+    };
+    const state = {
+      ...createEmptyThreadState(null, "thread-product"),
+      runStatus: "completed" as const,
+      items: { [firstUser.id]: firstUser, [secondUser.id]: secondUser },
+      itemOrder: [firstUser.id, secondUser.id],
+      runTimings: {
+        [firstUser.runId]: { startedAt: firstUser.createdAt, completedAt: "2026-08-07T00:00:02.000Z" },
+        [secondUser.runId]: { startedAt: secondUser.createdAt, completedAt: "2026-08-07T00:01:05.000Z" }
+      },
+      runStatuses: { [firstUser.runId]: "completed" as const, [secondUser.runId]: "completed" as const }
+    };
+
+    renderConversation(null, undefined, { state });
+
+    const elapsed = screen.getAllByTestId("run-elapsed-history");
+    expect(elapsed).toHaveLength(2);
+    expect(document.querySelector('[data-message-id="user-first"]')).not.toContainElement(elapsed[0]);
+    expect(document.querySelector('[data-assistant-response-run-id="run-first"]')).toContainElement(elapsed[0]);
+    expect(elapsed[0]).toHaveTextContent("已处理 2 秒");
+    expect(document.querySelector('[data-message-id="user-second"]')).not.toContainElement(elapsed[1]);
+    expect(document.querySelector('[data-assistant-response-run-id="run-second"]')).toContainElement(elapsed[1]);
+    expect(elapsed[1]).toHaveTextContent("已处理 5 秒");
+  });
+});
 
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -63,6 +323,7 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   });
+  HTMLElement.prototype.scrollTo = vi.fn();
 });
 
 afterEach(() => {

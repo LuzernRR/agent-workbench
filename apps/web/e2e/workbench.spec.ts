@@ -143,9 +143,27 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
 
   await page.getByLabel("任务输入").fill("请运行代码实现一个任务面板页面，并整理方案文档");
   await page.getByRole("button", { name: "发送", exact: true }).click();
+  const elapsed = page.getByTestId("run-elapsed");
+  await expect(elapsed).toContainText("已处理 0 秒");
 
   const thinkingBlock = page.locator("[data-thinking-id]").first();
   await expect(thinkingBlock).toBeVisible();
+  const elapsedPlacement = await elapsed.evaluate((node) => {
+    const userMessage = node.closest("[data-message-id]");
+    const assistantResponse = node.closest("[data-assistant-response-run-id]");
+    const firstActivity = document.querySelector("[data-thinking-id]");
+    return {
+      belongsToUserMessage: Boolean(userMessage?.textContent?.includes("请运行代码实现一个任务面板页面，并整理方案文档")),
+      belongsToAssistantResponse: Boolean(assistantResponse),
+      precedesFirstActivity: Boolean(firstActivity && (node.compareDocumentPosition(firstActivity) & Node.DOCUMENT_POSITION_FOLLOWING))
+    };
+  });
+  expect(elapsedPlacement).toEqual({ belongsToUserMessage: false, belongsToAssistantResponse: true, precedesFirstActivity: true });
+  const [elapsedBox, thinkingBox] = await Promise.all([elapsed.boundingBox(), thinkingBlock.boundingBox()]);
+  expect(elapsedBox).not.toBeNull();
+  expect(thinkingBox).not.toBeNull();
+  expect(Math.abs(elapsedBox!.x - thinkingBox!.x)).toBeLessThanOrEqual(1);
+  expect(elapsedBox!.y + elapsedBox!.height).toBeLessThanOrEqual(thinkingBox!.y);
   await expect(thinkingBlock).toHaveAttribute("data-activity-status", "completed");
   const thinkingToggle = thinkingBlock.getByRole("button", { name: "思考结束" });
   await expect(thinkingToggle).toHaveAttribute("aria-expanded", "false");
@@ -164,10 +182,17 @@ test("流式任务、工具、审批、计划、成果、文件、代码与日�
   await expect(page.getByText(/\d+(?:\.\d+)? 秒/u).first()).toBeVisible();
 
   await expect(page.getByText("允许本次执行？", { exact: true })).toBeVisible();
+  await expect(elapsed).toContainText(/已处理 (?:[1-9]\d* 秒|\d+ 分)/u);
   await page.getByRole("button", { name: "允许一次", exact: true }).click();
   await expect(page.getByText("已批准工具访问", { exact: true })).toBeVisible();
 
   await expect(page.getByText(/我已整理「请运行代码实现一个任务面板页面，并整理方案文档」的实现草案/u)).toBeVisible();
+  await expect(page.getByTestId("run-elapsed")).toHaveCount(0);
+  await expect(page.getByTestId("run-elapsed-history").first()).toBeVisible();
+  expect(await page.getByTestId("run-elapsed-history").first().evaluate((node) => ({
+    belongsToUserMessage: Boolean(node.closest("[data-message-id]")?.textContent?.includes("请运行代码实现一个任务面板页面，并整理方案文档")),
+    belongsToAssistantResponse: Boolean(node.closest("[data-assistant-response-run-id]"))
+  }))).toEqual({ belongsToUserMessage: false, belongsToAssistantResponse: true });
   const workspace = page.getByRole("complementary", { name: "工作区", exact: true });
   await expect(workspace).toBeVisible();
   await expect(workspace.getByRole("tab", { name: "计划" })).toBeVisible();
@@ -227,11 +252,21 @@ test("运行可停止并恢复发送状态", async ({ page }) => {
   await page.getByLabel("任务输入").fill("请整理一份详细的计划文档");
   const startResponsePromise = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
   await page.getByRole("button", { name: "发送", exact: true }).click();
+  // The request is deliberately held for 300ms. The UI must expose the
+  // client-side elapsed anchor before the run response or first model event.
+  await expect(page.getByTestId("run-elapsed")).toContainText("已处理 0 秒");
+  expect(await page.getByTestId("run-elapsed").evaluate((node) => ({
+    inConversation: Boolean(node.closest('[data-testid="conversation-viewport"]')),
+    inAssistantResponse: Boolean(node.closest("[data-assistant-response-run-id]")),
+    inUserMessage: Boolean(node.closest("[data-message-id]"))
+  }))).toEqual({ inConversation: true, inAssistantResponse: true, inUserMessage: false });
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "停止执行" })).toHaveCount(0);
   const startResponse = await startResponsePromise;
   expect(startResponse.ok()).toBe(true);
   const { runId } = await startResponse.json() as { runId: string };
+  await expect(page.locator(`[data-assistant-response-run-id="${runId}"]`).getByTestId("run-elapsed")).toHaveCount(1);
+  await expect(page.locator('[data-message-id]').filter({ hasText: "请整理一份详细的计划文档" }).getByTestId("run-elapsed")).toHaveCount(0);
   const stopButton = page.getByRole("button", { name: "停止执行" });
   await expect(stopButton).toBeVisible();
   const stopResponsePromise = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/v1/runs/${runId}/stop`);
@@ -282,10 +317,15 @@ test("流式输出尊重用户向上滚动并由用户决定恢复跟随", async
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect(page.getByRole("button", { name: "停止执行" })).toBeVisible();
   await viewport.hover();
-  await viewport.evaluate((element) => element.scrollTo({ top: 0, behavior: "instant" }));
+  await page.mouse.wheel(0, -10_000);
   await expect(page.getByRole("button", { name: "滚动到底部" })).toBeVisible();
+  const heldPosition = await viewport.evaluate((element) => ({
+    scrollTop: element.scrollTop,
+    distanceFromBottom: element.scrollHeight - element.scrollTop - element.clientHeight
+  }));
+  expect(heldPosition.distanceFromBottom).toBeGreaterThan(100);
   await page.waitForTimeout(700);
-  expect(await viewport.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(2);
+  expect(Math.abs(await viewport.evaluate((element) => element.scrollTop) - heldPosition.scrollTop)).toBeLessThanOrEqual(2);
 
   await page.getByRole("button", { name: "滚动到底部" }).click();
   await expect.poll(() => viewport.evaluate((element) => Math.abs(element.scrollHeight - element.scrollTop - element.clientHeight))).toBeLessThanOrEqual(2);
@@ -346,6 +386,46 @@ test("后台页面冻结动画帧时接收耐久事件，恢复后继续逐字�
   });
   await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "复制完整回复" })).toHaveCount(1);
+});
+
+test("草稿交接后的第二轮计时从本轮零秒开始", async ({ page }) => {
+  await openWorkbench(page);
+  const suffix = Date.now();
+  const firstMessage = `草稿首轮-${suffix}`;
+  const secondMessage = `线程第二轮-${suffix}`;
+
+  await page.getByLabel("任务输入").fill(firstMessage);
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByText(`我已完成「${firstMessage}」的第一轮整理。`, { exact: true })).toBeVisible();
+
+  // Make an accidentally retained first-run anchor visibly different, then
+  // hold the second run's event stream so the post-response handoff is observable.
+  await page.waitForTimeout(2100);
+  let delayedSecondStream = false;
+  await page.route("**/api/v1/runs/*/events?*", async (route) => {
+    if (!delayedSecondStream) {
+      delayedSecondStream = true;
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+    await route.continue();
+  });
+
+  const secondStart = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/v1\/threads\/[^/]+\/runs$/u.test(new URL(response.url()).pathname));
+  await page.getByLabel("任务输入").fill(secondMessage);
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  expect((await secondStart).ok()).toBe(true);
+  await page.waitForTimeout(100);
+
+  const elapsed = page.getByTestId("run-elapsed");
+  expect(await elapsed.innerText()).toContain("已处理 0 秒");
+  expect(await elapsed.evaluate((node) => ({
+    inAssistantResponse: Boolean(node.closest("[data-assistant-response-run-id]")),
+    inUserMessage: Boolean(node.closest("[data-message-id]"))
+  }))).toEqual({ inAssistantResponse: true, inUserMessage: false });
+
+  await expect(page.getByText(`我已完成「${secondMessage}」的第一轮整理。`, { exact: true })).toBeVisible();
+  expect(delayedSecondStream).toBe(true);
+  await page.unroute("**/api/v1/runs/*/events?*");
 });
 
 test("模型选择把真实模型 ID 发送到运行接口", async ({ page }) => {
@@ -747,6 +827,13 @@ test("移动端布局无横向溢出且工作区可打开", async ({ page }) => 
   await page.getByRole("button", { name: "打开工作区" }).click();
   await expect(page.getByRole("complementary", { name: "工作区", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "关闭工作区" }).click();
+
+  await page.getByLabel("任务输入").fill("验证移动端即时计时与流式输出");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByTestId("run-elapsed")).toBeVisible();
+  await expect(page.getByTestId("run-elapsed").locator("xpath=ancestor::*[@data-assistant-response-run-id]")).toHaveCount(1);
+  await expect(page.getByRole("complementary", { name: "工作区", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("run-elapsed")).toContainText(/已处理 (?:[1-9]\d* 秒|\d+ 分)/u);
 
   const dimensions = await page.evaluate(() => ({
     viewport: window.innerWidth,

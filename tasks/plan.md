@@ -1,156 +1,245 @@
-# Implementation Plan: Issue #50 Checkpoint Atomic Confirmation
+# Implementation Plan: Issue #52 Query Strategy Protocol
 
 ## Overview
 
-Issue [#50](https://github.com/LuzernRR/agent-workbench/issues/50) establishes a recoverable two-transaction protocol between the Python LangGraph checkpoint transaction and the Node PostgreSQL projection transaction. The Node run ledger is the only authority for resume; source events stay buffered until a readable checkpoint boundary can atomically advance the run revision, checkpoint reference, inbox, projected AgentEvents, and transactional outbox.
+Issue [#52](https://github.com/LuzernRR/agent-workbench/issues/52) adds a bounded,
+recoverable query-strategy protocol to the existing Supervisor -> Planner ->
+Researcher -> Reflector -> Verifier graph. The protocol turns the current user
+request into a strict private `QueryBrief`, validates channel-specific search
+queries, records each real `SearchAttempt`, and drives later searches from typed
+`EvidenceGap` feedback. It does not add another graph loop, search provider,
+reranker, broker, or public reasoning surface.
 
-Issue #50 entered execution with `Status: ready` and `Execution Gate: allowed`.
-Implementation and technical verification are complete. The user explicitly accepted
-the feature on 2026-08-06 and authorized Codex to pass the current acceptance after
-fresh verification. PR #51 was squash-merged to `main` as
-`048774f70cb5778575cb44e20129ce47ebc05e67`, and Issue #50 closed as completed. This plan
-covers only Issue #50.
+Issue #52 is the only active feature. It has `Status: ready` and
+`Execution Gate: allowed`. The user authorized Codex to run fresh verification
+and pass the current acceptance when all criteria are proved.
 
 ## Architecture Decisions
 
-- Keep the Python checkpoint transaction and Node projection transaction explicit and separate. No XA or cross-service atomicity claim.
-- Treat `(run_id, checkpoint_ns, checkpoint_id)` recorded on `wb_runs` as the only automatic resume authority. A newer unconfirmed LangGraph checkpoint is an orphan.
-- Use a private `checkpoint.committed` source event as the batch delimiter. It contains identifiers and step metadata only, never checkpoint State values.
-- Commit each source batch with lease fencing, parent continuity, revision increment, source inbox deduplication, AgentEvent projection, and outbox rows in one Node transaction.
-- Keep PostgreSQL-backed SSE cursor polling authoritative. `NOTIFY` is only a low-latency wake-up and may be lost without losing events.
-- Preserve stable tool call IDs and fail closed for unknown Tool Ledger outcomes during replay.
+- Keep one LangGraph loop. Extend the existing structured outputs and private
+  state instead of adding a query-expansion agent or an independent pipeline.
+- Treat `QueryBrief` as the normalized truth for must/should/exclude, absolute
+  time range, location, language, required channel, requested fields, and
+  evidence facets. Only `should` constraints can be explicitly relaxed.
+- Let the model propose terms and queries; let deterministic code enforce
+  schema, channel syntax, hard-constraint retention, lineage, near-duplicate,
+  budget, and no-progress rules.
+- Give every accepted plan step and tool execution a stable `attemptId`.
+  Recovery reuses the same ID and Tool Ledger call; merge is idempotent and
+  rejects conflicting replay.
+- Reconcile typed `EvidenceGap` records after each real tool result. A follow-up
+  must name an open gap, its parent attempt, and an allowed rewrite strategy.
+- Measure progress from new candidate URLs, new Evidence, or newly covered hard
+  constraints, never from query string variation alone.
+- Keep `QueryBrief`, query terms, constraint signatures, gap detail, and attempt
+  analysis private. Existing public plan/tool events remain the only boundary
+  and continue through the runtime privacy validator.
+
+## Source-Driven Design
+
+- ReAct, Self-Ask, and IRCoT support decomposing multi-step questions and
+  interleaving retrieval with observed results.
+- CRAG supports a retrieval-quality evaluator that selects corrective actions;
+  this maps to typed `EvidenceGap` rather than a second model loop.
+- Adaptive-RAG supports the existing no-search/single-search/iterative routing.
+- FLARE contributes only the evidence-deficit trigger; token-level confidence
+  retrieval is out of scope.
+- Query2doc, unrestricted RAG-Fusion, and Search-R1 training are not adopted:
+  they add hallucinated pseudo-documents, unbounded query cost, reranking, or RL
+  infrastructure outside this issue.
+- Platform behavior follows official Tavily Search, X query construction,
+  Azure agentic retrieval, Google Search grounding, and LangGraph workflow docs.
 
 ## Task List
 
-### Phase 1: Contract And Checkpoint Boundary
+### Phase 1: Strict Query Contract
 
-- [x] Task 1: Add validated checkpoint resume fields to Python and Node request contracts.
-- [x] Task 2: Emit readable LangGraph checkpoint boundaries with synchronous durability.
+- [x] Task 1: Add strict `QueryBrief`, constraint, time-range, facet, gap, and
+  rewrite-strategy Pydantic contracts with hostile-output validation and safe
+  legacy checkpoint normalization.
+- [x] Task 2: Add deterministic channel adapters and query gates for web, X,
+  and Xiaohongshu, including hard-constraint signatures and near-duplicate
+  detection.
 
-### Checkpoint: Python Boundary
+### Checkpoint: Query Contract
 
-- [x] Focused Python and Node contract tests pass.
-- [x] A checkpoint boundary is emitted only after exact `aget_state` succeeds and exposes no State body.
+- [x] New schema and query-strategy tests pass before graph integration.
+- [x] At least 12 deterministic Chinese/English/date/location/platform/version/
+  exclusion/field/channel cases prove exact retention and fail-closed behavior.
 
-### Phase 2: Durable Projection
+### Phase 2: Recoverable Search Loop
 
-- [x] Task 3: Add idempotent run revision, checkpoint commit, source inbox, and event outbox schema.
-- [x] Task 4: Add the fenced, parent-contiguous, idempotent checkpoint batch transaction.
-- [x] Task 5: Buffer source events in the Worker and resume only from the run ledger authority.
-- [x] Task 6: Add the bounded `SKIP LOCKED` outbox dispatcher while retaining SSE polling fallback.
+- [x] Task 3: Extend Planner/runtime requests with stable facet, terms,
+  strategy, gap/parent lineage, constraint signature, and `attemptId`.
+- [x] Task 4: Record idempotent `SearchAttempt` outcomes at merge, including
+  unique domains, new candidate/Evidence/constraint counts, and objective
+  progress.
+- [x] Task 5: Reconcile typed `EvidenceGap` state from Reflector/Verifier and
+  admit only gap-bound, strategy-compatible follow-ups.
+- [x] Task 6: Update versioned prompts and routing so first-round plans contain
+  one or two complementary facets and later plans use real attempt feedback.
 
-### Checkpoint: Transaction Protocol
+### Checkpoint: Graph Closure
 
-- [x] Focused Web tests and isolated PostgreSQL integration tests pass.
-- [x] Fault injection proves no partial run/inbox/event/outbox visibility.
-- [x] Duplicate batches are idempotent and conflicting batches fail closed.
+- [x] Focused graph tests prove a second-round query names the first-round gap
+  and parent attempt, preserves every hard constraint, and gains Evidence.
+- [x] Zero results, unreadable body, conflict, missing channel, and missing field
+  produce distinct gap kinds and rewrite strategies.
+- [x] Exact replay neither re-executes a confirmed attempt nor duplicates state.
 
-### Phase 3: Recovery Proof And Handoff
+### Phase 3: Evaluation And Privacy
 
-- [x] Task 7: Prove orphan-checkpoint recovery, stable Tool Ledger replay, Worker kill recovery, and SSE cursor replay.
-- [x] Task 8: Update production queue, Chinese development record, HANDOFF, and verification evidence.
+- [x] Task 7: Add deterministic offline metrics for constraint retention,
+  facet coverage, duplicate-query rate, gap closure, and Evidence gain, with
+  regression thresholds and a fixed query-quality fixture.
+- [x] Task 8: Prove private query analysis never enters public AgentEvent,
+  logs, OTel spans, error messages, or frontend-invented process text.
+
+### Checkpoint: Quality Gate
+
+- [x] Fixed fixtures achieve 100% hard-constraint retention, 0% duplicate
+  execution, full expected gap closure, and positive Evidence gain.
+- [x] Existing evaluation, event validation, Tool Ledger, and checkpoint tests
+  remain green.
+
+### Phase 4: Verification And Handoff
+
+- [x] Task 9: Run focused tests, full Search Agent/Web gates, dependency audit,
+  Compose parsing, health checks, Playwright, and `git diff --check`.
+- [x] Task 10: Run a controlled live web smoke that shows an actual first query,
+  result-driven rewrite, and final citable Evidence without exposing secrets.
+- [x] Task 11: Update `HANDOFF.md`, production checklist, Search Agent README,
+  and Chinese development record 044 with sources, evidence, rollback, and
+  explicit non-goals.
+- [x] Task 12: Review all A1-A12 evidence, re-run every repository gate on the
+  delivered tree, create the PR, and record findings. Merging, closing Issue #52,
+  and synchronizing `main` remain blocked on explicit user confirmation in the
+  active session, because those actions are irreversible and outward-facing.
 
 ### Checkpoint: Complete
 
-- [x] Issue #50 acceptance criteria A1-A11 have direct evidence.
-- [x] Web and Search Agent full verification gates pass.
-- [x] Runtime/Compose checks and `git diff --check` pass.
-- [x] User acceptance recorded after fresh full verification; no next feature has started.
-- [x] PR #51 merged, Issue #50 closed, and main handoff synchronized.
+- [x] Every A1-A12 criterion has direct test, runtime, or document evidence.
+- [x] Code review covers correctness, readability, architecture, security,
+  performance, dependency discipline, and rollback.
+- [x] Branch committed and pushed, PR opened, working tree clean.
+- [ ] PR merged, Issue #52 closed, and `main` synchronized (awaiting user
+  confirmation).
 
 ## Task Details
 
-### Task 1: Validated Resume Contract
+### Task 1: QueryBrief And Gap Contracts
 
-**Acceptance criteria:** Invalid identifiers, incomplete checkpoint references, and checkpoint IDs on non-resume requests fail closed. The Node client serializes an authoritative checkpoint reference without silently dropping it.
+**Acceptance criteria:** All fields are explicit provider-strict properties;
+unknown fields, controls, prompt-like directives, invalid IDs/dates, excessive
+text, and list overflow fail closed. Direct answers use `query_brief=null`.
+Legacy state normalizes to a bounded safe brief without inventing constraints.
 
-**Verification:** `pytest -q tests/test_harness_runner.py tests/test_run_control.py` and `npx vitest run src/server/search-agent/client.test.ts`.
+**Verification:** `pytest -q tests/test_query_strategy.py tests/test_strict_schema_compatibility.py`.
 
 **Dependencies:** None.
 
-**Files likely touched:** `services/search-agent/app/api/schemas.py`, related Python tests, `apps/web/src/server/search-agent/client.ts`, and its test.
+**Files likely touched:** `app/graph/query_strategy.py`, `app/graph/schemas.py`,
+`app/graph/state.py`, and focused tests.
 
-### Task 2: Synchronous Checkpoint Boundary
+### Task 2: Channel And Constraint Gate
 
-**Acceptance criteria:** Production Harness uses `durability="sync"` and checkpoint streaming; every private boundary is emitted after exact checkpoint read and contains only ID, parent ID, namespace, and step. Resume uses the explicit authoritative reference.
+**Acceptance criteria:** web accepts supported authority/phrase/time syntax; X
+accepts supported account/topic/since/until syntax and rejects web-only
+operators; Xiaohongshu accepts compact natural keywords and rejects operator
+leakage. Must, time, location, required channel, and exclude semantics cannot be
+silently removed; only declared should IDs may be relaxed.
 
-**Verification:** Focused Harness tests, including an ordering probe and orphan checkpoint case.
-
-**Dependencies:** Task 1.
-
-**Files likely touched:** `services/search-agent/app/harness/runner.py` and `services/search-agent/tests/test_harness_runner.py`.
-
-### Task 3: Idempotent Database Schema
-
-**Acceptance criteria:** Existing and fresh databases gain nonnegative run revision, authoritative checkpoint columns, unique checkpoint commit, source inbox business key/hash, and transactional outbox constraints. Re-running setup is safe.
-
-**Verification:** Schema unit test plus isolated PostgreSQL setup-twice integration assertion.
+**Verification:** focused parametrized unit tests covering all three channels,
+constraint loss, valid complementarity, and near duplicates.
 
 **Dependencies:** Task 1.
 
-**Files likely touched:** `apps/web/src/server/persistence/schema.ts` and its tests.
+### Task 3: Stable Planned Attempts
 
-### Task 4: Fenced Batch Transaction
+**Acceptance criteria:** Planner output explicitly names `facetId`, `queryTerms`,
+`strategy`, `gapId`, `parentAttemptId`, retained/relaxed constraints, and query.
+Service-generated `attemptId` is stable for identical input and survives state
+recovery. First round admits no more than two distinct facets.
 
-**Acceptance criteria:** One transaction checks the live lease and parent, advances revision exactly once, writes checkpoint commit/inbox/projected events/outbox, and rolls back every table on injected failure. Duplicate identical input succeeds without new rows; conflicts fail closed.
+**Verification:** structured-plan and state/recovery tests.
 
-**Verification:** Focused store unit tests and isolated PostgreSQL failure-stage integration tests with direct counts.
+**Dependencies:** Tasks 1-2.
 
-**Dependencies:** Tasks 2 and 3.
+### Task 4: Attempt Outcomes
 
-**Files likely touched:** a focused checkpoint batch store module, its unit test, and integration test.
+**Acceptance criteria:** Every confirmed tool call has one private attempt
+outcome with actual result/Evidence counts, unique domains, delta counts, and a
+progress flag. Duplicate merge is idempotent; conflicting same-ID input fails.
 
-### Task 5: Worker Buffering And Authoritative Resume
+**Verification:** fan-out, Tool Ledger, merge, and checkpoint tests.
 
-**Acceptance criteria:** Search Agent business events are never persisted one by one. The Worker buffers through the checkpoint boundary, commits the batch, then continues. Every reconnect reads/sends the latest run-ledger checkpoint reference; no reference means no automatic orphan selection.
+**Dependencies:** Task 3.
 
-**Verification:** Worker tests for buffering, transaction failure, reconnect, terminal batch, and isolated newer orphan checkpoint.
+### Task 5: EvidenceGap Feedback
 
-**Dependencies:** Task 4.
+**Acceptance criteria:** Reflector and Verifier emit typed gaps; service assigns
+stable IDs and closes them only after linked progress. Follow-ups referencing an
+unknown/closed gap, unknown parent, incompatible strategy, or lost constraint
+are rejected before external execution.
 
-**Files likely touched:** `apps/web/src/server/worker/executor.ts`, its tests, and the run claim/store boundary.
+**Verification:** unit tests plus graph-level two-round scenario.
 
-### Task 6: Transactional Outbox Dispatcher
+**Dependencies:** Tasks 3-4.
 
-**Acceptance criteria:** Dispatcher claims a bounded batch with `FOR UPDATE SKIP LOCKED`, emits `pg_notify`, and records attempts/published time without deleting rows. Failures remain retryable; SSE polling works without a listener.
+### Task 6: Prompt And Routing Integration
 
-**Verification:** Dispatcher unit/integration tests and existing SSE route tests.
+**Acceptance criteria:** Supervisor preserves named entities, versions, dates,
+regions, channels, fields, and exclusions in the private brief. Planner receives
+compressed real feedback and open gaps. Public summaries still come only from
+versioned model outputs and never reveal the private analysis.
 
-**Dependencies:** Task 4.
+**Verification:** prompt contract tests and deterministic fake-model graph tests.
 
-**Files likely touched:** a focused outbox module, Worker lifecycle wiring, and tests.
+**Dependencies:** Tasks 1-5.
 
-### Task 7: Recovery And Replay Proof
+### Task 7: Offline Quality Metrics
 
-**Acceptance criteria:** Failure cases A7 and Tool Ledger replay A8 have deterministic tests; event/order/count evidence proves no duplicate terminal event and Last-Event-ID replay completeness.
+**Acceptance criteria:** Evaluation reports five deterministic query dimensions.
+Metrics inspect private final-state fixtures, make no model/network calls, and
+have positive and negative tests. Existing cases without query data remain
+backward compatible.
 
-**Verification:** Isolated PostgreSQL integration suite plus focused Search Agent Tool Gateway/Ledger tests.
+**Verification:** `pytest -q tests/test_evaluation_scorers.py tests/test_evaluation_runner.py`.
 
-**Dependencies:** Tasks 5 and 6.
+**Dependencies:** Tasks 3-5.
 
-**Files likely touched:** existing integration and Tool Ledger test files; production code only if a proven gap exists.
+### Task 8: Privacy Boundary
 
-### Task 8: Documentation And Full Gate
+**Acceptance criteria:** No public event/span/error contains `queryBrief`, query
+terms, constraint signatures, gap descriptions, provider body, Prompt, Cookie,
+or Key. Existing allowed tool query fields remain validated public inputs.
 
-**Acceptance criteria:** `HANDOFF.md`, `docs/Agent生产化优化任务清单.md`, and one Chinese `docs/development/` record accurately describe the two local transactions, evidence, non-goals, rollback, and next blocked gate.
+**Verification:** event/observability tests and serialized stream scan.
 
-**Verification:** Repository full gates from `AGENTS.md`, Compose static parsing, runtime smoke where available, and `git diff --check`.
+**Dependencies:** Tasks 3-7.
 
-**Dependencies:** Tasks 1-7.
+### Tasks 9-12: Release Closure
 
-**Files likely touched:** the three required documentation artifacts.
+**Acceptance criteria:** All repository gates pass on the final tree; controlled
+live evidence is recorded; documentation explains adopted/rejected approaches,
+rollback and limits; PR/Issue/main status are consistent and the user-authorized
+acceptance is recorded only from fresh evidence.
+
+**Dependencies:** Tasks 1-8.
 
 ## Risks And Mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| LangGraph stream metadata differs from assumptions | High | Verify installed 1.2.9 source and official docs, then test the exact payload before implementation. |
-| A terminal result occurs after the last checkpoint boundary | High | Keep terminal projection inside a checkpoint-confirmed batch and prove it with a real micrograph. |
-| Batch hashes are nondeterministic | High | Canonicalize validated source JSON before hashing and cover key-order variation. |
-| `NOTIFY` is mistaken for durable delivery | High | Keep event table + cursor polling authoritative and test with no listener. |
-| Existing database constraints drift | Medium | Use idempotent setup and direct catalog assertions in an isolated PostgreSQL database. |
-| Store module grows beyond a reviewable boundary | Medium | Put checkpoint batch and outbox behavior in focused persistence modules instead of extending unrelated live-store control flow. |
+| Lexical retention rejects legitimate semantic rewrites | High | Model supplies explicit terms/aliases; gate checks stable IDs plus terms and allows only documented strategy changes. |
+| Extra state inflates checkpoints | Medium | Store bounded summaries, IDs, counts, and domains only; never Provider bodies or full pages. |
+| Query analysis leaks through existing events/spans | High | Do not add private fields to event contracts; scan full events/spans deterministically. |
+| Follow-up IDs drift after resume | High | Hash canonical run/round/facet/gap/parent/query material and reject conflicting replay. |
+| Xiaohongshu cannot express Boolean exclusion | Medium | Preserve exclusion in private constraint metadata and evidence filtering; reject web/X operators rather than pretending they work. |
+| Broad query expansion burns tool budget | High | First round 1-2 facets, follow-ups only for open gaps, existing max rounds/tool calls, near-duplicate and no-progress stops. |
+| Prompt schema breaks provider strict mode | High | Keep every structured field required and run provider schema preflight tests before graph work. |
 
 ## Open Questions
 
-- None. Issue #50 supplies the approved scope, non-goals, architecture decision, and execution gate.
+- None. Issue #52 defines the scope, non-goals, architecture, acceptance criteria,
+  and execution gate; the user explicitly authorized autonomous fresh acceptance.

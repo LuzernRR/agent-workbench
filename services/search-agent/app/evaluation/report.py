@@ -35,6 +35,7 @@ class CaseReport:
                     "passed": score.passed,
                     "detail": score.detail,
                     "failures": list(score.failures),
+                    "metrics": dict(score.metrics),
                 }
                 for score in self.scores
             ],

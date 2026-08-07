@@ -14,6 +14,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.graph.query_strategy import (
+    EvidenceGapProposal,
+    QueryBrief,
+    RewriteStrategy,
+)
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +35,35 @@ class PlannedSearch(StrictModel):
     channel: ResearchChannel
 
 
+class FollowUpSearch(StrictModel):
+    """Reflector/Verifier proposal bound to one observed evidence gap."""
+
+    query: str = Field(min_length=2, max_length=300)
+    channel: ResearchChannel
+    facet_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    query_terms: list[str] = Field(min_length=1, max_length=12)
+    strategy: RewriteStrategy
+    gap_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    parent_attempt_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    retained_constraint_ids: list[str] = Field(max_length=40)
+    relaxed_should_ids: list[str] = Field(max_length=12)
+
+    @model_validator(mode="after")
+    def validate_ids(self) -> FollowUpSearch:
+        for label, values in (
+            ("query_terms", self.query_terms),
+            ("retained_constraint_ids", self.retained_constraint_ids),
+            ("relaxed_should_ids", self.relaxed_should_ids),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} 不得重复")
+        return self
+
+
 class PlannedStep(StrictModel):
     """Planner 生成的局部步骤；稳定运行时 ID 由服务端分配。"""
 
@@ -38,10 +73,25 @@ class PlannedStep(StrictModel):
         pattern=r"^[A-Za-z0-9_.:-]+$",
         description="计划内唯一局部标识，例如 source_a；不得包含用户数据或密钥",
     )
+    facet_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
     facet: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=500)
+    query_terms: list[str] = Field(min_length=1, max_length=12)
+    strategy: RewriteStrategy
     query: str = Field(min_length=2, max_length=300)
     channel: ResearchChannel
+    gap_id: str | None = Field(
+        description="首轮必须为 null；补搜必须引用私有 open gapId"
+    )
+    parent_attempt_id: str | None = Field(
+        description="首轮必须为 null；补搜必须引用已确认 attemptId"
+    )
+    retained_constraint_ids: list[str] = Field(max_length=40)
+    relaxed_should_ids: list[str] = Field(max_length=12)
     depends_on: list[str] = Field(
         description="依赖的本计划 local_id；没有依赖时也必须显式返回空数组",
         max_length=4,
@@ -49,6 +99,22 @@ class PlannedStep(StrictModel):
     priority: int = Field(ge=0, le=100)
     evidence_needed: int = Field(ge=0, le=10)
     can_parallelize: bool
+
+    @model_validator(mode="after")
+    def validate_query_metadata(self) -> PlannedStep:
+        for label, values in (
+            ("query_terms", self.query_terms),
+            ("retained_constraint_ids", self.retained_constraint_ids),
+            ("relaxed_should_ids", self.relaxed_should_ids),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} 不得重复")
+        if self.strategy == "initial_precise":
+            if self.gap_id is not None or self.parent_attempt_id is not None:
+                raise ValueError("首轮策略不得携带 gap_id 或 parent_attempt_id")
+        elif self.gap_id is None or self.parent_attempt_id is None:
+            raise ValueError("补搜策略必须携带 gap_id 与 parent_attempt_id")
+        return self
 
 
 class IntentResult(StrictModel):
@@ -75,6 +141,9 @@ class IntentResult(StrictModel):
     fast_search: PlannedSearch | None = Field(
         description="single_fact 时唯一一次检索的 query 与渠道；其余情况必须为 null"
     )
+    query_brief: QueryBrief | None = Field(
+        description="搜索任务的私有结构化查询简报；直接回答时必须为 null"
+    )
     summary: str = Field(description="一句话说明你如何理解这个任务，面向用户，不超过80字")
 
     @model_validator(mode="after")
@@ -85,6 +154,14 @@ class IntentResult(StrictModel):
             raise ValueError("直接回答不得携带搜索渠道")
         if not self.need_search and self.task_type != "direct_answer":
             raise ValueError("无需搜索的任务必须路由为 direct_answer")
+        if self.need_search and self.query_brief is None:
+            raise ValueError("需要搜索的任务必须显式返回 query_brief")
+        if not self.need_search and self.query_brief is not None:
+            raise ValueError("直接回答不得携带 query_brief")
+        if self.query_brief is not None:
+            required = set(self.query_brief.required_channels)
+            if not required <= set(self.channels):
+                raise ValueError("query_brief.required_channels 必须属于 channels")
         # 不搜索就不存在取证深度，只允许中性取值，避免出现无意义组合。
         if not self.need_search and self.evidence_depth != "multi_source":
             raise ValueError("无需搜索的任务取证深度必须为 multi_source")
@@ -216,12 +293,16 @@ class ReflectResult(StrictModel):
 
     sufficient: bool = Field(description="现有证据是否足以回答问题")
     missing: str = Field(description="若不足，缺什么；若足够，必须显式返回空字符串")
-    extra_searches: list[PlannedSearch] = Field(
+    extra_searches: list[FollowUpSearch] = Field(
         description=(
             "若不足，给出互补的查询与渠道组合；节点只接受前2个合法新组合；"
             "无需补搜时也必须显式返回空数组"
         ),
         max_length=4,
+    )
+    evidence_gaps: list[EvidenceGapProposal] = Field(
+        description="证据不足时的 typed gap；充分时必须为空数组",
+        max_length=8,
     )
     source_presentations: list[SourcePresentation] = Field(
         description=(
@@ -232,6 +313,20 @@ class ReflectResult(StrictModel):
     )
     summary: str = Field(description="一句话说明证据评估结论，面向用户，不超过80字")
 
+    @model_validator(mode="after")
+    def validate_gap_links(self) -> ReflectResult:
+        gap_id_values = [item.gap_id for item in self.evidence_gaps]
+        gap_ids = set(gap_id_values)
+        if len(gap_id_values) != len(gap_ids):
+            raise ValueError("evidence_gaps gap_id 不得重复")
+        if self.sufficient and (self.extra_searches or self.evidence_gaps):
+            raise ValueError("证据充分时不得返回补搜或 evidence_gaps")
+        if not self.sufficient and not self.evidence_gaps:
+            raise ValueError("证据不足时必须返回 typed evidence_gaps")
+        if any(item.gap_id not in gap_ids for item in self.extra_searches):
+            raise ValueError("补搜必须绑定本次 evidence_gaps")
+        return self
+
 
 class VerifyResult(StrictModel):
     """verify 节点产出：核验答案。"""
@@ -241,11 +336,40 @@ class VerifyResult(StrictModel):
         description="通过选pass；仅需改写选rewrite；缺证据选research_more"
     )
     issue: str = Field(description="若未通过，指出问题；通过时必须显式返回空字符串")
-    extra_searches: list[PlannedSearch] = Field(
+    extra_searches: list[FollowUpSearch] = Field(
         description=(
             "research_more 时给出补充查询与渠道组合，否则必须显式返回空数组；"
             "节点只接受前2个合法新组合"
         ),
         max_length=4,
     )
+    evidence_gaps: list[EvidenceGapProposal] = Field(
+        description="research_more 时的 typed gap；其余动作必须为空数组",
+        max_length=8,
+    )
     summary: str = Field(description="一句话说明核验结论，面向用户，不超过80字")
+
+    @model_validator(mode="after")
+    def validate_gap_links(self) -> VerifyResult:
+        if self.passed:
+            if self.action != "pass" or self.issue or self.extra_searches or self.evidence_gaps:
+                raise ValueError(
+                    "passed=true 必须使用 pass，且不得携带问题、补搜或 evidence_gaps"
+                )
+        else:
+            if self.action == "pass":
+                raise ValueError("passed=false 不得使用 pass")
+            if not self.issue.strip():
+                raise ValueError("passed=false 必须说明未通过问题")
+        gap_id_values = [item.gap_id for item in self.evidence_gaps]
+        gap_ids = set(gap_id_values)
+        if len(gap_id_values) != len(gap_ids):
+            raise ValueError("evidence_gaps gap_id 不得重复")
+        if self.action == "research_more":
+            if not self.evidence_gaps:
+                raise ValueError("research_more 必须返回 typed evidence_gaps")
+            if any(item.gap_id not in gap_ids for item in self.extra_searches):
+                raise ValueError("补搜必须绑定本次 evidence_gaps")
+        elif self.extra_searches or self.evidence_gaps:
+            raise ValueError("pass/rewrite 不得返回补搜或 evidence_gaps")
+        return self

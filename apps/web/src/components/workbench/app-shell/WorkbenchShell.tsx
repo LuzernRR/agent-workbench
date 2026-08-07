@@ -31,6 +31,23 @@ function useViewportMode() {
   return mode;
 }
 
+export function resolveDraftElapsedStartedAt({
+  draftStartedAt,
+  draftHandoffThreadId,
+  threadId,
+  handoffHydrated
+}: {
+  draftStartedAt: string | null;
+  draftHandoffThreadId: string | null;
+  threadId: string | null;
+  handoffHydrated: boolean;
+}) {
+  if (!draftStartedAt) return null;
+  if (!threadId) return draftStartedAt;
+  if (draftHandoffThreadId !== threadId || handoffHydrated) return null;
+  return draftStartedAt;
+}
+
 export function WorkbenchShell({
   projectId,
   threadId,
@@ -46,6 +63,8 @@ export function WorkbenchShell({
   const queryClient = useQueryClient();
   const projects = useQuery({ queryKey: ["projects"], queryFn: workbenchApi.projects });
   const [draftStarting, setDraftStarting] = useState(false);
+  const [draftStartedAt, setDraftStartedAt] = useState<string | null>(null);
+  const [draftHandoffThreadId, setDraftHandoffThreadId] = useState<string | null>(null);
   const draftSubmissionRef = useRef<Promise<unknown> | null>(null);
   const createdThreadRef = useRef<string | null>(null);
   const uploadedAttachmentIdsRef = useRef<string[] | null>(null);
@@ -68,11 +87,14 @@ export function WorkbenchShell({
     const selection = `${projectId === undefined ? "resolving" : projectId ?? "standalone"}:${threadId ?? "draft"}`;
     if (previousSelectionRef.current === selection) return;
     previousSelectionRef.current = selection;
+    const createdSelection = Boolean(threadId && createdThreadRef.current === threadId);
     // Refs belong to a draft selection.  Keeping the shell mounted avoids a
     // full-frame flash while these transient values are reset explicitly.
     draftSubmissionRef.current = null;
-    createdThreadRef.current = null;
-    uploadedAttachmentIdsRef.current = null;
+    if (!createdSelection) {
+      createdThreadRef.current = null;
+      uploadedAttachmentIdsRef.current = null;
+    }
     revealBaselineReadyRef.current = false;
     previousRevealSignalRef.current = { plan: "", artifacts: "" };
   }, [projectId, threadId]);
@@ -93,8 +115,10 @@ export function WorkbenchShell({
       rightRef.current?.expand();
       return;
     }
-    const frame = window.requestAnimationFrame(() => setCompactWorkspaceOpen(true));
-    return () => window.cancelAnimationFrame(frame);
+    // A compact workspace is a modal surface. Opening it automatically would
+    // cover the elapsed indicator and the model's live answer, so only the
+    // explicit top-bar command may open it outside desktop layouts.
+    return;
   }, [artifactRevealSignal, mode, planRevealSignal, rightRef, thread.state]);
 
   const snapshotMatchesSelection = Boolean(threadId && thread.snapshot?.thread.id === threadId);
@@ -109,14 +133,25 @@ export function WorkbenchShell({
   const projectLoading = Boolean(!threadId && resolvedProjectId && !project && projects.isLoading);
   const state = stateMatchesSelection && thread.state ? thread.state : createEmptyThreadState(resolvedProjectId ?? null, threadId || "draft");
   const switchingThread = Boolean(threadId && (thread.isFetching || !snapshotMatchesSelection || !stateMatchesSelection));
+  const draftElapsedStartedAt = resolveDraftElapsedStartedAt({
+    draftStartedAt,
+    draftHandoffThreadId,
+    threadId,
+    handoffHydrated: snapshotMatchesSelection && stateMatchesSelection
+  });
   const startRun = threadId ? thread.startRun : (message: string) => {
     if (draftSubmissionRef.current) return draftSubmissionRef.current;
+    const startedAt = new Date().toISOString();
+    setDraftStartedAt(startedAt);
+    setDraftHandoffThreadId(null);
+    let handedOff = false;
     const submission = (async () => {
       setDraftStarting(true);
       const store = useWorkbenchUiStore.getState();
       const createdThread = createdThreadRef.current ? null : await workbenchApi.createThread(resolvedProjectId ?? null);
       const createdId = createdThreadRef.current ?? createdThread!.id;
       createdThreadRef.current = createdId;
+      setDraftHandoffThreadId(createdId);
       if (uploadedAttachmentIdsRef.current === null) {
         const uploaded = store.pendingDraftAttachments.length
           ? await workbenchApi.uploadAttachments(createdId, store.pendingDraftAttachments.map((attachment) => attachment.file))
@@ -127,9 +162,13 @@ export function WorkbenchShell({
       await workbenchApi.startRun(createdId, { message, agentId: current.agentId, modelId: current.modelId, reasoningEffort: current.reasoningEffort, toolIds: current.selectedToolIds, permissionMode: current.permissionMode, attachmentIds: uploadedAttachmentIdsRef.current, replaceMessageId: null });
       current.clearPendingDraftAttachments();
       await queryClient.invalidateQueries({ queryKey: ["threads"] });
-      onSelectThread?.(createdThread?.projectId ?? resolvedProjectId ?? null, createdId);
+      if (onSelectThread) {
+        onSelectThread(createdThread?.projectId ?? resolvedProjectId ?? null, createdId);
+        handedOff = true;
+      }
     })().finally(() => {
       setDraftStarting(false);
+      if (!handedOff) setDraftStartedAt(null);
       draftSubmissionRef.current = null;
     });
     draftSubmissionRef.current = submission;
@@ -147,7 +186,7 @@ export function WorkbenchShell({
           <main className="flex h-full min-w-0 flex-col bg-surface">
             <WorkbenchTopbar projectId={resolvedProjectId ?? null} threadId={threadId} projectName={project?.name} threadTitle={snapshotMatchesSelection ? thread.snapshot?.thread.title : undefined} loading={switchingThread || projectLoading} leftCollapsed={leftCollapsed} rightCollapsed={rightCollapsed} canOpenLeft={showLeft} canOpenRight={showRight} canOpenCompactWorkspace={!showRight} onSelectThread={onSelectThread} onOpenLeft={() => leftRef.current?.expand()} onOpenRight={() => rightRef.current?.expand()} onOpenCompactWorkspace={() => setCompactWorkspaceOpen(true)} />
             {operationError ? <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-[#f0caca] bg-[#fff7f7] px-4 py-2 text-[14px] leading-5 text-danger"><span className="min-w-0 flex-1">{getWorkbenchErrorMessage(operationError, "任务请求失败")}</span><button type="button" className="icon-button size-7 shrink-0" onClick={() => setDismissedError(operationError)} title="关闭错误" aria-label="关闭错误"><X className="size-3.5" /></button></div> : null}
-            {switchingThread || projectLoading ? <ConversationSkeleton /> : <Conversation state={state} composerThreadId={threadId} onStartRun={startRun} onStopRun={thread.stopRun} onResolveApproval={(approvalId, decision) => thread.resolveApproval({ approvalId, decision })} isResolvingApproval={thread.isResolvingApproval} isStarting={thread.isStarting || draftStarting} s01ProcessFixture={s01ProcessFixture} />}
+            {switchingThread || projectLoading ? <ConversationSkeleton pendingStartedAt={thread.pendingStartedAt || draftElapsedStartedAt} /> : <Conversation state={state} composerThreadId={threadId} onStartRun={startRun} onStopRun={thread.stopRun} onResolveApproval={(approvalId, decision) => thread.resolveApproval({ approvalId, decision })} isResolvingApproval={thread.isResolvingApproval} isStarting={thread.isStarting || draftStarting} pendingStartedAt={thread.pendingStartedAt || draftElapsedStartedAt} s01ProcessFixture={s01ProcessFixture} />}
           </main>
         </Panel>
         {showRight ? <><Separator id="right-separator" className={rightCollapsed ? "hidden" : ""} /><Panel id="right-workspace" panelRef={rightRef} defaultSize={rightCollapsed ? "0px" : "380px"} minSize="340px" maxSize="680px" collapsible collapsedSize="0px" groupResizeBehavior="preserve-pixel-size" onResize={(size) => setRightCollapsed(size.inPixels < 8)}><AgentWorkspace state={state} onCollapse={() => rightRef.current?.collapse()} /></Panel></> : null}

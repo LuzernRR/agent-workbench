@@ -1,0 +1,370 @@
+{
+  "version": 1,
+  "name": "search-agent-query-quality-v1",
+  "cases": [
+    {
+      "caseId": "query-gap-closed-with-evidence-gain",
+      "question": "核验 AlphaPhone 最近一个月在上海的新品价格和官方保修期，排除二手商品。",
+      "depth": "balanced",
+      "tags": ["query-quality", "constraint-retention", "gap-closure"],
+      "transcript": [
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_query_initial",
+            "operationRef": "op_query_initial",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.completed",
+          "payload": {
+            "toolCallId": "tc_query_initial",
+            "operationRef": "op_query_initial",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "ok",
+            "outcomeStatus": "ok",
+            "reasonCode": "OK",
+            "retryable": false,
+            "nextAction": "continue",
+            "resultCount": 3,
+            "evidenceCount": 1,
+            "cached": false,
+            "durationMs": 900
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_price",
+            "sourceId": "src_price",
+            "contentHash": "hash_price",
+            "toolCallId": "tc_query_initial",
+            "url": "https://shop.example/alphaphone",
+            "title": "AlphaPhone 官方价格",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-08-01T00:00:00Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_price",
+            "sourceId": "src_price",
+            "contentHash": "hash_price",
+            "toolCallId": "tc_query_initial",
+            "url": "https://shop.example/alphaphone",
+            "title": "AlphaPhone 官方价格",
+            "channel": "web",
+            "status": "accepted",
+            "reasonCode": "RELEVANT",
+            "updatedAt": "2026-08-01T00:00:01Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_price",
+            "sourceId": "src_price",
+            "contentHash": "hash_price",
+            "toolCallId": "tc_query_initial",
+            "url": "https://shop.example/alphaphone",
+            "title": "AlphaPhone 官方价格",
+            "channel": "web",
+            "status": "cited",
+            "reasonCode": "CITED_IN_ANSWER",
+            "updatedAt": "2026-08-01T00:00:02Z"
+          }
+        },
+        {
+          "type": "tool.started",
+          "payload": {
+            "toolCallId": "tc_query_follow_up",
+            "operationRef": "op_query_follow_up",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "cached": false
+          }
+        },
+        {
+          "type": "tool.completed",
+          "payload": {
+            "toolCallId": "tc_query_follow_up",
+            "operationRef": "op_query_follow_up",
+            "attempt": 1,
+            "toolName": "web_search",
+            "channel": "web",
+            "provider": "tavily",
+            "status": "ok",
+            "outcomeStatus": "ok",
+            "reasonCode": "OK",
+            "retryable": false,
+            "nextAction": "continue",
+            "resultCount": 2,
+            "evidenceCount": 1,
+            "cached": false,
+            "durationMs": 700
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_warranty",
+            "sourceId": "src_warranty",
+            "contentHash": "hash_warranty",
+            "toolCallId": "tc_query_follow_up",
+            "url": "https://support.example/alphaphone-warranty",
+            "title": "AlphaPhone 官方保修政策",
+            "channel": "web",
+            "status": "read",
+            "reasonCode": "EXTRACTED",
+            "updatedAt": "2026-08-01T00:00:03Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_warranty",
+            "sourceId": "src_warranty",
+            "contentHash": "hash_warranty",
+            "toolCallId": "tc_query_follow_up",
+            "url": "https://support.example/alphaphone-warranty",
+            "title": "AlphaPhone 官方保修政策",
+            "channel": "web",
+            "status": "accepted",
+            "reasonCode": "RELEVANT",
+            "updatedAt": "2026-08-01T00:00:04Z"
+          }
+        },
+        {
+          "type": "evidence.updated",
+          "payload": {
+            "evidenceId": "ev_warranty",
+            "sourceId": "src_warranty",
+            "contentHash": "hash_warranty",
+            "toolCallId": "tc_query_follow_up",
+            "url": "https://support.example/alphaphone-warranty",
+            "title": "AlphaPhone 官方保修政策",
+            "channel": "web",
+            "status": "cited",
+            "reasonCode": "CITED_IN_ANSWER",
+            "updatedAt": "2026-08-01T00:00:05Z"
+          }
+        }
+      ],
+      "finalState": {
+        "run_id": "eval_query-gap-closed-with-evidence-gain",
+        "tenant_id": "eval-tenant",
+        "visitor_id": "eval-visitor",
+        "project_id": "eval-project",
+        "thread_id": "eval-thread-query-gap-closed-with-evidence-gain",
+        "model_id": "deepseek-v4-flash",
+        "answer": "## 结论\n\n已核验新品价格和官方保修期。",
+        "answer_source": "model",
+        "answer_model_calls": 1,
+        "response_status": "completed",
+        "prompt_version": "2026-08-07.v41-query-strategy",
+        "citations": [
+          {
+            "label": "AlphaPhone 官方价格",
+            "url": "https://shop.example/alphaphone"
+          },
+          {
+            "label": "AlphaPhone 官方保修政策",
+            "url": "https://support.example/alphaphone-warranty"
+          }
+        ],
+        "verification_passed": true,
+        "stop_reason": "VERIFIED",
+        "usage": {
+          "input_tokens": 3000,
+          "output_tokens": 500,
+          "total_tokens": 3500,
+          "cost_usd": 0.01
+        },
+        "model_calls": 4,
+        "tool_calls": 2,
+        "evidence": [
+          {
+            "evidence_id": "ev_price",
+            "source_id": "src_price",
+            "content_hash": "hash_price",
+            "status": "cited",
+            "status_reason_code": "CITED_IN_ANSWER",
+            "status_updated_at": "2026-08-01T00:00:02Z",
+            "channel": "web",
+            "tool_call_id": "tc_query_initial",
+            "url": "https://shop.example/alphaphone",
+            "title": "AlphaPhone 官方价格"
+          },
+          {
+            "evidence_id": "ev_warranty",
+            "source_id": "src_warranty",
+            "content_hash": "hash_warranty",
+            "status": "cited",
+            "status_reason_code": "CITED_IN_ANSWER",
+            "status_updated_at": "2026-08-01T00:00:05Z",
+            "channel": "web",
+            "tool_call_id": "tc_query_follow_up",
+            "url": "https://support.example/alphaphone-warranty",
+            "title": "AlphaPhone 官方保修政策"
+          }
+        ],
+        "query_brief": {
+          "version": 1,
+          "objective": "核验 AlphaPhone 在上海的新品价格和官方保修期",
+          "complexity": "multi_faceted",
+          "entities": ["AlphaPhone"],
+          "must": [
+            {
+              "constraint_id": "must_product",
+              "text": "必须是 AlphaPhone",
+              "terms": ["AlphaPhone"]
+            }
+          ],
+          "should": [
+            {
+              "constraint_id": "should_official",
+              "text": "优先官方来源",
+              "terms": ["官方"]
+            }
+          ],
+          "exclude": [
+            {
+              "constraint_id": "exclude_used",
+              "text": "排除二手商品",
+              "terms": ["二手"]
+            }
+          ],
+          "time_range": {
+            "start_date": "2026-07-01",
+            "end_date": "2026-08-01",
+            "source_text": "最近一个月",
+            "resolved_on": "2026-08-01"
+          },
+          "locations": ["上海"],
+          "languages": ["zh-CN"],
+          "required_channels": ["web"],
+          "requested_fields": ["价格", "保修期"],
+          "evidence_facets": [
+            {
+              "facet_id": "price",
+              "description": "新品价格",
+              "evidence_type": "official",
+              "required_fields": ["价格"]
+            },
+            {
+              "facet_id": "warranty",
+              "description": "官方保修期",
+              "evidence_type": "official",
+              "required_fields": ["保修期"]
+            }
+          ]
+        },
+        "search_attempts": [
+          {
+            "attempt_id": "attempt_query_initial",
+            "tool_call_id": "tc_query_initial",
+            "plan_step_id": "step_price",
+            "facet_id": "price",
+            "gap_id": null,
+            "parent_attempt_id": null,
+            "strategy": "initial_precise",
+            "query_terms": ["AlphaPhone", "上海", "新品", "价格"],
+            "query": "AlphaPhone 上海 新品 价格 -二手 after:2026-07-01 before:2026-08-01",
+            "channel": "web",
+            "retained_constraint_ids": [
+              "must_product",
+              "exclude_used",
+              "time_range",
+              "location:4906a49adc5c",
+              "required_channel:web"
+            ],
+            "relaxed_should_ids": [],
+            "constraint_signature": "8c409f1b9d9859774ab49e2413bd1969bd694f2c7a89981c48bd24e4d890aacd",
+            "status": "completed",
+            "result_count": 3,
+            "evidence_count": 1,
+            "unique_source_domains": ["shop.example"],
+            "new_candidate_count": 3,
+            "new_evidence_count": 1,
+            "new_constraint_ids": [
+              "must_product",
+              "exclude_used",
+              "time_range",
+              "location:4906a49adc5c",
+              "required_channel:web"
+            ],
+            "progress": true,
+            "error_code": null
+          },
+          {
+            "attempt_id": "attempt_query_follow_up",
+            "tool_call_id": "tc_query_follow_up",
+            "plan_step_id": "step_warranty",
+            "facet_id": "warranty",
+            "gap_id": "gap_warranty",
+            "parent_attempt_id": "attempt_query_initial",
+            "strategy": "field_completion",
+            "query_terms": ["AlphaPhone", "上海", "官方", "保修期"],
+            "query": "AlphaPhone 上海 官方 保修期 -二手 after:2026-07-01 before:2026-08-01",
+            "channel": "web",
+            "retained_constraint_ids": [
+              "must_product",
+              "exclude_used",
+              "time_range",
+              "location:4906a49adc5c",
+              "required_channel:web"
+            ],
+            "relaxed_should_ids": [],
+            "constraint_signature": "8c409f1b9d9859774ab49e2413bd1969bd694f2c7a89981c48bd24e4d890aacd",
+            "status": "completed",
+            "result_count": 2,
+            "evidence_count": 1,
+            "unique_source_domains": ["support.example"],
+            "new_candidate_count": 2,
+            "new_evidence_count": 1,
+            "new_constraint_ids": [],
+            "progress": true,
+            "error_code": null
+          }
+        ],
+        "evidence_gaps": [
+          {
+            "gap_id": "gap_warranty",
+            "facet_id": "warranty",
+            "kind": "missing_field",
+            "subject": "保修期",
+            "description": "缺少官方保修期",
+            "missing_constraint_ids": [],
+            "required_channel": "web",
+            "evidence_type": "official",
+            "priority": 90,
+            "status": "closed",
+            "opened_iteration": 1,
+            "closed_iteration": 2,
+            "resolved_by_attempt_id": "attempt_query_follow_up"
+          }
+        ]
+      },
+      "expect": {
+        "terminalType": "run.completed",
+        "answerSource": "model",
+        "channels": ["web"],
+        "responseStatus": "completed",
+        "verificationPassed": true,
+        "minCitations": 2,
+        "minEvidenceCited": 2
+      }
+    }
+  ]
+}

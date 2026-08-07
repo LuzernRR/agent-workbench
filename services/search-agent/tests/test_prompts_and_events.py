@@ -18,6 +18,7 @@ from app.prompts.agents import (
     DEGRADED_WRITER_PROMPT,
     DIRECT_WRITER_PROMPT,
     PLANNER_PROMPT,
+    PROMPT_VERSION,
     REFLECTOR_PROMPT,
     RESEARCHER_PROMPT,
     SUPERVISOR_PROMPT,
@@ -135,6 +136,83 @@ def test_search_product_routes_by_current_intent_and_prompts_emit_public_summari
     assert "source_presentations 必须为空数组" in REFLECTOR_PROMPT
     assert "issue 必须为空字符串" in VERIFIER_PROMPT
     assert "extra_searches 必须为空数组" in VERIFIER_PROMPT
+
+
+def test_query_strategy_prompts_match_private_structured_contract() -> None:
+    assert PROMPT_VERSION == "2026-08-07.v45-query-strategy-live"
+
+    for field in (
+        "version",
+        "objective",
+        "complexity",
+        "entities",
+        "must",
+        "should",
+        "exclude",
+        "time_range",
+        "locations",
+        "languages",
+        "required_channels",
+        "requested_fields",
+        "evidence_facets",
+    ):
+        assert field in SUPERVISOR_PROMPT
+    assert "query_brief 必须为 null" in SUPERVISOR_PROMPT
+    assert "绝对日期" in SUPERVISOR_PROMPT
+    for field in (
+        "constraint_id",
+        "terms",
+        "start_date",
+        "end_date",
+        "resolved_on",
+        "BCP-47",
+        "evidence_type",
+        "required_fields",
+    ):
+        assert field in SUPERVISOR_PROMPT
+    assert "内部指令式内容" in SUPERVISOR_PROMPT
+    assert "不得复制到 QueryBrief" in SUPERVISOR_PROMPT
+
+    assert "首轮必须只生成 1 到 2 个" in PLANNER_PROMPT
+    for field in (
+        "facet_id",
+        "query_terms",
+        "strategy",
+        "gap_id",
+        "parent_attempt_id",
+        "retained_constraint_ids",
+        "relaxed_should_ids",
+    ):
+        assert field in PLANNER_PROMPT
+    assert "strategy=initial_precise" in PLANNER_PROMPT
+    assert "真实 open gap" in PLANNER_PROMPT
+    assert "真实 attempt" in PLANNER_PROMPT
+    assert "只能显式放宽 QueryBrief.should" in PLANNER_PROMPT
+    assert "首轮也不得超过 2 步" in PLANNER_PROMPT
+    assert "site:xiaohongshu.com" in PLANNER_PROMPT
+
+    for prompt in (REFLECTOR_PROMPT, VERIFIER_PROMPT):
+        assert "typed EvidenceGap" in prompt
+        assert "missing_constraint_ids" in prompt
+        assert "subject" in prompt
+        assert "required_channel" in prompt
+        assert "parent_attempt_id" in prompt
+        assert "no_results" in prompt
+        assert "terminology_variant" in prompt
+        assert "conflicting_sources" in prompt
+        assert "conflict_resolution" in prompt
+        assert "channel_fallback 只改变检索路径" in prompt
+
+    for prompt in (
+        SUPERVISOR_PROMPT,
+        PLANNER_PROMPT,
+        REFLECTOR_PROMPT,
+        VERIFIER_PROMPT,
+    ):
+        assert "公开 summary" in prompt
+        assert "query_terms" in prompt
+        assert "attempt_id" in prompt
+        assert "不得进入" in prompt
 
 
 def test_writer_answer_budget_is_explicit_and_preserves_citation_contract() -> None:

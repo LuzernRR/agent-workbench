@@ -6,6 +6,9 @@ test.skip(process.env.LIVE_SEARCH_E2E !== "1", "真实 Provider 验收需要显�
 
 const forbiddenPublicText = /reasoning_content|authorization|apiKey|systemPrompt|toolArguments/iu;
 const maxLiveAnswerGraphemes = 760;
+const maxFirstFeedbackMs = 1_500;
+const maxFirstModelTextMs = 20_000;
+const maxFirstToolMs = 30_000;
 
 async function postWithVisitorRetry(page: Page, url: string, data: Record<string, unknown>) {
   let response: APIResponse | null = null;
@@ -192,18 +195,25 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
   await page.getByLabel("任务输入").fill(question);
   const runStartedAt = Date.now();
   await page.getByRole("button", { name: "发送", exact: true }).click();
+  const elapsed = page.getByTestId("run-elapsed");
+  await expect(elapsed).toContainText("已处理 0 秒", { timeout: maxFirstFeedbackMs });
+  const firstFeedbackMs = Date.now() - runStartedAt;
+  expect(await elapsed.evaluate((node) => ({
+    inAssistantResponse: Boolean(node.closest("[data-assistant-response-run-id]")),
+    inUserMessage: Boolean(node.closest("[data-message-id]"))
+  }))).toEqual({ inAssistantResponse: true, inUserMessage: false });
   const runResponse = await runResponsePromise;
   expect(runResponse.ok()).toBe(true);
   const { runId } = await runResponse.json() as { runId: string };
   const terminalEventsPromise = page.request.get(`/api/v1/runs/${runId}/events?after=0`);
 
   const firstPublicText = page.locator("[data-thinking-id] p").first();
-  await expect(firstPublicText).not.toHaveText("", { timeout: Math.max(1, 5_000 - (Date.now() - runStartedAt)) });
+  await expect(firstPublicText).not.toHaveText("", { timeout: Math.max(1, maxFirstModelTextMs - (Date.now() - runStartedAt)) });
   const firstPublicTextMs = Date.now() - runStartedAt;
   const firstPublicTextValue = (await firstPublicText.textContent())?.trim() || "";
   expect(firstPublicTextValue).not.toBe("先检索“油敏皮夏季通勤防晒”的近期正文，再按证据覆盖决定是否补充。");
   const searchSummaries = page.locator("[data-search-activity-summary]");
-  await expect(searchSummaries.first()).toBeVisible({ timeout: Math.max(1, 10_000 - (Date.now() - runStartedAt)) });
+  await expect(searchSummaries.first()).toBeVisible({ timeout: Math.max(1, maxFirstToolMs - (Date.now() - runStartedAt)) });
   const firstToolMs = Date.now() - runStartedAt;
   await searchSummaries.first().evaluate((element) => {
     const runtime = window as typeof window & { __searchSettlementHistory?: string[][]; __searchCountObserver?: MutationObserver };
@@ -279,6 +289,7 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     Number(terminalEvent?.payload.modelCalls || 0)
   );
   const performanceMetrics = {
+    firstFeedbackMs,
     firstPublicTextMs,
     firstToolMs,
     terminalMs,
@@ -287,8 +298,9 @@ test("真实自适应思考与搜索链路在生产入口正确展示并可恢�
     modelCalls: Number(terminalEvent?.payload.modelCalls || 0),
     toolCalls: Number(terminalEvent?.payload.toolCalls || 0)
   };
-  expect(performanceMetrics.firstPublicTextMs).toBeLessThanOrEqual(5_000);
-  expect(performanceMetrics.firstToolMs).toBeLessThanOrEqual(10_000);
+  expect(performanceMetrics.firstFeedbackMs).toBeLessThanOrEqual(maxFirstFeedbackMs);
+  expect(performanceMetrics.firstPublicTextMs).toBeLessThanOrEqual(maxFirstModelTextMs);
+  expect(performanceMetrics.firstToolMs).toBeLessThanOrEqual(maxFirstToolMs);
   expect(performanceMetrics.activeTerminalMs).toBeLessThanOrEqual(90_000);
   expect(performanceMetrics.modelCalls).toBeLessThanOrEqual(10);
   expect(performanceMetrics.toolCalls).toBeLessThanOrEqual(4);

@@ -284,6 +284,25 @@ describe("reduceAgentEvent", () => {
     expect(state.runStatuses.run).toBe("completed");
   });
 
+  it("保留发送瞬间的乐观起始时刻，再由 SSE 事件补齐运行状态", () => {
+    const startedAt = "2026-08-07T00:00:00.000Z";
+    const optimistic = {
+      ...createEmptyThreadState("project", "thread"),
+      activeRunId: "run-optimistic",
+      runStatus: "running" as const,
+      runStartedAt: startedAt,
+      runTimings: { "run-optimistic": { startedAt } }
+    };
+    const state = reduceAgentEvent(optimistic, {
+      ...event(1, "run.started", {}),
+      runId: "run-optimistic",
+      createdAt: "2026-08-07T00:00:00.500Z"
+    });
+
+    expect(state.runStartedAt).toBe(startedAt);
+    expect(state.runTimings["run-optimistic"]).toEqual({ startedAt });
+  });
+
   it("拒绝较旧计划修订覆盖已持久化快照", () => {
     const state = reduceAgentEvents(createEmptyThreadState("project", "thread"), [
       event(1, "plan.updated", { planId: "plan-new", revision: 3, steps: [{ id: "new", title: "新计划", status: "running" }] }),

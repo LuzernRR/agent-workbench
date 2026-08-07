@@ -8,6 +8,15 @@ import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from app.graph.query_strategy import (
+    QueryBrief,
+    QueryGateError,
+    complete_initial_plan_should_metadata,
+    complete_query_constraint_terms,
+    complete_query_lineage,
+    stable_attempt_id,
+    validate_query_proposal,
+)
 from app.graph.state import PlanSnapshot, PlanStep, SearchRequest
 from app.tools.channels.base import ChannelName
 
@@ -41,6 +50,10 @@ def build_plan_snapshot(
     max_steps: int | None = None,
     max_evidence_per_step: int | None = None,
     max_total_evidence: int | None = None,
+    query_brief: QueryBrief | None = None,
+    prior_attempts: Sequence[dict[str, Any]] = (),
+    open_gaps: Sequence[dict[str, Any]] = (),
+    initial: bool | None = None,
 ) -> PlanSnapshot:
     """把模型局部步骤转换为稳定、严格的运行时计划。"""
 
@@ -48,11 +61,39 @@ def build_plan_snapshot(
         step.model_dump() if hasattr(step, "model_dump") else dict(step)
         for step in planned_steps
     ]
+    is_initial = iteration == 1 if initial is None else initial
+    if query_brief is not None:
+        raw_steps = [
+            complete_query_lineage(
+                complete_query_constraint_terms(
+                    query_brief,
+                    raw,
+                    complete_all_should=not is_initial,
+                ),
+                prior_attempts=prior_attempts,
+                open_gaps=open_gaps,
+            )
+            for raw in raw_steps
+        ]
+        if is_initial:
+            raw_steps = complete_initial_plan_should_metadata(query_brief, raw_steps)
     if max_steps is not None and len(raw_steps) > max_steps:
         raise PlanValidationError(
             "PLAN_TOOL_BUDGET_EXCEEDED",
             "计划步骤超过本轮剩余工具调用数",
         )
+    if is_initial and len(raw_steps) > 2:
+        raise PlanValidationError(
+            "PLAN_INITIAL_QUERY_LIMIT",
+            "首轮计划最多允许两个互补查询",
+        )
+    if is_initial:
+        facet_ids = [str(raw.get("facet_id") or "") for raw in raw_steps]
+        if len(facet_ids) != len(set(facet_ids)):
+            raise PlanValidationError(
+                "PLAN_INITIAL_FACET_DUPLICATE",
+                "首轮查询必须覆盖不同证据分面",
+            )
     evidence_targets = [int(raw.get("evidence_needed") or 0) for raw in raw_steps]
     if (
         max_evidence_per_step is not None
@@ -81,6 +122,7 @@ def build_plan_snapshot(
 
     steps: list[PlanStep] = []
     prior = prior_search_keys or set()
+    admitted_attempts = [dict(item) for item in prior_attempts]
     for raw in raw_steps:
         local_id = str(raw["local_id"])
         channel = str(raw["channel"])
@@ -93,6 +135,36 @@ def build_plan_snapshot(
                 "PLAN_QUERY_ALREADY_EXECUTED",
                 "计划重复了已经执行或接受的 query+channel",
             )
+        if query_brief is not None:
+            try:
+                accepted = validate_query_proposal(
+                    query_brief,
+                    raw,
+                    run_id=run_id,
+                    iteration=iteration,
+                    initial=is_initial,
+                    allowed_channels={str(item) for item in allowed_channels},
+                    prior_attempts=admitted_attempts,
+                    open_gaps=open_gaps,
+                    require_complete_should_accounting=not is_initial,
+                )
+            except QueryGateError as exc:
+                raise PlanValidationError(exc.code, str(exc)) from exc
+        else:
+            accepted = {
+                "facet_id": str(raw.get("facet_id") or raw.get("local_id") or "legacy"),
+                "query_terms": list(raw.get("query_terms") or [query]),
+                "strategy": str(raw.get("strategy") or "initial_precise"),
+                "query": query,
+                "channel": channel,
+                "gap_id": raw.get("gap_id"),
+                "parent_attempt_id": raw.get("parent_attempt_id"),
+                "retained_constraint_ids": list(raw.get("retained_constraint_ids") or []),
+                "relaxed_should_ids": list(raw.get("relaxed_should_ids") or []),
+                "constraint_signature": "legacy",
+            }
+            accepted["attempt_id"] = stable_attempt_id(run_id, iteration, accepted)
+        admitted_attempts.append(accepted)
         dependencies: list[str] = []
         for dependency in raw.get("depends_on") or []:
             target = local_to_step.get(str(dependency))
@@ -101,10 +173,19 @@ def build_plan_snapshot(
             dependencies.append(target)
         steps.append(PlanStep(
             step_id=local_to_step[local_id],
+            attempt_id=accepted["attempt_id"],
+            facet_id=accepted["facet_id"],
             facet=" ".join(str(raw["facet"]).split()),
             objective=" ".join(str(raw["objective"]).split()),
-            query=query,
-            channel=channel,  # type: ignore[typeddict-item]
+            query_terms=list(accepted["query_terms"]),
+            strategy=accepted["strategy"],
+            query=accepted["query"],
+            channel=accepted["channel"],  # type: ignore[typeddict-item]
+            gap_id=accepted["gap_id"],
+            parent_attempt_id=accepted["parent_attempt_id"],
+            retained_constraint_ids=list(accepted["retained_constraint_ids"]),
+            relaxed_should_ids=list(accepted["relaxed_should_ids"]),
+            constraint_signature=accepted["constraint_signature"],
             depends_on=dependencies,
             priority=int(raw["priority"]),
             evidence_needed=int(raw["evidence_needed"]),
@@ -112,6 +193,19 @@ def build_plan_snapshot(
             status="todo",
             reason_code=None,
         ))
+    if query_brief is not None and is_initial:
+        should_ids = {item.constraint_id for item in query_brief.should}
+        accounted_should_ids = {
+            constraint_id
+            for step in steps
+            for constraint_id in step["retained_constraint_ids"]
+            if constraint_id in should_ids
+        }
+        if accounted_should_ids != should_ids:
+            raise PlanValidationError(
+                "QUERY_SHOULD_CONSTRAINT_UNACCOUNTED",
+                "首轮互补计划整体必须显式保留每个 QueryBrief.should",
+            )
     snapshot = PlanSnapshot(
         plan_id=plan_id,
         revision=revision,
@@ -137,6 +231,12 @@ def validate_plan_snapshot(
     if len(ids) != len(set(ids)):
         raise PlanValidationError("PLAN_DUPLICATE_STEP_ID", "计划步骤标识重复")
     known = set(ids)
+    attempt_ids = [str(step.get("attempt_id") or "") for step in steps]
+    if any(not item for item in attempt_ids) or len(attempt_ids) != len(set(attempt_ids)):
+        raise PlanValidationError(
+            "PLAN_ATTEMPT_ID_INVALID",
+            "计划步骤 attemptId 缺失或重复",
+        )
     dependencies: dict[str, list[str]] = {}
     query_keys: set[tuple[str, str]] = set()
     roots = 0
@@ -248,14 +348,28 @@ def has_todo_steps(plan: PlanSnapshot | None) -> bool:
 
 
 def requests_for_steps(steps: Iterable[PlanStep]) -> list[SearchRequest]:
-    return [
-        SearchRequest(
+    requests: list[SearchRequest] = []
+    for step in steps:
+        request = SearchRequest(
             step_id=step["step_id"],
             query=step["query"],
             channel=step["channel"],
         )
-        for step in steps
-    ]
+        for key in (
+            "attempt_id",
+            "facet_id",
+            "gap_id",
+            "parent_attempt_id",
+            "strategy",
+            "query_terms",
+            "retained_constraint_ids",
+            "relaxed_should_ids",
+            "constraint_signature",
+        ):
+            if key in step:
+                request[key] = copy.deepcopy(step[key])  # type: ignore[literal-required]
+        requests.append(request)
+    return requests
 
 
 def public_plan_steps(plan: PlanSnapshot) -> list[dict[str, Any]]:
