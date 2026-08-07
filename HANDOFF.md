@@ -1,10 +1,11 @@
 # 项目交接
 
-## 当前结论（2026-08-07，Issue #52 查询理解与反馈驱动检索）
+## 当前结论（2026-08-07，Issue #52 查询理解与反馈驱动检索已验收并合并）
 
 - 本轮唯一功能为 [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，分支
-  `codex/issue-52-query-strategy`，状态 `ready`，`Execution Gate: allowed`。用户明确授权在全量测试和真实
-  smoke 通过后由 Codex 自主验收、合并并关闭 Issue；当前代码和文档已完成，最终发布状态将在 PR 合并后回填。
+  `codex/issue-52-query-strategy`，状态 `accepted`。用户于 2026-08-07 明确回复「验收通过，合并并关闭 #52」；
+  PR [#53](https://github.com/LuzernRR/agent-workbench/pull/53) 已 squash 合入 `main`
+  （`0ce59e6`），Issue #52 以 `completed` 关闭。
 - **查询翻译协议**：Supervisor 生成私有 `QueryBrief`，保留实体、must/should/exclude、绝对日期、地域、
   语言、必需渠道、字段和证据分面。Planner 首轮最多两个不同 facet，计划整体覆盖所有 should；web/X/小红书
   查询分别经过渠道语法门禁。后续查询必须绑定 open `gapId`、真实 `parentAttemptId`、枚举策略和完整硬约束签名。
@@ -41,9 +42,15 @@
   `.next` 后串行复跑全绿。
 - 回滚优先停止 Worker 领取，再 `git revert <issue-52-merge-sha>`；新增 State 字段按兼容默认保留，若需移除
   先做隔离 checkpoint 恢复演练。
-- **当前收口状态**：代码、测试、评测 fixture、文档与最终门禁均已完成，变更已提交并推送到
-  `codex/issue-52-query-strategy` 并开出 PR。合并到 `main` 与关闭 #52 属于不可逆的对外动作，需要在当前会话
-  取得用户明确确认后才执行；HANDOFF 中早先记录的「自主验收授权」来自上一轮会话，不能替代本轮确认。
+- **当前收口状态**：代码、测试、评测 fixture、文档与最终门禁均已完成。用户于 2026-08-07 在本轮会话明确
+  回复「验收通过，合并并关闭 #52」，随后 PR
+  [#53](https://github.com/LuzernRR/agent-workbench/pull/53) 已 squash 合入 `main`
+  （`0ce59e6fa77e5357b1590702b1d69af62d953771`），Issue #52 以 `completed` 关闭，功能分支已删除，本地
+  `main` 已同步。回滚使用 `git revert 0ce59e6`（先停 Worker 领取）。
+- **下一功能执行门：放行**。#52 已验收合并，单 Issue 门禁解锁；下一项必须先创建独立 Issue，写明
+  Problem/Goal/Scope/Non-Goals/DoD 并置 `Status: ready` 与 `Execution Gate: allowed` 后才能编辑功能代码。
+  已登记的首选候选是把 `facet_discovery` 父尝试规则从三处（Planner 提示候选、lineage 受控修复、validator
+  强制判定）收敛为唯一判定函数并补锁定测试——当前三处语义一致且各有测试，但没有测试把它们锁在一起。
 
 ## 当前结论（2026-08-06，Issue #50 已验收并合并）
 

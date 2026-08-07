@@ -18,4 +18,6 @@
 - [x] A1-A12 evidence audit and code review
 - [x] Final pre-release gate re-run on the delivered tree (tests, audits, health, diff check)
 - [x] Commit and push the branch, open the PR
-- [ ] User confirmation in this session, then merge, Issue close, main sync
+- [x] User confirmation in this session, then merge, Issue close, main sync
+      (accepted 2026-08-07; PR #53 squashed into `main` as `0ce59e6`, Issue #52
+      closed as completed, feature branch deleted)

@@ -122,8 +122,9 @@ and pass the current acceptance when all criteria are proved.
 - [x] Code review covers correctness, readability, architecture, security,
   performance, dependency discipline, and rollback.
 - [x] Branch committed and pushed, PR opened, working tree clean.
-- [ ] PR merged, Issue #52 closed, and `main` synchronized (awaiting user
-  confirmation).
+- [x] PR merged, Issue #52 closed, and `main` synchronized. Accepted by the user
+  on 2026-08-07; PR #53 squashed into `main` as `0ce59e6`, Issue #52 closed as
+  completed, and the feature branch deleted.
 
 ## Task Details
 

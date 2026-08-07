@@ -2,7 +2,9 @@
 
 日期：2026-08-07
 
-状态：实现、测试与真实运行态验收证据已完成；PR、合并与关闭 Issue 在本记录提交后执行。
+状态：已验收合并。用户于 2026-08-07 明确回复「验收通过，合并并关闭 #52」，PR
+[#53](https://github.com/LuzernRR/agent-workbench/pull/53) 已 squash 合入 `main`（`0ce59e6`），Issue #52 以
+`completed` 关闭，功能分支已删除。回滚为 `git revert 0ce59e6`，执行前先停止 Worker 领取。
 
 Issue：[搜索质量：查询理解、关键词拆解与证据缺口驱动的迭代检索](https://github.com/LuzernRR/agent-workbench/issues/52)
 
@@ -186,7 +188,7 @@ npm run test:e2e
 
 并执行 Web/Search Agent 依赖审计、Compose 静态解析、健康检查、`git diff --check`，确认生产依赖无 high/critical
 漏洞和未跟踪生成物。开发依赖的新增 advisory 与 Next/PostCSS moderate 已登记到独立依赖治理项，不能在本
-Issue 使用越界 `audit fix --force`。PR 合并前重新记录最终数字。
+Issue 使用越界 `audit fix --force`。最终数字已在上文「发布前最终复跑」记录，并在合并前复核一致。
 
 ## 隐私、性能、回滚与非目标
 
@@ -201,9 +203,14 @@ Issue 使用越界 `audit fix --force`。PR 合并前重新记录最终数字。
   该测试是回归防线，运行时校验器不会自动拦住未来新增的泄漏字段。
 - 查询数量、步数、Evidence、gap 数、模型调用、工具调用和运行时间均有硬上限；无进展达到阈值即停止。
 - 不新增 Provider、reranker、向量库、登录绕过、写平台动作、OIDC/RBAC、租户配额或手工关键词编辑 UI。
-- 回滚先停止 Worker 领取，再 `git revert <issue-52-merge-sha>`；数据库新增字段按兼容默认保留，必要时另立 migration。
+- 回滚先停止 Worker 领取，再 `git revert 0ce59e6`；数据库新增字段按兼容默认保留，必要时另立 migration。
 
 ## 交接与验收结论
 
-实现代码、测试、评测 fixture、任务清单和本记录已同步；下一步只剩最终全量门禁、PR 发布、用户已授权的自主
-验收、合并、关闭 Issue #52、同步 `main` 并确认工作区干净。
+实现代码、测试、评测 fixture、任务清单和本记录已同步，全量门禁在交付树上复跑通过。用户于 2026-08-07 明确
+回复「验收通过，合并并关闭 #52」；PR #53 已 squash 合入 `main`（`0ce59e6`），Issue #52 以 `completed` 关闭，
+`codex/issue-52-query-strategy` 已删除，本地 `main` 已同步。
+
+单 Issue 门禁随之解锁。下一项功能必须先创建独立 Issue 并写明 Problem/Goal/Scope/Non-Goals/DoD，置
+`Status: ready` 与 `Execution Gate: allowed` 后才能编辑功能代码。已登记的首选候选是收敛上文「审计遗留」中
+`facet_discovery` 父尝试规则的三处实现。
