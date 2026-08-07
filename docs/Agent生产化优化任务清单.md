@@ -118,9 +118,9 @@
 
 ### P1-00 查询理解与反馈驱动检索
 
-- 状态：`accepted`（Issue [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，当前分支
-  `codex/issue-52-query-strategy`；PR 与合并信息在发布后回填）。用户已明确授权 Codex 在全量测试与
-  真实 smoke 通过后自主验收、合并并关闭本 Issue。
+- 状态：`accepted`（Issue [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，PR
+  [#53](https://github.com/LuzernRR/agent-workbench/pull/53) 已 squash 合入 `main`，merge SHA
+  `0ce59e6`，功能分支已删除）。用户于 2026-08-07 在会话中明确回复「验收通过，合并并关闭 #52」。
 - 目标：把自然语言搜索要求规范化为私有 `QueryBrief`，拆出实体、must/should/exclude、绝对日期、地域、
   渠道、字段和证据分面；让每次查询都带稳定 `attemptId`，由真实结果形成 typed `EvidenceGap`，只在有
   缺口、有预算且能产生客观增益时迭代补搜。
@@ -140,7 +140,7 @@
 - 采用：Self-Ask/Step-Back 的问题分面、Adaptive-RAG 的深度路由、IRCoT/ReAct 的检索-观察交替、CRAG 的
   证据缺口纠偏。拒绝无限 query expansion、无预算 beam/RRF 依赖、默认 Query2doc 伪文档、token 级 FLARE
   触发和训练型 Search-R1；这些方案会扩大成本、引入伪证据或超出本 Issue 的可回滚边界。
-- 回滚：停止 Worker 领取后 `git revert <issue-52-merge-sha>`；新增 state 字段按可选/稳定默认兼容旧
+- 回滚：停止 Worker 领取后 `git revert 0ce59e6`；新增 state 字段按可选/稳定默认兼容旧
   checkpoint，若必须移除字段先完成隔离恢复演练。非目标是新增 Provider、付费 reranker、向量库迁移、身份
   系统或无限自主搜索。
 
