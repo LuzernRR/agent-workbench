@@ -11,6 +11,7 @@ State 只保存小型结构化数据：意图、计划、候选、证据摘要�
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import operator
 from datetime import UTC, datetime
@@ -109,6 +110,7 @@ class SearchTrace(TypedDict):
     """安全的工具账本；不含原始 Provider body 或模型思维链。"""
 
     tool_call_id: str
+    attempt_id: NotRequired[str]
     plan_step_id: NotRequired[str]
     research_batch_id: NotRequired[str]
     research_result_id: NotRequired[str]
@@ -141,6 +143,61 @@ class SearchRequest(TypedDict):
     query: str
     channel: ChannelName
     step_id: NotRequired[str]
+    attempt_id: NotRequired[str]
+    facet_id: NotRequired[str]
+    gap_id: NotRequired[str | None]
+    parent_attempt_id: NotRequired[str | None]
+    strategy: NotRequired[str]
+    query_terms: NotRequired[list[str]]
+    retained_constraint_ids: NotRequired[list[str]]
+    relaxed_should_ids: NotRequired[list[str]]
+    constraint_signature: NotRequired[str]
+
+
+class SearchAttempt(TypedDict):
+    """Private, bounded outcome of one accepted real search."""
+
+    attempt_id: str
+    tool_call_id: str
+    plan_step_id: str | None
+    facet_id: str
+    gap_id: str | None
+    parent_attempt_id: str | None
+    strategy: str
+    query_terms: list[str]
+    query: str
+    channel: ChannelName
+    retained_constraint_ids: list[str]
+    relaxed_should_ids: list[str]
+    constraint_signature: str
+    status: Literal["completed", "failed", "unknown", "cached"]
+    result_count: int
+    evidence_count: int
+    unique_source_domains: list[str]
+    new_candidate_count: int
+    new_evidence_count: int
+    new_constraint_ids: list[str]
+    progress: bool
+    error_code: str | None
+
+
+class EvidenceGap(TypedDict):
+    """Private typed deficit reconciled from Reflector/Verifier output."""
+
+    gap_id: str
+    facet_id: str
+    kind: str
+    subject: str | None
+    description: str
+    missing_constraint_ids: list[str]
+    required_channel: ChannelName | None
+    evidence_type: str
+    priority: int
+    origin: Literal["attempt_feedback", "facet_discovery"]
+    status: Literal["open", "closed"]
+    opened_iteration: int
+    closed_iteration: int | None
+    resolved_by_attempt_id: str | None
 
 
 class ResearchTarget(TypedDict):
@@ -148,6 +205,15 @@ class ResearchTarget(TypedDict):
 
     order: int
     plan_step_id: str | None
+    attempt_id: str
+    facet_id: str
+    gap_id: str | None
+    parent_attempt_id: str | None
+    strategy: str
+    query_terms: list[str]
+    retained_constraint_ids: list[str]
+    relaxed_should_ids: list[str]
+    constraint_signature: str
     tool_call_id: str
     query: str
     channel: ChannelName
@@ -169,6 +235,15 @@ class ResearchExecution(TypedDict):
 
     order: int
     plan_step_id: str | None
+    attempt_id: str
+    facet_id: str
+    gap_id: str | None
+    parent_attempt_id: str | None
+    strategy: str
+    query_terms: list[str]
+    retained_constraint_ids: list[str]
+    relaxed_should_ids: list[str]
+    constraint_signature: str
     tool_call_id: str
     query: str
     channel: ChannelName
@@ -199,6 +274,14 @@ def _canonical_research_result(result: ResearchBranchResult) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def research_result_hash(result: ResearchBranchResult) -> str:
+    """Small persistent replay proof for a merged branch result."""
+
+    return hashlib.sha256(
+        _canonical_research_result(result).encode("utf-8")
+    ).hexdigest()
 
 
 def reduce_research_results(
@@ -241,10 +324,19 @@ class PlanStep(TypedDict):
     """一个可持久化、可追踪的原子计划步骤。"""
 
     step_id: str
+    attempt_id: str
+    facet_id: str
     facet: str
     objective: str
+    query_terms: list[str]
+    strategy: str
     query: str
     channel: ChannelName
+    gap_id: str | None
+    parent_attempt_id: str | None
+    retained_constraint_ids: list[str]
+    relaxed_should_ids: list[str]
+    constraint_signature: str
     depends_on: list[str]
     priority: int
     evidence_needed: int
@@ -293,6 +385,7 @@ class SearchState(TypedDict, total=False):
 
     # 各节点产出
     intent: dict  # 意图分类结果
+    query_brief: dict | None  # 私有查询真值；不进入 AgentEvent/日志/OTel
     need_search: bool
     plan: PlanSnapshot | None
     plan_history: list[PlanSnapshot]
@@ -312,11 +405,14 @@ class SearchState(TypedDict, total=False):
         reduce_research_results,
     ]
     merged_research_result_ids: list[str]
+    merged_research_result_hashes: dict[str, str]
     candidates: list[Candidate]  # 搜索候选
     evidence: list[Evidence]  # 已读证据
     memory_candidates: list[MemoryCandidate]  # 只供检索计划参考
     memory_recall_status: Literal["pending", "completed", "degraded", "skipped"]
     tool_traces: list[SearchTrace]
+    search_attempts: list[SearchAttempt]
+    evidence_gaps: list[EvidenceGap]
     citations: list[Citation]
 
     # 思考记录：每个节点 append 一条。用 operator.add 合并。
@@ -405,6 +501,7 @@ def initial_state(
         plan_ready=False,
         plan_error_code=None,
         fast_path=False,
+        query_brief=None,
         pending_plan_step_ids=[],
         round=0,
         sufficient=False,
@@ -420,7 +517,10 @@ def initial_state(
         pending_queries=[],
         research_results=[],
         merged_research_result_ids=[],
+        merged_research_result_hashes={},
         tool_traces=[],
+        search_attempts=[],
+        evidence_gaps=[],
         citations=[],
         model_calls=0,
         max_model_calls=resolved_calls,

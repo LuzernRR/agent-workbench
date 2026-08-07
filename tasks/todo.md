@@ -1,18 +1,21 @@
-# Issue #50 Delivery Checklist
+# Issue #52 Delivery Checklist
 
-- [x] Task 1: validated checkpoint resume contract
-- [x] Task 2: synchronous readable checkpoint boundary
-- [x] Checkpoint: Python boundary tests green
-- [x] Task 3: idempotent durable projection schema
-- [x] Task 4: fenced checkpoint batch transaction
-- [x] Task 5: Worker buffering and authoritative resume
-- [x] Task 6: bounded transactional outbox dispatcher
-- [x] Checkpoint: transaction and integration tests green
-- [x] Task 7: orphan, failure, replay, and SSE recovery proof
-- [x] Task 8: Chinese development record, queue, and HANDOFF
-- [x] Full Search Agent gate
-- [x] Full Web gate
-- [x] Compose/runtime smoke and `git diff --check`
-- [x] Present A1-A11 evidence and stop for explicit user acceptance
-- [x] Record 2026-08-06 user acceptance after fresh full verification
-- [x] Merge PR #51, confirm Issue #50 closed, and sync main handoff
+- [x] Task 1: strict QueryBrief, constraints, facets, time range, and EvidenceGap
+- [x] Task 2: web/X/Xiaohongshu adapters, hard-constraint and near-duplicate gate
+- [x] Checkpoint: 12+ deterministic query-quality cases RED then GREEN
+- [x] Task 3: Planner terms/strategy/gap/parent fields and stable attempt IDs
+- [x] Task 4: idempotent SearchAttempt result, source, coverage, and gain accounting
+- [x] Task 5: typed gap reconciliation and gap-bound follow-up admission
+- [x] Task 6: versioned Supervisor/Planner/Reflector/Verifier prompt integration
+- [x] Checkpoint: graph-level second-round gap closure and recovery proof
+- [x] Task 7: five deterministic offline query-quality metrics and thresholds
+- [x] Task 8: AgentEvent/log/OTel/private-analysis boundary proof
+- [x] Focused Search Agent tests, Ruff, and compileall
+- [x] Full Search Agent and Web verification gates
+- [x] High/critical dependency gate, Compose config, health, Playwright, diff check
+- [x] Controlled live web smoke with real feedback rewrite and citable Evidence
+- [x] HANDOFF, production checklist, README, and Chinese development record 044
+- [x] A1-A12 evidence audit and code review
+- [x] Final pre-release gate re-run on the delivered tree (tests, audits, health, diff check)
+- [x] Commit and push the branch, open the PR
+- [ ] User confirmation in this session, then merge, Issue close, main sync

@@ -4,7 +4,7 @@
 // ThreadPrimitive, MessagePrimitive, action bar, and composer composition here.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionBarPrimitive, AssistantRuntimeProvider, AuiIf, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react";
-import { ArrowDown, Check, ChevronDown, ChevronRight, Copy, FileText, Pencil, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, ChevronRight, Copy, FileText, LoaderCircle, Pencil, X } from "lucide-react";
 import type { AgentThreadState, MessageAttachment, MessageItem, RunTiming, ThinkingItem, TimelineItem } from "@/lib/agent-events/types";
 import { MarkdownRenderer } from "@/components/workbench/renderers/MarkdownRenderer";
 import { ApprovalPart } from "./ApprovalPart";
@@ -112,7 +112,7 @@ type V2ProcessPlacement = {
   readonly state: V2RunState;
 };
 
-export function Conversation({ state, composerThreadId = state.threadId, onStartRun, onStopRun, onResolveApproval, isResolvingApproval, isStarting, s01ProcessFixture = null }: { state: AgentThreadState; composerThreadId?: string | null; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onStopRun: () => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; isStarting: boolean; s01ProcessFixture?: S01ProcessFixtureCatalog | null }) {
+export function Conversation({ state, composerThreadId = state.threadId, onStartRun, onStopRun, onResolveApproval, isResolvingApproval, isStarting, pendingStartedAt = null, s01ProcessFixture = null }: { state: AgentThreadState; composerThreadId?: string | null; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onStopRun: () => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; isStarting: boolean; pendingStartedAt?: string | null; s01ProcessFixture?: S01ProcessFixtureCatalog | null }) {
   const prefillSequence = useRef(0);
   const [prefillRequest, setPrefillRequest] = useState<{ readonly id: string; readonly text: string } | null>(null);
   const timelineItems = useMemo(
@@ -190,7 +190,17 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
       </div>
     : null;
 
-  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} onSelectExample={selectExample} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} prefillRequest={prefillRequest} /></div></AssistantRuntimeProvider>;
+  const activeRun = Boolean(state.activeRunId && ["queued", "running", "waiting", "reconnecting"].includes(state.runStatus));
+  const activeTiming = state.activeRunId ? state.runTimings[state.activeRunId] : undefined;
+  const elapsedTiming = pendingStartedAt
+    ? { startedAt: pendingStartedAt }
+    : activeTiming || (state.runStartedAt ? { startedAt: state.runStartedAt } : undefined);
+  const showElapsed = isStarting || activeRun;
+  const activeRunHasUserAnchor = Boolean(state.activeRunId && timelineItems.some((item) =>
+    item.kind === "message" && item.role === "user" && item.runId === state.activeRunId
+  ));
+  const pendingElapsedTiming = showElapsed && !activeRunHasUserAnchor ? elapsedTiming : undefined;
+  return <AssistantRuntimeProvider runtime={runtime}><ConversationViewport state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={visibleProcessPlacement} previewInteraction={previewInteraction} onSelectExample={selectExample} pendingElapsedTiming={pendingElapsedTiming} pendingElapsedKey={state.activeRunId || pendingStartedAt || "pending"} />{standaloneProcess}<div className="shrink-0 bg-surface pb-3 pt-1"><AgentComposer threadId={composerThreadId} disabled={isStarting} previewInteraction={previewInteraction} prefillRequest={prefillRequest} /></div></AssistantRuntimeProvider>;
 }
 
 /**
@@ -198,13 +208,14 @@ export function Conversation({ state, composerThreadId = state.threadId, onStart
  * It deliberately does not accept an AgentThreadState, so stale/empty state
  * can never be rendered as a real conversation during the identity handoff.
  */
-export function ConversationSkeleton() {
+export function ConversationSkeleton({ pendingStartedAt = null }: { pendingStartedAt?: string | null } = {}) {
   return <div className="flex min-h-0 flex-1 flex-col bg-surface" role="status" aria-label="正在加载会话" aria-live="polite">
     <div className="min-h-0 flex-1 overflow-hidden px-4 py-5 md:px-8">
       <div className="mx-auto flex h-full max-w-[850px] flex-col justify-end gap-4" aria-hidden="true">
         <div className="h-4 w-2/5 rounded-md bg-panel" />
         <div className="h-4 w-3/5 rounded-md bg-panel" />
-        <div className="ml-auto h-12 w-2/3 rounded-2xl bg-panel" />
+        <div className="ml-auto h-12 w-2/3 rounded-2xl bg-panel" data-skeleton-user-message />
+        {pendingStartedAt ? <AssistantResponseElapsed runId="pending" timing={{ startedAt: pendingStartedAt }} active /> : null}
       </div>
     </div>
     <div className="shrink-0 bg-surface px-3 pb-3 pt-1" aria-disabled="true">
@@ -219,8 +230,16 @@ export function ConversationSkeleton() {
   </div>;
 }
 
-function ConversationViewport({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction, onSelectExample }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null; onSelectExample: (example: SearchPromptExample) => void }) {
-  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty><div className="flex min-h-[48vh] flex-col items-center justify-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2><SearchPromptExamples onSelect={onSelectExample} /></div></ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages></div>{/* The primitive treats an undefined behavior as no follow intent.  Keep an explicit intent so a user who clicks here remains at the live stream's bottom until they scroll up again. */}<ThreadPrimitive.ScrollToBottom behavior="instant" className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
+function ConversationViewport({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction, onSelectExample, pendingElapsedTiming, pendingElapsedKey }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null; onSelectExample: (example: SearchPromptExample) => void; pendingElapsedTiming?: RunTiming; pendingElapsedKey: string }) {
+  return <ThreadPrimitive.Root className="min-h-0 flex-1"><ThreadPrimitive.Viewport turnAnchor="bottom" data-testid="conversation-viewport" className="scrollbar-subtle h-full overflow-y-auto"><div className="conversation-content py-3"><ThreadPrimitive.Empty>{pendingElapsedTiming ? null : <div className="flex min-h-[48vh] flex-col items-center justify-center px-4"><h2 className="text-balance text-center text-3xl font-semibold leading-tight text-ink md:text-4xl">今天想做什么？</h2><SearchPromptExamples onSelect={onSelectExample} /></div>}</ThreadPrimitive.Empty><div className="flex flex-col" aria-live="polite"><ThreadPrimitive.Messages>{() => <RuntimeMessage state={state} displayItems={displayItems} currentActivityIds={currentActivityIds} onStartRun={onStartRun} onResolveApproval={onResolveApproval} isResolvingApproval={isResolvingApproval} processPlacement={processPlacement} previewInteraction={previewInteraction} />}</ThreadPrimitive.Messages>{pendingElapsedTiming ? <AssistantResponseElapsed key={pendingElapsedKey} runId={pendingElapsedKey} timing={pendingElapsedTiming} active /> : null}</div>{/* An instant jump reaches the current stream tail even while content is growing; the primitive keeps follow intent active until the user scrolls up again. */}<ThreadPrimitive.ScrollToBottom behavior="instant" className="sticky bottom-3 mx-auto mt-2 grid size-9 place-items-center rounded-full border border-line bg-white text-secondary shadow-popover disabled:invisible" aria-label="滚动到底部"><ArrowDown className="size-4" /></ThreadPrimitive.ScrollToBottom></div></ThreadPrimitive.Viewport></ThreadPrimitive.Root>;
+}
+
+function AssistantResponseTimelineRoot({ runId, first, timing, active, className, children }: { runId: string; first: boolean; timing?: RunTiming; active: boolean; className?: string; children: React.ReactNode }) {
+  const rootClassName = ["group", "mb-2", "max-w-none", className].filter(Boolean).join(" ");
+  return <MessagePrimitive.Root className={rootClassName} data-assistant-response-run-id={first ? runId : undefined}>
+    {first && timing ? <RunElapsed timing={timing} active={active} dataTestId={active ? "run-elapsed" : "run-elapsed-history"} /> : null}
+    {children}
+  </MessagePrimitive.Root>;
 }
 
 function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, onResolveApproval, isResolvingApproval, processPlacement, previewInteraction }: { state: AgentThreadState; displayItems: Record<string, TimelineItem>; currentActivityIds: ReadonlySet<string>; onStartRun: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; onResolveApproval: (approvalId: string, decision: "allow_once" | "always_allow" | "deny") => Promise<unknown>; isResolvingApproval: boolean; processPlacement: V2ProcessPlacement | null; previewInteraction: V2PreviewInteractionRuntime | null }) {
@@ -234,27 +253,25 @@ function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, o
     return null;
   }
   const itemIndex = state.itemOrder.indexOf(item.id);
-  const isFirstProcessActivity = !state.itemOrder.slice(0, Math.max(itemIndex, 0)).some((id) => {
-    const previous = state.items[id];
-    return previous?.runId === item.runId && (
-      previous.kind === "thinking"
-      || previous.kind === "tool"
-      || (previous.kind === "message" && previous.role === "assistant")
-    );
-  });
-  if (item.kind === "thinking") return <MessagePrimitive.Root><ThinkingResult key={`${item.id}:${item.status}`} item={item} isCurrentStep={currentActivityIds.has(item.id)} timing={isFirstProcessActivity ? state.runTimings[item.runId] : undefined} /></MessagePrimitive.Root>;
+  const itemRunStatus = state.runStatuses[item.runId] || (state.activeRunId === item.runId ? state.runStatus : undefined);
+  const itemRunActive = Boolean(itemRunStatus && ["queued", "running", "waiting", "reconnecting"].includes(itemRunStatus));
+  const visibleRunResponseItems = Object.values(displayItems).filter((candidate) =>
+    candidate.runId === item.runId
+    && !(candidate.kind === "message" && candidate.role === "user")
+    && (!processPlacement?.anchorRunId || isLegacyTimelineItemVisibleInS01Preview(candidate, processPlacement.anchorRunId))
+  );
+  const isFirstResponseItem = visibleRunResponseItems[0]?.id === item.id;
+  const runHasResponseItem = visibleRunResponseItems.length > 0;
+  const responseTiming = isFirstResponseItem ? state.runTimings[item.runId] : undefined;
+  if (item.kind === "thinking") return <AssistantResponseTimelineRoot runId={item.runId} first={isFirstResponseItem} timing={responseTiming} active={itemRunActive}><ThinkingResult key={`${item.id}:${item.status}`} item={item} isCurrentStep={currentActivityIds.has(item.id)} /></AssistantResponseTimelineRoot>;
   if (item.kind === "tool") {
     const searchItems = isSearchToolItem(item) ? selectSearchSegmentTools(state, item.id) : [];
-    return <MessagePrimitive.Root>{searchItems.length
+    return <AssistantResponseTimelineRoot runId={item.runId} first={isFirstResponseItem} timing={responseTiming} active={itemRunActive}>{searchItems.length
       ? <SearchActivitySummary items={searchItems} isCurrentStep={currentActivityIds.has(item.id)} />
-      : <ActivityRow item={item} isCurrentStep={currentActivityIds.has(item.id)} />}</MessagePrimitive.Root>;
+      : <ActivityRow item={item} isCurrentStep={currentActivityIds.has(item.id)} />}</AssistantResponseTimelineRoot>;
   }
-  if (item.kind === "approval") return <MessagePrimitive.Root className="mb-1"><ApprovalPart item={item} disabled={isResolvingApproval} onResolve={(decision) => void onResolveApproval(item.approvalId, decision)} /></MessagePrimitive.Root>;
-  if (item.kind === "status") return <MessagePrimitive.Root className={`conversation-lane mb-2 py-1 text-[14px] leading-5 ${item.tone === "danger" ? "text-danger" : item.tone === "warning" ? "text-[#8a5a00]" : "text-tertiary"}`}>{item.tone === "danger" ? getRunFailureMessage(item.label) : item.label}</MessagePrimitive.Root>;
-  const isFirstAssistant = item.role === "assistant" && !state.itemOrder.slice(0, itemIndex).some((id) => {
-    const previous = state.items[id];
-    return previous?.runId === item.runId && (previous.kind === "thinking" || (previous.kind === "message" && previous.role === "assistant"));
-  });
+  if (item.kind === "approval") return <AssistantResponseTimelineRoot runId={item.runId} first={isFirstResponseItem} timing={responseTiming} active={itemRunActive} className="mb-1"><ApprovalPart item={item} disabled={isResolvingApproval} onResolve={(decision) => void onResolveApproval(item.approvalId, decision)} /></AssistantResponseTimelineRoot>;
+  if (item.kind === "status") return <AssistantResponseTimelineRoot runId={item.runId} first={isFirstResponseItem} timing={responseTiming} active={itemRunActive}><div className={`conversation-lane mb-2 py-1 text-[14px] leading-5 ${item.tone === "danger" ? "text-danger" : item.tone === "warning" ? "text-[#8a5a00]" : "text-tertiary"}`}>{item.tone === "danger" ? getRunFailureMessage(item.label) : item.label}</div></AssistantResponseTimelineRoot>;
   const isLastAssistant = item.role === "assistant" && !state.itemOrder.slice(itemIndex + 1).some((id) => {
     const following = state.items[id];
     return following?.kind === "message" && following.role === "assistant" && following.runId === item.runId;
@@ -274,10 +291,17 @@ function RuntimeMessage({ state, displayItems, currentActivityIds, onStartRun, o
         interaction={previewInteraction}
       />
     : null;
-  return <MessageEntry item={item} timing={isFirstAssistant ? state.runTimings[item.runId] : undefined} editable={canEdit} onResubmit={onStartRun} assistantReply={isLastAssistant && runComplete ? formatAssistantReply(runMessages) : undefined} after={processAfter} />;
+  const messageEntry = <MessageEntry item={item} responseRunId={isFirstResponseItem ? item.runId : undefined} responseTiming={responseTiming} responseActive={itemRunActive} editable={canEdit} onResubmit={onStartRun} assistantReply={isLastAssistant && runComplete ? formatAssistantReply(runMessages) : undefined} />;
+  if (item.role === "assistant") return messageEntry;
+  const timing = state.runTimings[item.runId];
+  return <>
+    {messageEntry}
+    {!runHasResponseItem && timing ? <AssistantResponseElapsed key={`response-elapsed:${item.runId}`} runId={item.runId} timing={timing} active={itemRunActive} /> : null}
+    {processAfter}
+  </>;
 }
 
-function MessageEntry({ item, timing, editable, onResubmit, assistantReply, after }: { item: MessageItem; timing?: RunTiming; editable: boolean; onResubmit: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; assistantReply?: string; after?: React.ReactNode }) {
+function MessageEntry({ item, responseRunId, responseTiming, responseActive, editable, onResubmit, assistantReply }: { item: MessageItem; responseRunId?: string; responseTiming?: RunTiming; responseActive: boolean; editable: boolean; onResubmit: (message: string, replaceMessageId?: string, attachments?: string[]) => Promise<unknown>; assistantReply?: string }) {
   const isUser = item.role === "user";
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.text);
@@ -294,9 +318,9 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply, afte
     }
   };
   return (
-    <MessagePrimitive.Root className={isUser ? after ? "conversation-lane group mb-3 flex flex-col items-stretch" : "conversation-lane group mb-3 flex justify-end" : "group mb-2"} data-message-id={item.id}>
-      <div className={isUser ? `flex min-w-0 max-w-[min(850px,82%)] flex-col items-end${after ? " self-end" : ""}` : "max-w-none"}>
-        {!isUser && timing ? <RunElapsed timing={timing} /> : null}
+    <MessagePrimitive.Root className={isUser ? "conversation-lane group mb-3 flex flex-col items-stretch" : "group mb-2"} data-message-id={item.id} data-assistant-response-run-id={responseRunId}>
+      <div className={isUser ? "flex min-w-0 max-w-[min(850px,82%)] flex-col items-end self-end" : "max-w-none"}>
+        {!isUser && responseTiming ? <RunElapsed timing={responseTiming} active={responseActive} dataTestId={responseActive ? "run-elapsed" : "run-elapsed-history"} /> : null}
         <MessageAttachments attachments={item.attachments} isUser={isUser} />
         {item.text ? editing && isUser ? <div data-message-editor className="rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] text-ink"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void submitEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditing(false); } }} autoFocus rows={2} aria-label="编辑当前消息" className="min-h-12 w-full appearance-none resize-none border-0 bg-transparent p-0 leading-6 outline-none ring-0" /><div className="mt-1 flex justify-end gap-1"><button type="button" className="message-action" onClick={() => setEditing(false)} title="取消编辑" aria-label="取消编辑"><X className="size-4" /></button><button type="button" className="message-action text-ink" onClick={() => void submitEdit()} disabled={!draft.trim() || submitting} title="发送修改" aria-label="发送修改"><Check className="size-4" /></button></div></div> : <div className={isUser ? "rounded-[18px] bg-[#f3f3f3] px-4 py-2 text-[16px] font-normal leading-6 text-ink" : item.status === "streaming" ? "streaming-cursor" : ""} data-assistant-stream-length={isUser ? undefined : Array.from(item.text).length}>
           {isUser ? <MessagePrimitive.Parts /> : <MessagePrimitive.Parts components={{ Text: () => <MarkdownRenderer>{item.text}</MarkdownRenderer> }} />}
@@ -304,12 +328,11 @@ function MessageEntry({ item, timing, editable, onResubmit, assistantReply, afte
         {!isUser && item.citations?.length ? <MessageCitations citations={item.citations} /> : null}
         <MessageActions item={item} isUser={isUser} editable={editable} onEdit={() => setEditing(true)} assistantReply={assistantReply} />
       </div>
-      {after}
     </MessagePrimitive.Root>
   );
 }
 
-export function ThinkingResult({ item, timing, isCurrentStep = false }: { item: ThinkingItem; timing?: RunTiming; isCurrentStep?: boolean }) {
+export function ThinkingResult({ item, isCurrentStep = false }: { item: ThinkingItem; isCurrentStep?: boolean }) {
   const active = item.status === "streaming";
   const settledKey = active ? null : `${item.id}:${item.status}`;
   const [manuallyOpenedKey, setManuallyOpenedKey] = useState<string | null>(null);
@@ -323,7 +346,6 @@ export function ThinkingResult({ item, timing, isCurrentStep = false }: { item: 
         ? verification ? "核验未完成" : "思考未完成"
         : verification ? "核验结束" : "思考结束";
   return <div className="conversation-lane workbench-disclosure-row text-[15px] leading-6 text-secondary" data-thinking-id={item.id} data-activity-kind={verification ? "verification" : "thinking"} data-activity-status={item.status}>
-    {timing ? <RunElapsed timing={timing} /> : null}
     <button type="button" aria-expanded={expanded} onClick={() => {
       if (settledKey === null || isCurrentStep) return;
       setManuallyOpenedKey((current) => current === settledKey ? null : settledKey);
@@ -352,17 +374,32 @@ function MessageCitations({ citations }: { citations: NonNullable<MessageItem["c
   </section>;
 }
 
-function RunElapsed({ timing }: { timing: RunTiming }) {
+function AssistantResponseElapsed({ runId, timing, active }: { runId: string; timing: RunTiming; active: boolean }) {
+  // Keep a real assistant lane visible before the first model event. The
+  // elapsed indicator is its header, never a child of the user message.
+  return <section className="group mb-2 w-full max-w-none self-start" data-assistant-response-run-id={runId} data-assistant-response-placeholder="true" aria-label="助手回答">
+    <RunElapsed timing={timing} active={active} dataTestId={active ? "run-elapsed" : "run-elapsed-history"} />
+  </section>;
+}
+
+function RunElapsed({ timing, active = false, dataTestId = "run-elapsed-history" }: { timing?: RunTiming; active?: boolean; dataTestId?: string }) {
+  const [fallbackStartedAt] = useState(() => new Date().toISOString());
   const [now, setNow] = useState(() => Date.now());
+  const startedAt = timing?.startedAt || fallbackStartedAt;
   useEffect(() => {
-    if (timing.completedAt) return;
+    if (!active || timing?.completedAt) return;
+    // React documents effect cleanup as the synchronization boundary for
+    // external timers: https://react.dev/reference/react/useEffect#connecting-to-an-external-system
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [timing.completedAt]);
-  const end = timing.completedAt ? new Date(timing.completedAt).getTime() : now;
-  const seconds = Math.max(0, Math.floor((end - new Date(timing.startedAt).getTime()) / 1000));
+  }, [active, timing?.completedAt, startedAt]);
+  const end = timing?.completedAt ? new Date(timing.completedAt).getTime() : now;
+  const seconds = Math.max(0, Math.floor((end - new Date(startedAt).getTime()) / 1000));
   const minutes = Math.floor(seconds / 60);
-  return <div className="mb-1.5 text-[15px] leading-6 text-secondary"><span>已处理 <span className="tabular-nums">{minutes ? `${minutes} 分 ` : ""}{seconds % 60} 秒</span></span></div>;
+  return <div data-testid={dataTestId} role={active ? "status" : undefined} aria-live={active ? "polite" : undefined} aria-atomic={active ? "true" : undefined} className={`conversation-lane flex min-h-8 items-center gap-2 text-[14px] leading-5 text-secondary${active ? " py-1" : " mb-1.5"}`}>
+    {active ? <LoaderCircle className="size-3.5 shrink-0 animate-spin text-accent" aria-hidden="true" /> : null}
+    <span>已处理 <span className="tabular-nums">{minutes ? `${minutes} 分 ` : ""}{seconds % 60} 秒</span></span>
+  </div>;
 }
 
 function MessageActions({ item, isUser, editable, onEdit, assistantReply }: { item: MessageItem; isUser: boolean; editable: boolean; onEdit: () => void; assistantReply?: string }) {

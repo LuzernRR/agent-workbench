@@ -45,6 +45,7 @@ class CaseRun:
     events: list[dict[str, Any]]
     spans: list[Any] = field(default_factory=list)
     unknown_runs: list[tuple[str, str]] = field(default_factory=list)
+    final_state: dict[str, Any] | None = None
 
     @property
     def terminal(self) -> dict[str, Any] | None:
@@ -112,6 +113,7 @@ async def run_case(
         events=events,
         spans=list(sink.spans) if sink is not None else [],
         unknown_runs=list(ledger.unknown_runs),
+        final_state=(dict(case.final_state) if case.final_state is not None else None),
     )
 
 

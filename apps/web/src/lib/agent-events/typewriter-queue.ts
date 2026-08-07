@@ -96,12 +96,16 @@ export function createRenderQueue(options: RenderQueueOptions) {
   const queue: QueueItem[] = [];
   let frame = 0;
   let disposed = false;
+  let firstGraphemePending = true;
 
   const drain = () => {
     frame = 0;
     if (disposed) return;
 
-    let budget = frameBudget(queue);
+    // Paint one real grapheme first. This creates a visible first frame even
+    // when an upstream provider delivers a complete paragraph in one SSE
+    // packet; backlog acceleration starts only after that anchor is on screen.
+    let budget = firstGraphemePending ? 1 : frameBudget(queue);
     while (queue.length > 0) {
       const current = queue[0];
       if (!current.graphemes) {
@@ -114,6 +118,7 @@ export function createRenderQueue(options: RenderQueueOptions) {
         continue;
       }
       options.apply(graphemeEvent(current));
+      firstGraphemePending = false;
       budget -= 1;
       if (current.offset >= current.graphemes.length) queue.shift();
       // 每帧最多吐 budget 个字，之后让出以便 React 绘制；控制事件仍排在
@@ -153,6 +158,7 @@ export function createRenderQueue(options: RenderQueueOptions) {
       }
       while (current.offset < current.graphemes.length) {
         options.apply(graphemeEvent(current));
+        firstGraphemePending = false;
       }
       queue.shift();
     }

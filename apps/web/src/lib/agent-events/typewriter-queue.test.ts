@@ -168,6 +168,28 @@ describe("createRenderQueue", () => {
     expect(drawn).toBeGreaterThanOrEqual(Math.ceil(3000 / 24));
   });
 
+  it("paints one real grapheme on the first frame before accelerating backlog", () => {
+    const frames = manualFrames();
+    const snapshots: string[] = [];
+    let visible = "";
+    const queue = createRenderQueue({
+      apply: (value) => {
+        visible += String(value.payload.delta || "");
+        snapshots.push(visible);
+      },
+      requestFrame: frames.requestFrame,
+      cancelFrame: frames.cancelFrame
+    });
+
+    queue.enqueue(event(1, "text.delta", { messageId: "m1", delta: "流式内容".repeat(80) }));
+    expect(frames.flush(1)).toBe(1);
+    expect(snapshots).toEqual(["流"]);
+
+    frames.flush();
+    expect(visible).toBe("流式内容".repeat(80));
+    expect(snapshots.length).toBe(Array.from(visible).length);
+  });
+
   it("does not let a terminal event accelerate or overtake answer text", () => {
     const frames = manualFrames();
     let chars = 0;

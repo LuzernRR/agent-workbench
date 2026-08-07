@@ -1,0 +1,498 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "caseId": "zh_exact_version_date_location_exclude_fields",
+      "brief": {},
+      "proposal": {},
+      "expected": {
+        "language": "zh-CN",
+        "exact_entity": "2.1",
+        "location": "上海",
+        "exclude_id": "exclude_beta",
+        "requested_fields": ["版本", "发布日期"],
+        "channel": "web"
+      }
+    },
+    {
+      "caseId": "english_version_and_absolute_date",
+      "brief": {
+        "objective": "Find Node.js 22 LTS release details in London",
+        "entities": ["Node.js", "22 LTS"],
+        "must": [
+          {"constraint_id": "node", "text": "Node.js", "terms": ["Node.js"]},
+          {"constraint_id": "v22", "text": "22 LTS", "terms": ["22 LTS"]}
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": {
+          "start_date": "2024-01-01",
+          "end_date": "2025-12-31",
+          "source_text": "2024 through 2025",
+          "resolved_on": "2026-08-06"
+        },
+        "locations": ["London"],
+        "languages": ["en"],
+        "requested_fields": ["release date", "support window"],
+        "evidence_facets": [
+          {
+            "facet_id": "release",
+            "description": "Official release and support window",
+            "evidence_type": "official",
+            "required_fields": ["release date", "support window"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"Node.js\" \"22 LTS\" London 2024 2025 after:2024-01-01 before:2025-12-31",
+        "facet_id": "release",
+        "query_terms": ["Node.js", "22 LTS", "London", "2024", "2025"]
+      },
+      "expected": {
+        "language": "en",
+        "exact_entity": "22 LTS",
+        "location": "London",
+        "requested_fields": ["release date", "support window"],
+        "channel": "web"
+      }
+    },
+    {
+      "caseId": "x_account_topic_relative_time",
+      "brief": {
+        "objective": "核验 OpenAI 在 X 上的 agents 公告",
+        "entities": ["OpenAI", "agents"],
+        "must": [
+          {
+            "constraint_id": "account",
+            "text": "OpenAI",
+            "terms": ["openai", "from:openai"]
+          }
+        ],
+        "should": [],
+        "exclude": [
+          {
+            "constraint_id": "exclude_repost",
+            "text": "排除转发",
+            "terms": ["is:retweet"]
+          }
+        ],
+        "time_range": {
+          "start_date": "2026-07-01",
+          "end_date": "2026-08-06",
+          "source_text": "最近一个月",
+          "resolved_on": "2026-08-06"
+        },
+        "locations": [],
+        "languages": ["en"],
+        "required_channels": ["x"],
+        "requested_fields": ["发布日期", "原帖"],
+        "evidence_facets": [
+          {
+            "facet_id": "announcement",
+            "description": "账号原帖公告",
+            "evidence_type": "primary",
+            "required_fields": ["发布日期", "原帖"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "from:openai agents since:2026-07-01 until:2026-08-06 -is:retweet",
+        "channel": "x",
+        "facet_id": "announcement",
+        "query_terms": ["from:openai", "agents"]
+      },
+      "expected": {
+        "language": "en",
+        "relative_time": ["最近一个月", "2026-07-01", "2026-08-06"],
+        "exclude_id": "exclude_repost",
+        "channel": "x"
+      }
+    },
+    {
+      "caseId": "xiaohongshu_compact_natural_terms",
+      "brief": {
+        "objective": "查找小红书上海油敏皮夏季通勤防晒体验",
+        "entities": ["油敏皮", "防晒"],
+        "must": [
+          {"constraint_id": "skin", "text": "油敏皮", "terms": ["油敏皮"]}
+        ],
+        "should": [],
+        "exclude": [
+          {"constraint_id": "exclude_ad", "text": "排除广告", "terms": ["广告"]}
+        ],
+        "time_range": null,
+        "locations": ["上海"],
+        "languages": ["zh-CN"],
+        "required_channels": ["xiaohongshu"],
+        "requested_fields": ["肤质", "通勤时长"],
+        "evidence_facets": [
+          {
+            "facet_id": "experience",
+            "description": "真实使用体验",
+            "evidence_type": "social",
+            "required_fields": ["肤质", "通勤时长"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "油敏皮 上海 夏季通勤 防晒 体验",
+        "channel": "xiaohongshu",
+        "facet_id": "experience",
+        "query_terms": ["油敏皮", "上海", "夏季通勤", "防晒"]
+      },
+      "expected": {
+        "language": "zh-CN",
+        "location": "上海",
+        "exclude_id": "exclude_ad",
+        "channel": "xiaohongshu"
+      }
+    },
+    {
+      "caseId": "web_relative_date_resolves_to_absolute_range",
+      "brief": {
+        "objective": "Find Aurora announcements from the last 30 days",
+        "entities": ["Aurora"],
+        "must": [
+          {"constraint_id": "aurora", "text": "Aurora", "terms": ["Aurora"]}
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": {
+          "start_date": "2026-07-08",
+          "end_date": "2026-08-06",
+          "source_text": "last 30 days",
+          "resolved_on": "2026-08-06"
+        },
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["published date"],
+        "evidence_facets": [
+          {
+            "facet_id": "timeline",
+            "description": "Dated announcements",
+            "evidence_type": "primary",
+            "required_fields": ["published date"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "Aurora announcements after:2026-07-08 before:2026-08-06",
+        "facet_id": "timeline",
+        "query_terms": ["Aurora", "announcements"]
+      },
+      "expected": {
+        "relative_time": ["last 30 days", "2026-07-08", "2026-08-06"],
+        "channel": "web"
+      }
+    },
+    {
+      "caseId": "multi_entity_comparison",
+      "brief": {
+        "objective": "Compare LangGraph 1.2.9 and AutoGen 0.7.4",
+        "entities": ["LangGraph 1.2.9", "AutoGen 0.7.4"],
+        "must": [
+          {
+            "constraint_id": "langgraph",
+            "text": "LangGraph 1.2.9",
+            "terms": ["LangGraph 1.2.9"]
+          },
+          {
+            "constraint_id": "autogen",
+            "text": "AutoGen 0.7.4",
+            "terms": ["AutoGen 0.7.4"]
+          }
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["license", "latest release"],
+        "evidence_facets": [
+          {
+            "facet_id": "comparison",
+            "description": "Versioned framework comparison",
+            "evidence_type": "comparison",
+            "required_fields": ["license", "latest release"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"LangGraph 1.2.9\" \"AutoGen 0.7.4\" license release",
+        "facet_id": "comparison",
+        "query_terms": ["LangGraph 1.2.9", "AutoGen 0.7.4", "license"]
+      },
+      "expected": {
+        "entities": ["LangGraph 1.2.9", "AutoGen 0.7.4"],
+        "channel": "web"
+      }
+    },
+    {
+      "caseId": "regional_requirement",
+      "brief": {
+        "objective": "查找深圳公开 AI meetup 日程",
+        "entities": ["AI meetup"],
+        "must": [
+          {"constraint_id": "meetup", "text": "AI meetup", "terms": ["AI meetup"]}
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": ["深圳"],
+        "languages": ["zh-CN"],
+        "requested_fields": ["日期", "场地"],
+        "evidence_facets": [
+          {
+            "facet_id": "events",
+            "description": "公开活动日程",
+            "evidence_type": "primary",
+            "required_fields": ["日期", "场地"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"AI meetup\" 深圳 日期 场地",
+        "facet_id": "events",
+        "query_terms": ["AI meetup", "深圳", "日期", "场地"]
+      },
+      "expected": {"location": "深圳", "channel": "web"}
+    },
+    {
+      "caseId": "exclude_requirement",
+      "brief": {
+        "objective": "Find a new business laptop and exclude refurbished stock",
+        "entities": ["business laptop"],
+        "must": [
+          {
+            "constraint_id": "laptop",
+            "text": "business laptop",
+            "terms": ["business laptop"]
+          }
+        ],
+        "should": [],
+        "exclude": [
+          {
+            "constraint_id": "exclude_refurbished",
+            "text": "exclude refurbished",
+            "terms": ["refurbished"]
+          }
+        ],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["price"],
+        "evidence_facets": [
+          {
+            "facet_id": "offers",
+            "description": "New product offers",
+            "evidence_type": "field",
+            "required_fields": ["price"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"business laptop\" new price -refurbished",
+        "facet_id": "offers",
+        "query_terms": ["business laptop", "new", "price"]
+      },
+      "expected": {"exclude_id": "exclude_refurbished", "channel": "web"}
+    },
+    {
+      "caseId": "requested_fields_are_preserved",
+      "brief": {
+        "objective": "Collect PostgreSQL 18 release support and license fields",
+        "entities": ["PostgreSQL 18"],
+        "must": [
+          {
+            "constraint_id": "postgres",
+            "text": "PostgreSQL 18",
+            "terms": ["PostgreSQL 18"]
+          }
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["release date", "support end", "license"],
+        "evidence_facets": [
+          {
+            "facet_id": "release_fields",
+            "description": "Release support metadata",
+            "evidence_type": "official",
+            "required_fields": ["release date", "support end", "license"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"PostgreSQL 18\" release date support license",
+        "facet_id": "release_fields",
+        "query_terms": ["PostgreSQL 18", "release date", "support", "license"]
+      },
+      "expected": {
+        "requested_fields": ["release date", "support end", "license"],
+        "channel": "web"
+      }
+    },
+    {
+      "caseId": "web_authoritative_domain_syntax",
+      "brief": {
+        "objective": "Find Python 3.14 official release notes",
+        "entities": ["Python 3.14"],
+        "must": [
+          {"constraint_id": "python", "text": "Python 3.14", "terms": ["Python 3.14"]}
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["release notes"],
+        "evidence_facets": [
+          {
+            "facet_id": "official_notes",
+            "description": "Official release notes",
+            "evidence_type": "official",
+            "required_fields": ["release notes"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "site:python.org \"Python 3.14\" release notes",
+        "facet_id": "official_notes",
+        "query_terms": ["Python 3.14", "release notes", "python.org"]
+      },
+      "expected": {"channel": "web"}
+    },
+    {
+      "caseId": "zero_results_opens_terminology_follow_up",
+      "brief": {
+        "objective": "Find Aurora 3.2 official release",
+        "entities": ["Aurora 3.2"],
+        "must": [
+          {
+            "constraint_id": "aurora",
+            "text": "Aurora 3.2",
+            "terms": ["Aurora 3.2", "Aurora", "3.2"]
+          }
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["release"],
+        "evidence_facets": [
+          {
+            "facet_id": "availability",
+            "description": "Release availability",
+            "evidence_type": "official",
+            "required_fields": ["release"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"Aurora 3.2\" official release",
+        "facet_id": "availability",
+        "query_terms": ["Aurora 3.2", "official release"]
+      },
+      "expected": {
+        "channel": "web",
+        "gap": {
+          "kind": "no_results",
+          "strategy": "terminology_variant",
+          "query": "Aurora \"version 3.2\" changelog release",
+          "query_terms": ["Aurora", "version 3.2", "changelog"],
+          "close": false
+        }
+      }
+    },
+    {
+      "caseId": "conflicting_sources_trigger_resolution_query",
+      "brief": {
+        "objective": "Resolve conflicting Benchmark Z performance claims",
+        "entities": ["Benchmark Z"],
+        "must": [
+          {
+            "constraint_id": "benchmark",
+            "text": "Benchmark Z",
+            "terms": ["Benchmark Z"]
+          }
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["methodology", "score"],
+        "evidence_facets": [
+          {
+            "facet_id": "methodology",
+            "description": "Primary benchmark methodology",
+            "evidence_type": "primary",
+            "required_fields": ["methodology", "score"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"Benchmark Z\" 2026 performance score",
+        "facet_id": "methodology",
+        "query_terms": ["Benchmark Z", "2026", "performance"]
+      },
+      "expected": {
+        "channel": "web",
+        "gap": {
+          "kind": "conflicting_sources",
+          "strategy": "conflict_resolution",
+          "query": "\"Benchmark Z\" methodology primary dataset score",
+          "query_terms": ["Benchmark Z", "methodology", "primary dataset"],
+          "close": false
+        }
+      }
+    },
+    {
+      "caseId": "progressing_follow_up_closes_missing_field_gap",
+      "brief": {
+        "objective": "Find Framework Q support window",
+        "entities": ["Framework Q"],
+        "must": [
+          {
+            "constraint_id": "framework",
+            "text": "Framework Q",
+            "terms": ["Framework Q"]
+          }
+        ],
+        "should": [],
+        "exclude": [],
+        "time_range": null,
+        "locations": [],
+        "languages": ["en"],
+        "requested_fields": ["support window"],
+        "evidence_facets": [
+          {
+            "facet_id": "support",
+            "description": "Official support window",
+            "evidence_type": "official",
+            "required_fields": ["support window"]
+          }
+        ]
+      },
+      "proposal": {
+        "query": "\"Framework Q\" official release",
+        "facet_id": "support",
+        "query_terms": ["Framework Q", "official release"]
+      },
+      "expected": {
+        "requested_fields": ["support window"],
+        "channel": "web",
+        "gap": {
+          "kind": "missing_field",
+          "strategy": "field_completion",
+          "query": "\"Framework Q\" support window lifecycle policy",
+          "query_terms": ["Framework Q", "support window", "lifecycle policy"],
+          "close": true
+        }
+      }
+    }
+  ]
+}

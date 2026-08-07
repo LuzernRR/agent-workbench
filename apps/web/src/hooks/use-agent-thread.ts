@@ -34,6 +34,7 @@ export function useAgentThread(threadId: string | null) {
   const snapshotQuery = useQuery({ queryKey: ["thread", threadId], queryFn: () => workbenchApi.thread(threadId!), enabled: Boolean(threadId), staleTime: 15_000 });
   const [state, setState] = useState<AgentThreadState | null>(null);
   const [connection, setConnection] = useState<StreamConnection>("idle");
+  const [pendingStartedAt, setPendingStartedAt] = useState<string | null>(null);
   const lastSeqRef = useRef(0);
   const identityRef = useRef<string | null>(threadId);
   const selectedToolIds = useWorkbenchUiStore((store) => store.selectedToolIds);
@@ -53,6 +54,7 @@ export function useAgentThread(threadId: string | null) {
     // cannot feed events into the newly selected thread during the fetch gap.
     setState(null);
     setConnection("idle");
+    setPendingStartedAt(null);
   }, [threadId]);
 
   useEffect(() => {
@@ -91,6 +93,7 @@ export function useAgentThread(threadId: string | null) {
     const applyEvent = (event: AgentEvent) => {
       setState((current) => (current ? reduceAgentEvent(current, event) : current));
       if (event.type === "run.completed" || event.type === "run.failed" || event.type === "run.cancelled") {
+        setPendingStartedAt(null);
         setConnection("idle");
       }
     };
@@ -163,6 +166,8 @@ export function useAgentThread(threadId: string | null) {
       return workbenchApi.startRun(threadId, { message, agentId, modelId, reasoningEffort, toolIds: selectedToolIds, permissionMode, attachmentIds: attachments || pendingAttachments.map((attachment) => attachment.id), replaceMessageId: replaceMessageId || null });
     },
     onMutate: ({ message, replaceMessageId }) => {
+      const startedAt = new Date().toISOString();
+      setPendingStartedAt(startedAt);
       let previous: AgentThreadState | null = null;
       if (replaceMessageId) {
         setState((current) => {
@@ -170,18 +175,28 @@ export function useAgentThread(threadId: string | null) {
           return current ? truncateThreadStateForEdit(current, replaceMessageId, message) : current;
         });
       }
-      return { previous };
+      return { previous, startedAt };
     },
     onError: (_error, _variables, context) => {
+      setPendingStartedAt((current) => current === context?.startedAt ? null : current);
       if (context?.previous) setState(context.previous);
     },
-    onSuccess: ({ runId }) => {
-      setState((current) => current?.threadId === threadId ? {
-        ...current,
-        activeRunId: runId,
-        runStatus: "running",
-        runStatuses: { ...current.runStatuses, [runId]: "running" }
-      } : current);
+    onSuccess: ({ runId }, _variables, context) => {
+      const startedAt = context?.startedAt || new Date().toISOString();
+      setState((current) => {
+        if (current?.threadId !== threadId) return current;
+        const existingTiming = current.runTimings[runId];
+        const timing = existingTiming || { startedAt };
+        return {
+          ...current,
+          activeRunId: runId,
+          runStatus: "running",
+          runStartedAt: timing.startedAt,
+          runStatuses: { ...current.runStatuses, [runId]: "running" },
+          runTimings: { ...current.runTimings, [runId]: timing }
+        };
+      });
+      setPendingStartedAt((current) => current === startedAt ? null : current);
       clearPendingAttachments();
       void (async () => {
         const refreshed = await workbenchApi.thread(threadId!);
@@ -231,6 +246,7 @@ export function useAgentThread(threadId: string | null) {
     resolveApproval: approvalMutation.mutateAsync,
     isResolvingApproval: approvalMutation.isPending,
     refresh,
-    isStarting: startMutation.isPending
-  }), [approvalMutation.error, approvalMutation.isPending, approvalMutation.mutateAsync, connection, refresh, snapshotQuery.data, snapshotQuery.error, snapshotQuery.isFetching, snapshotQuery.isLoading, startMutation, threadId, visibleState, stopMutation.error, stopMutation.mutateAsync]);
+    isStarting: startMutation.isPending,
+    pendingStartedAt
+  }), [approvalMutation.error, approvalMutation.isPending, approvalMutation.mutateAsync, connection, pendingStartedAt, refresh, snapshotQuery.data, snapshotQuery.error, snapshotQuery.isFetching, snapshotQuery.isLoading, startMutation, threadId, visibleState, stopMutation.error, stopMutation.mutateAsync]);
 }

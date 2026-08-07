@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +17,12 @@ from app.events.runtime import begin_event_scope, end_event_scope
 from app.graph import nodes
 from app.graph.build import _novel_public_summary, build_graph
 from app.graph.context import RunContext
+from app.graph.query_strategy import (
+    QueryBrief,
+    constraint_signature,
+    hard_constraint_ids,
+    validate_query_proposal,
+)
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     STRUCTURED_ANSWER_MAX_CHARS,
@@ -33,6 +39,8 @@ from app.llm.contracts import (
     StructuredOutputError,
     WriterStreamError,
 )
+from app.observability.span import Span
+from app.observability.trace import RunTracer
 from app.persistence.tool_ledger import (
     LedgerDecision,
     ToolLedgerSettlement,
@@ -53,6 +61,321 @@ from app.tools.search_tool import (
     SearchExecutionResult,
 )
 from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
+
+
+def _checkpoint_query_brief() -> QueryBrief:
+    return QueryBrief.model_validate({
+        "version": 1,
+        "objective": "核验 Product 的官方 API",
+        "complexity": "multi_faceted",
+        "entities": ["Product"],
+        "must": [{
+            "constraint_id": "product",
+            "text": "Product",
+            "terms": ["Product"],
+        }],
+        "should": [],
+        "exclude": [],
+        "time_range": None,
+        "locations": [],
+        "languages": ["en"],
+        "required_channels": ["web"],
+        "requested_fields": ["API"],
+        "evidence_facets": [{
+            "facet_id": "official",
+            "description": "官方 API",
+            "evidence_type": "official",
+            "required_fields": ["API"],
+        }],
+    })
+
+
+def _pending_collision_fixture(
+    collision: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    payload = _checkpoint_query_brief().model_dump(mode="json")
+    payload["evidence_facets"] = [
+        *payload["evidence_facets"],
+        {
+            "facet_id": "comparison",
+            "description": "API 对比信息",
+            "evidence_type": "comparison",
+            "required_fields": ["API"],
+        },
+    ]
+    query_brief = QueryBrief.model_validate(payload)
+    state = initial_state("Product API")
+    state["run_id"] = f"run_pending_collision_{collision}"
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = query_brief.model_dump(mode="json")
+    state["round"] = 1
+    retained = list(hard_constraint_ids(query_brief))
+
+    def accepted(facet_id: str, query: str, step_id: str) -> dict[str, Any]:
+        value = validate_query_proposal(
+            query_brief,
+            {
+                "query": query,
+                "channel": "web",
+                "facet_id": facet_id,
+                "query_terms": query.split(),
+                "strategy": "initial_precise",
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "retained_constraint_ids": retained,
+                "relaxed_should_ids": [],
+            },
+            run_id=state["run_id"],
+            iteration=1,
+            initial=True,
+            allowed_channels={"web"},
+            prior_attempts=[],
+            open_gaps=[],
+        )
+        return {**value, "step_id": step_id}
+
+    first = accepted("official", "Product API", "step_official")
+    if collision == "attempt_id":
+        second = {**first, "step_id": "step_comparison"}
+    elif collision == "step_id":
+        second = accepted("comparison", "Product SDK", first["step_id"])
+    else:
+        second = accepted("comparison", first["query"], "step_comparison")
+    return state, first, second
+
+
+def test_legacy_checkpoint_request_is_migrated_with_current_query_contract() -> None:
+    state = initial_state("legacy checkpoint")
+    state["intent"] = {"channels": ["web"]}
+    state["round"] = 1
+
+    first = nodes._normalized_search_request(
+        state,
+        {"query": "legacy query", "channel": "web"},
+    )
+    second = nodes._normalized_search_request(
+        state,
+        {"query": "legacy query", "channel": "web"},
+    )
+
+    assert first == second
+    assert first is not None
+    assert first["constraint_signature"] == constraint_signature(
+        nodes._state_query_brief(state)
+    )
+    assert first["retained_constraint_ids"] == list(
+        hard_constraint_ids(nodes._state_query_brief(state))
+    )
+    assert first["attempt_id"].startswith("attempt_")
+
+
+def test_only_historical_legacy_search_can_recover_without_intent_channel() -> None:
+    payload = _checkpoint_query_brief().model_dump(mode="json")
+    payload["required_channels"] = []
+    state = initial_state("Product API")
+    state["intent"] = {"channels": []}
+    state["query_brief"] = QueryBrief.model_validate(payload).model_dump(mode="json")
+    legacy = {"query": "Product API", "channel": "web"}
+
+    assert nodes._normalized_search_request(state, legacy, historical=True) is not None
+
+    state["pending_searches"] = [legacy]  # type: ignore[list-item]
+    assert nodes._pending_searches(state) == []
+
+
+def test_structured_pending_request_cannot_self_authorize_its_channel() -> None:
+    payload = _checkpoint_query_brief().model_dump(mode="json")
+    payload["required_channels"] = []
+    query_brief = QueryBrief.model_validate(payload)
+    state = initial_state("Product API")
+    state["run_id"] = "run_pending_channel_scope"
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = query_brief.model_dump(mode="json")
+    state["round"] = 1
+    request = validate_query_proposal(
+        query_brief,
+        {
+            "query": "Product API",
+            "channel": "x",
+            "facet_id": "official",
+            "query_terms": ["Product", "API"],
+            "strategy": "initial_precise",
+            "gap_id": None,
+            "parent_attempt_id": None,
+            "retained_constraint_ids": list(hard_constraint_ids(query_brief)),
+            "relaxed_should_ids": [],
+        },
+        run_id=state["run_id"],
+        iteration=1,
+        initial=True,
+        allowed_channels={"x"},
+        prior_attempts=[],
+        open_gaps=[],
+    )
+
+    assert nodes._normalized_search_request(state, request) is None
+    state["pending_searches"] = [request]  # type: ignore[list-item]
+    assert nodes._pending_searches(state) == []
+    assert nodes.build_research_work_items(state) == []
+
+
+@pytest.mark.parametrize("collision", ["attempt_id", "step_id", "query_channel"])
+def test_pending_search_batch_fails_closed_on_duplicate_identity(collision: str) -> None:
+    state, first, second = _pending_collision_fixture(collision)
+    state["pending_searches"] = [first, second]  # type: ignore[list-item]
+
+    assert nodes._pending_searches(state) == []
+    assert nodes.build_research_work_items(state) == []
+
+
+def test_malformed_query_strategy_checkpoint_is_rejected_before_tool_compilation() -> None:
+    query_brief = _checkpoint_query_brief()
+    state = initial_state("Product API")
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = query_brief.model_dump(mode="json")
+    state["round"] = 1
+
+    request = {
+        "query": "Product API",
+        "channel": "web",
+        "attempt_id": "attempt_forged",
+        "facet_id": "official",
+        "gap_id": None,
+        "parent_attempt_id": None,
+        "strategy": "initial_precise",
+        "query_terms": ["Product", "API"],
+        "retained_constraint_ids": [],
+        "relaxed_should_ids": [],
+        "constraint_signature": "signature_forged",
+    }
+
+    assert nodes._normalized_search_request(state, request) is None
+
+    state["pending_searches"] = [request]  # type: ignore[list-item]
+    state["pending_queries"] = [request["query"]]
+    state["query_channels"] = {request["query"]: "web"}
+    assert nodes._pending_searches(state) == []
+    assert nodes.build_research_work_items(state) == []
+
+
+def test_historical_search_preserves_its_original_attempt_id_across_rounds() -> None:
+    query_brief = _checkpoint_query_brief()
+    state = initial_state("Product API")
+    state["run_id"] = "run_historical_attempt"
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = query_brief.model_dump(mode="json")
+    accepted = validate_query_proposal(
+        query_brief,
+        {
+            "query": "Product API",
+            "channel": "web",
+            "facet_id": "official",
+            "query_terms": ["Product", "API"],
+            "strategy": "initial_precise",
+            "gap_id": None,
+            "parent_attempt_id": None,
+            "retained_constraint_ids": list(hard_constraint_ids(query_brief)),
+            "relaxed_should_ids": [],
+        },
+        run_id=state["run_id"],
+        iteration=1,
+        initial=True,
+        allowed_channels={"web"},
+        prior_attempts=[],
+        open_gaps=[],
+    )
+    original_attempt_id = accepted["attempt_id"]
+    state["searches"] = [accepted]  # type: ignore[list-item]
+
+    state["round"] = 2
+    round_two = nodes._state_searches(state)
+    state["searches"] = round_two
+    state["round"] = 3
+    round_three = nodes._state_searches(state)
+
+    assert round_two[0]["attempt_id"] == original_attempt_id
+    assert round_three[0]["attempt_id"] == original_attempt_id
+
+
+def test_closed_gap_keeps_historical_search_but_rejects_pending_re_admission() -> None:
+    query_brief = _checkpoint_query_brief()
+    state = initial_state("Product API")
+    state["run_id"] = "run_closed_historical_gap"
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = query_brief.model_dump(mode="json")
+    retained = list(hard_constraint_ids(query_brief))
+    parent = validate_query_proposal(
+        query_brief,
+        {
+            "query": "Product API",
+            "channel": "web",
+            "facet_id": "official",
+            "query_terms": ["Product", "API"],
+            "strategy": "initial_precise",
+            "gap_id": None,
+            "parent_attempt_id": None,
+            "retained_constraint_ids": retained,
+            "relaxed_should_ids": [],
+        },
+        run_id=state["run_id"],
+        iteration=1,
+        initial=True,
+        allowed_channels={"web"},
+        prior_attempts=[],
+        open_gaps=[],
+    )
+    open_gap = {
+        "gap_id": "gap_product_api",
+        "facet_id": "official",
+        "kind": "no_results",
+        "subject": None,
+        "description": "没有候选",
+        "missing_constraint_ids": [],
+        "required_channel": "web",
+        "evidence_type": "official",
+        "priority": 100,
+        "origin": "attempt_feedback",
+        "status": "open",
+        "opened_iteration": 1,
+        "closed_iteration": None,
+        "resolved_by_attempt_id": None,
+    }
+    follow_up = validate_query_proposal(
+        query_brief,
+        {
+            "query": "Product developer reference",
+            "channel": "web",
+            "facet_id": "official",
+            "query_terms": ["Product", "developer", "reference"],
+            "strategy": "terminology_variant",
+            "gap_id": open_gap["gap_id"],
+            "parent_attempt_id": parent["attempt_id"],
+            "retained_constraint_ids": retained,
+            "relaxed_should_ids": [],
+        },
+        run_id=state["run_id"],
+        iteration=2,
+        initial=False,
+        allowed_channels={"web"},
+        prior_attempts=[parent],
+        open_gaps=[open_gap],
+    )
+    closed_gap = {
+        **open_gap,
+        "status": "closed",
+        "closed_iteration": 2,
+        "resolved_by_attempt_id": follow_up["attempt_id"],
+    }
+    state["round"] = 2
+    state["search_attempts"] = [parent, follow_up]  # type: ignore[list-item]
+    state["evidence_gaps"] = [closed_gap]  # type: ignore[list-item]
+    state["searches"] = [follow_up]  # type: ignore[list-item]
+    state["pending_searches"] = [follow_up]  # type: ignore[list-item]
+
+    historical = nodes._state_searches(state)
+
+    assert historical[0]["attempt_id"] == follow_up["attempt_id"]
+    assert nodes._pending_searches(state) == []
 
 
 def test_remaining_run_seconds_preserves_finalization_budget_signal() -> None:
@@ -239,6 +562,40 @@ def test_public_summary_requires_model_step_and_recorded_model_call() -> None:
         True,
         [],
     ) == "真实模型生成的公开计划"
+
+
+def test_web_channel_fallback_requires_an_open_typed_platform_gap() -> None:
+    gap = {
+        "gap_id": "gap_platform",
+        "kind": "missing_channel",
+        "required_channel": "xiaohongshu",
+        "status": "open",
+    }
+
+    assert nodes._gap_authorizes_search_channel(
+        gap,
+        channel="web",
+        strategy="channel_fallback",
+        historical=False,
+    )
+    assert not nodes._gap_authorizes_search_channel(
+        gap,
+        channel="web",
+        strategy="facet_expansion",
+        historical=False,
+    )
+    assert not nodes._gap_authorizes_search_channel(
+        {**gap, "kind": "missing_claim"},
+        channel="web",
+        strategy="channel_fallback",
+        historical=False,
+    )
+    assert not nodes._gap_authorizes_search_channel(
+        {**gap, "status": "closed"},
+        channel="web",
+        strategy="channel_fallback",
+        historical=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -499,7 +856,9 @@ class Scenario:
     supervisor_use_history: bool = False
     supervisor_evidence_depth: str = "multi_source"
     supervisor_fast_search: dict[str, str] | None = None
+    query_brief_override: dict[str, Any] | None = None
     plans: list[list[str]] = field(default_factory=lambda: [["query one"]])
+    query_terms_by_query: dict[str, list[str]] = field(default_factory=dict)
     reflects: list[dict[str, Any]] = field(
         default_factory=lambda: [{
             "sufficient": True,
@@ -527,6 +886,7 @@ class Scenario:
     depends_on_by_query: dict[str, list[str]] = field(default_factory=dict)
     evidence_needed_by_query: dict[str, int] = field(default_factory=dict)
     evidence_needed_by_plan: list[int] = field(default_factory=list)
+    retained_constraint_ids_by_plan: list[list[str]] = field(default_factory=list)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
     # 网络重试与格式修复分别记账：attempts 是真实 Provider 尝试数，
@@ -551,6 +911,106 @@ class Scenario:
     verification_updates: list[ChannelVerificationUpdate] = field(default_factory=list)
     verification_request_keys: list[str] = field(default_factory=list)
     interaction_wait_ms: int = 0
+
+    def query_brief(self) -> dict[str, Any] | None:
+        if not self.need_search:
+            return None
+        if self.query_brief_override is not None:
+            return copy.deepcopy(self.query_brief_override)
+        return {
+            "version": 1,
+            "objective": "检索测试问题所需的可核验证据",
+            "complexity": "multi_faceted",
+            "entities": [],
+            "must": [],
+            "should": [],
+            "exclude": [],
+            "time_range": None,
+            "locations": [],
+            "languages": [],
+            # Test scenarios exercise channel routing separately. An empty list
+            # means the user did not impose an additional hard platform boundary.
+            "required_channels": [],
+            "requested_fields": [],
+            "evidence_facets": [
+                {
+                    "facet_id": f"facet_{index}",
+                    "description": f"测试证据面 {index}",
+                    "evidence_type": "independent",
+                    "required_fields": ["可核验证据"],
+                }
+                for index in range(1, 5)
+            ],
+        }
+
+    @staticmethod
+    def _latest_private_ref(messages: list[Any], key: str) -> str | None:
+        text = str(messages[-1].content)
+        patterns = (
+            rf'"{key}"\s*:\s*"([A-Za-z0-9_.:-]+)"',
+            rf'"{key.removesuffix("_id")}Id"\s*:\s*"([A-Za-z0-9_.:-]+)"',
+        )
+        matches: list[str] = []
+        for pattern in patterns:
+            matches.extend(re.findall(pattern, text))
+        return matches[-1] if matches else None
+
+    @staticmethod
+    def _hard_constraint_ids(messages: list[Any]) -> list[str]:
+        text = str(messages[-1].content)
+        match = re.search(
+            r"hardConstraintIds[^:：]*[:：](\[[^\r\n]*\])",
+            text,
+        )
+        if match is None:
+            return []
+        value = json.loads(match.group(1))
+        return [str(item) for item in value]
+
+    @staticmethod
+    def _gap_kind(messages: list[Any], missing: str) -> str:
+        text = str(messages[-1].content)
+        result_counts = [int(item) for item in re.findall(r'"resultCount"\s*:\s*(\d+)', text)]
+        evidence_counts = [int(item) for item in re.findall(r'"evidenceCount"\s*:\s*(\d+)', text)]
+        if result_counts and result_counts[-1] == 0:
+            return "no_results"
+        if evidence_counts and evidence_counts[-1] == 0:
+            return "no_readable_evidence"
+        if "冲突" in missing:
+            return "conflicting_sources"
+        if "字段" in missing:
+            return "missing_field"
+        if "渠道" in missing or "小红书" in missing or "X " in missing:
+            return "missing_channel"
+        return "missing_claim"
+
+    @staticmethod
+    def _strategy_for_gap(kind: str) -> str:
+        return {
+            "no_results": "terminology_variant",
+            "no_readable_evidence": "channel_fallback",
+            "conflicting_sources": "conflict_resolution",
+            "missing_channel": "channel_fallback",
+            "missing_field": "field_completion",
+            "missing_constraint": "facet_expansion",
+            "missing_claim": "facet_expansion",
+        }[kind]
+
+    def _subject_for_gap(self, facet_id: str, kind: str) -> str | None:
+        if kind not in {"missing_claim", "conflicting_sources", "missing_field"}:
+            return None
+        brief = self.query_brief() or {}
+        facet = next(
+            (
+                item for item in brief.get("evidence_facets", [])
+                if item.get("facet_id") == facet_id
+            ),
+            None,
+        )
+        fields = list((facet or {}).get("required_fields") or [])
+        if not fields:
+            fields = list(brief.get("requested_fields") or [])
+        return str(fields[0]) if fields else None
 
     async def generate_structured(
         self,
@@ -596,18 +1056,81 @@ class Scenario:
                 use_history=self.supervisor_use_history,
                 evidence_depth=self.supervisor_evidence_depth,
                 fast_search=self.supervisor_fast_search,
+                query_brief=self.query_brief(),
                 summary="已判断是否需要联网",
             )
         elif role == "planner":
             queries = self.plans[min(index, len(self.plans) - 1)]
+            brief = self.query_brief() or {}
+            facet_ids = [
+                str(item["facet_id"])
+                for item in brief.get("evidence_facets", [])
+            ]
+            planner_text = str(messages[-1].content)
+            is_follow_up = "当前 open gaps" in planner_text
+            gap_id = (
+                self._latest_private_ref(messages, "gap_id")
+                if is_follow_up
+                else None
+            )
+            parent_attempt_id = None
+            if is_follow_up:
+                parent_attempt_id = self._latest_private_ref(
+                    messages,
+                    "parent_attempt_id",
+                ) or self._latest_private_ref(messages, "attempt_id")
+            if gap_id and parent_attempt_id:
+                typed_kinds = re.findall(
+                    r'"kind"\s*:\s*"([a-z_]+)"',
+                    planner_text,
+                )
+                gap_kind = (
+                    typed_kinds[-1]
+                    if typed_kinds
+                    else self._gap_kind(messages, planner_text)
+                )
+                strategy = self._strategy_for_gap(gap_kind)
+            elif gap_id:
+                # Keep the double structurally valid so the production
+                # lineage gate proves rejection before tool execution.
+                parent_attempt_id = "attempt_missing_parent"
+                typed_kinds = re.findall(
+                    r'"kind"\s*:\s*"([a-z_]+)"',
+                    planner_text,
+                )
+                strategy = self._strategy_for_gap(
+                    typed_kinds[-1] if typed_kinds else "missing_claim"
+                )
+            else:
+                strategy = "initial_precise"
             result = PlanResult(
                 steps=[
                     {
                         "local_id": f"search_{position + 1}",
+                        "facet_id": (
+                            self._latest_private_ref(messages, "facet_id")
+                            if is_follow_up
+                            else facet_ids[position]
+                        ),
                         "facet": f"证据面 {position + 1}",
                         "objective": f"检索 {query}",
+                        "query_terms": self.query_terms_by_query.get(
+                            query,
+                            [query],
+                        ),
+                        "strategy": strategy,
                         "query": query,
                         "channel": self.channels_by_query.get(query, "web"),
+                        "gap_id": gap_id,
+                        "parent_attempt_id": parent_attempt_id,
+                        "retained_constraint_ids": self._hard_constraint_ids(
+                            messages
+                        ) if not self.retained_constraint_ids_by_plan else list(
+                            self.retained_constraint_ids_by_plan[
+                                min(index, len(self.retained_constraint_ids_by_plan) - 1)
+                            ]
+                        ),
+                        "relaxed_should_ids": [],
                         "depends_on": self.depends_on_by_query.get(query, []),
                         "priority": 100 - position,
                         "evidence_needed": (
@@ -628,19 +1151,92 @@ class Scenario:
             data.setdefault("missing", "")
             data.setdefault("extra_searches", [])
             data.setdefault("source_presentations", [])
+            sufficient = bool(data.get("sufficient"))
+            parent_attempt_id = self._latest_private_ref(messages, "attempt_id")
+            facet_id = self._latest_private_ref(messages, "facet_id") or "facet_1"
+            gap_kind = self._gap_kind(messages, str(data.get("missing") or ""))
+            local_gap_id = f"reflect_gap_{index + 1}"
+            data["evidence_gaps"] = (
+                []
+                if sufficient
+                else [{
+                    "gap_id": local_gap_id,
+                    "facet_id": facet_id,
+                    "kind": gap_kind,
+                    "subject": self._subject_for_gap(facet_id, gap_kind),
+                    "description": str(data.get("missing") or "证据仍不充分"),
+                    "missing_constraint_ids": [],
+                    "required_channel": (
+                        data["extra_searches"][0].get("channel")
+                        if data["extra_searches"]
+                        else None
+                    ),
+                    "evidence_type": "independent",
+                    "priority": 100,
+                }]
+            )
+            if not sufficient:
+                strategy = self._strategy_for_gap(gap_kind)
+                data["extra_searches"] = [
+                    {
+                        **item,
+                        "facet_id": facet_id,
+                        "query_terms": [item["query"]],
+                        "strategy": strategy,
+                        "gap_id": local_gap_id,
+                        "parent_attempt_id": parent_attempt_id or "attempt_legacy_parent",
+                        "retained_constraint_ids": [],
+                        "relaxed_should_ids": [],
+                    }
+                    for item in data["extra_searches"]
+                ]
             for presentation in data.get("source_presentations", []):
                 presentation.setdefault("include_in_details", True)
             result = ReflectResult(summary="已评估证据覆盖", **data)
         elif role == "verifier":
             action = self.verifier_actions[min(index, len(self.verifier_actions) - 1)]
+            parent_attempt_id = self._latest_private_ref(messages, "attempt_id")
+            facet_id = self._latest_private_ref(messages, "facet_id") or "facet_1"
+            gap_id = f"verify_gap_{index + 1}"
             result = VerifyResult(
                 passed=action == "pass",
                 action=action,
-                issue="需要改写" if action == "rewrite" else "",
+                issue=(
+                    "需要改写"
+                    if action == "rewrite"
+                    else "回答仍缺少可核验证据"
+                    if action == "research_more"
+                    else ""
+                ),
                 extra_searches=(
                     [{
                         "query": "query two",
                         "channel": self.channels_by_query.get("query two", "web"),
+                        "facet_id": facet_id,
+                        "query_terms": ["query two"],
+                        "strategy": "facet_expansion",
+                        "gap_id": gap_id,
+                        "parent_attempt_id": parent_attempt_id or "attempt_legacy_parent",
+                        "retained_constraint_ids": [],
+                        "relaxed_should_ids": [],
+                    }]
+                    if action == "research_more"
+                    else []
+                ),
+                evidence_gaps=(
+                    [{
+                        "gap_id": gap_id,
+                        "facet_id": facet_id,
+                        "kind": "missing_claim",
+                        "subject": self._subject_for_gap(facet_id, "missing_claim"),
+                        "description": "回答仍缺少可核验证据",
+                        "missing_constraint_ids": [],
+                        "required_channel": self.channels_by_query.get(
+                            "query two",
+                            "web",
+                        ),
+                        "evidence_type": "independent",
+                        "priority": 100,
                     }]
                     if action == "research_more"
                     else []
@@ -1038,7 +1634,9 @@ async def test_single_fact_fast_path_downgrades_to_full_plan_on_research_more(
     scenario = _fast_scenario()
     # 首次核验判定证据不足，第二次通过。
     scenario.verifier_actions = ["research_more", "pass"]
-    scenario.plans = [["2026年8月3日 星期几"], ["query two"]]
+    # 回退后的 Planner 必须直接采用新的证据缺口查询；快路径原 query
+    # 已执行，重复它应由独立的计划门禁拒绝。
+    scenario.plans = [["query two"]]
     scenario.evidence_by_query = {
         "2026年8月3日 星期几": True,
         "query two": True,
@@ -1070,6 +1668,7 @@ def test_realtime_fact_intent_keeps_fast_path_without_freshness_override() -> No
         use_history=False,
         evidence_depth="single_fact",
         fast_search={"query": "2026年8月3日 星期几", "channel": "web"},
+        query_brief=Scenario().query_brief(),
         summary="确认今天的日期。",
     ).model_dump()
 
@@ -1091,6 +1690,7 @@ def test_freshness_override_alone_cannot_reach_fast_path() -> None:
         use_history=False,
         evidence_depth="multi_source",
         fast_search=None,
+        query_brief=None,
         summary="直接回答。",
     ).model_dump()
     intent["need_search"] = True
@@ -1147,6 +1747,8 @@ async def test_current_direct_intent_bypasses_search_with_stale_research_history
     assert scenario.writer_stream_calls == 1
     assert output["intent"]["channels"] == []
     assert output["plan"] is None
+    assert output["verification_passed"] is False
+    assert output["verification_action"] == ""
     classify_step = next(
         step for step in output["steps"] if step["node"] == "classify_intent"
     )
@@ -1823,6 +2425,21 @@ async def test_reflector_replans_then_searches_new_query(monkeypatch: pytest.Mon
     assert output["queries"] == ["query one", "query two"]
     assert scenario.tool_executions == ["query one", "query two"]
     assert output["response_status"] == "completed"
+    first, second = output["search_attempts"]
+    gap = output["evidence_gaps"][0]
+    assert first["gap_id"] is None
+    assert second["gap_id"] == gap["gap_id"]
+    assert second["parent_attempt_id"] == first["attempt_id"]
+    assert second["strategy"] == "channel_fallback"
+    assert second["new_evidence_count"] == 1
+    assert second["progress"] is True
+    assert gap["status"] == "closed"
+    assert gap["resolved_by_attempt_id"] == second["attempt_id"]
+    second_planner_prompt = str(
+        scenario.structured_messages["planner"][1][-1].content
+    )
+    assert first["attempt_id"] in second_planner_prompt
+    assert gap["gap_id"] in second_planner_prompt
 
 
 @pytest.mark.asyncio
@@ -1938,7 +2555,10 @@ async def test_complementary_channel_does_not_replace_required_channel_evidence(
         {"query": "query one", "channel": "web"},
         {"query": "query x", "channel": "x"},
     ]
-    assert output["searches"] == scenario.tool_execution_searches
+    assert [
+        {"query": item["query"], "channel": item["channel"]}
+        for item in output["searches"]
+    ] == scenario.tool_execution_searches
 
 
 @pytest.mark.asyncio
@@ -2053,6 +2673,60 @@ async def test_planner_repairs_evidence_targets_above_per_call_capacity(
     repair_input = scenario.structured_messages["planner"][1][-1].content
     assert "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY" in repair_input
     assert repair_input.rstrip().endswith('"需要搜索的测试问题"')
+
+
+@pytest.mark.asyncio
+async def test_planner_repairs_query_constraint_metadata_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        query_brief_override={
+            "version": 1,
+            "objective": "核验产品 API",
+            "complexity": "multi_faceted",
+            "entities": ["Product"],
+            "must": [{
+                "constraint_id": "product",
+                "text": "Product",
+                "terms": ["Product"],
+            }],
+            "should": [{
+                "constraint_id": "api",
+                "text": "API",
+                "terms": ["API"],
+            }],
+            "exclude": [],
+            "time_range": None,
+            "locations": [],
+            "languages": ["en"],
+            "required_channels": [],
+            "requested_fields": ["API"],
+            "evidence_facets": [{
+                "facet_id": "facet_1",
+                "description": "官方 API",
+                "evidence_type": "official",
+                "required_fields": ["API"],
+            }],
+        },
+        plans=[["Product"], ["Product API"]],
+        retained_constraint_ids_by_plan=[
+            ["product"],
+            ["product"],
+        ],
+        evidence_by_query={"Product API": True},
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+
+    # 缺失 should 元数据由服务端按 QueryBrief 词项做确定性加法补全，
+    # 不需要再调用模型重生成计划。
+    assert scenario.structured_calls["planner"] == 1
+    assert scenario.tool_executions == ["Product API"]
+    assert output["search_attempts"][0]["retained_constraint_ids"] == [
+        "product",
+        "api",
+    ]
+    assert not [event for event in events if event["type"] == "plan.rejected"]
 
 
 @pytest.mark.asyncio
@@ -2189,6 +2863,7 @@ async def test_no_progress_has_stable_partial_stop_reason(
 ) -> None:
     scenario = Scenario(
         reflects=[{"sufficient": False, "missing": "unsupported", "extra_searches": []}],
+        result_count_by_query={"query one": 0},
         evidence_by_query={"query one": False},
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_rounds=3)
@@ -2274,6 +2949,108 @@ async def test_private_reasoning_never_crosses_state_checkpoint_or_public_events
     assert "reasoning_content" not in serialized
     # reasoning_effort 是请求侧配置，属于公开面；这里只守思维链正文本身。
     assert "chain_of_thought" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_private_query_strategy_stays_out_of_events_spans_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinels = {
+        "PRIVATE_BRIEF_OBJECTIVE_52",
+        "PRIVATE_REQUEST_FIELD_52",
+        "PRIVATE_FACET_DESCRIPTION_52",
+        "PRIVATE_QUERY_TERM_52_A",
+        "PRIVATE_QUERY_TERM_52_B",
+        "PRIVATE_GAP_DESCRIPTION_52",
+        "facet_private_52",
+    }
+    query_brief = {
+        "version": 1,
+        "objective": "PRIVATE_BRIEF_OBJECTIVE_52",
+        "complexity": "multi_faceted",
+        "entities": [],
+        "must": [],
+        "should": [],
+        "exclude": [],
+        "time_range": None,
+        "locations": [],
+        "languages": ["zh-CN"],
+        "required_channels": [],
+        "requested_fields": ["PRIVATE_REQUEST_FIELD_52"],
+        "evidence_facets": [{
+            "facet_id": "facet_private_52",
+            "description": "PRIVATE_FACET_DESCRIPTION_52",
+            "evidence_type": "independent",
+            "required_fields": ["PRIVATE_REQUEST_FIELD_52"],
+        }],
+    }
+    scenario = Scenario(
+        query_brief_override=query_brief,
+        plans=[["query one"], ["query two"]],
+        query_terms_by_query={
+            "query one": ["PRIVATE_QUERY_TERM_52_A"],
+            "query two": ["PRIVATE_QUERY_TERM_52_B"],
+        },
+        reflects=[
+            {
+                "sufficient": False,
+                "missing": "PRIVATE_GAP_DESCRIPTION_52",
+                "extra_searches": [{"query": "query two", "channel": "web"}],
+                "source_presentations": [],
+            },
+            {
+                "sufficient": True,
+                "missing": "",
+                "extra_searches": [],
+                "source_presentations": [{
+                    "url": "https://example.com/2",
+                    "text": "第二轮正文补足了所需事实。",
+                }],
+            },
+        ],
+        evidence_by_query={"query one": False, "query two": True},
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario)
+    assert output["response_status"] == "completed"
+    assert output["verification_passed"] is True
+    private_ids = {
+        output["search_attempts"][0]["attempt_id"],
+        output["search_attempts"][0]["constraint_signature"],
+        output["evidence_gaps"][0]["gap_id"],
+    }
+    private_values = sentinels | private_ids
+    encoded_state = json.dumps(output, ensure_ascii=False)
+    assert private_values <= {
+        value for value in private_values if value in encoded_state
+    }
+
+    class RecordingSpanSink:
+        def __init__(self) -> None:
+            self.spans: list[Span] = []
+
+        def emit(self, span: Span) -> None:
+            self.spans.append(span)
+
+        def flush(self) -> None:
+            pass
+
+    sink = RecordingSpanSink()
+    tracer = RunTracer(output["run_id"], sink=sink)
+    for event in events:
+        tracer.observe(event)
+    tracer.finish()
+
+    public_surfaces = json.dumps(
+        {
+            "events": events,
+            "spans": [asdict(span) for span in sink.spans],
+            "logs": caplog.text,
+        },
+        ensure_ascii=False,
+    )
+    assert all(value not in public_surfaces for value in private_values)
 
 
 def _drain_emitter(chunks: list[str], evidence: list[Any], max_chars: int) -> tuple[str, str]:

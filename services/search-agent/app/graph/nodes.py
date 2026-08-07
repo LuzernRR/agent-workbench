@@ -9,6 +9,7 @@ import re
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
@@ -30,6 +31,18 @@ from app.graph.plan import (
     settle_running_steps,
     start_ready_steps,
 )
+from app.graph.query_strategy import (
+    EvidenceGapProposal,
+    QueryBrief,
+    QueryGateError,
+    complete_query_constraint_terms,
+    constraint_signature,
+    hard_constraint_ids,
+    normalize_query_brief,
+    reconcile_evidence_gaps,
+    stable_attempt_id,
+    validate_query_proposal,
+)
 from app.graph.schemas import (
     ANSWER_MAX_CHARS,
     STRUCTURED_ANSWER_MAX_CHARS,
@@ -50,10 +63,12 @@ from app.graph.state import (
     ResearchResultConflictError,
     ResearchTarget,
     ResearchWorkItem,
+    SearchAttempt,
     SearchRequest,
     SearchState,
     SearchTrace,
     ThinkStep,
+    research_result_hash,
 )
 from app.llm.contracts import (
     ModelMessage,
@@ -65,7 +80,7 @@ from app.llm.contracts import (
     add_usage,
 )
 from app.llm.ports import ModelGateway
-from app.persistence.tool_ledger import ToolLedgerSettlement
+from app.persistence.tool_ledger import ToolLedgerSettlement, payload_hash
 from app.prompts.agents import (
     DEGRADED_WRITER_PROMPT,
     DIRECT_WRITER_PROMPT,
@@ -820,42 +835,283 @@ def _search_key(query: str, channel: str) -> tuple[str, str]:
     return _normalize_query(query).casefold(), channel
 
 
+_SEARCH_METADATA_FIELDS = (
+    "attempt_id",
+    "facet_id",
+    "gap_id",
+    "parent_attempt_id",
+    "strategy",
+    "query_terms",
+    "retained_constraint_ids",
+    "relaxed_should_ids",
+    "constraint_signature",
+)
+
+
+def _state_date(state: SearchState) -> str:
+    started_at = str(state.get("started_at") or "")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", started_at[:10]):
+        return started_at[:10]
+    return datetime.now(UTC).date().isoformat()
+
+
+def _state_query_brief(state: SearchState) -> QueryBrief:
+    """Load the private brief strictly, with a conservative legacy upgrade."""
+
+    intent = state.get("intent") or {}
+    raw = state.get("query_brief")
+    if raw is None:
+        raw = intent.get("query_brief")
+    return normalize_query_brief(
+        raw,
+        question=state.get("question") or "",
+        channels=intent.get("channels") or ["web"],
+        current_date=_state_date(state),
+    )
+
+
+_CHANNEL_FALLBACK_GAP_KINDS = frozenset({"missing_channel", "no_readable_evidence"})
+
+
+def _gap_authorizes_search_channel(
+    gap: dict[str, Any],
+    *,
+    channel: str,
+    strategy: str,
+    historical: bool,
+) -> bool:
+    if not historical and gap.get("status") != "open":
+        return False
+    required_channel = str(gap.get("required_channel") or "")
+    if required_channel == channel:
+        return True
+    return (
+        gap.get("status") == "open" or historical
+    ) and (
+        strategy == "channel_fallback"
+        and channel == "web"
+        and required_channel in {"x", "xiaohongshu"}
+        and str(gap.get("kind") or "") in _CHANNEL_FALLBACK_GAP_KINDS
+    )
+
+
+def _normalized_search_request(
+    state: SearchState,
+    item: dict[str, Any],
+    *,
+    historical: bool = False,
+) -> SearchRequest | None:
+    query = _normalize_query(str(item.get("query") or ""))
+    channel = str(item.get("channel") or "")
+    if not query or channel not in _RESEARCH_CHANNELS:
+        return None
+    try:
+        brief = _state_query_brief(state)
+        configured_channels = {
+            str(value)
+            for value in (state.get("intent") or {}).get("channels") or []
+            if str(value) in _RESEARCH_CHANNELS
+        }
+        step_id = str(item.get("step_id") or "")
+        has_strategy_metadata = any(
+            key in item for key in _SEARCH_METADATA_FIELDS
+        )
+        gap_id = str(item.get("gap_id") or "")
+        strategy = str(item.get("strategy") or "")
+        gap_authorized = any(
+            str(gap.get("gap_id") or "") == gap_id
+            and _gap_authorizes_search_channel(
+                dict(gap),
+                channel=channel,
+                strategy=strategy,
+                historical=historical,
+            )
+            for gap in state.get("evidence_gaps") or []
+        )
+        historical_attempt_authorized = historical and any(
+            str(attempt.get("attempt_id") or "")
+            == str(item.get("attempt_id") or "")
+            and str(attempt.get("channel") or "") == channel
+            for attempt in state.get("search_attempts") or []
+        )
+        allowed_channels = set(configured_channels)
+        if gap_authorized or historical_attempt_authorized:
+            allowed_channels.add(channel)
+        if historical and not configured_channels and not has_strategy_metadata:
+            # A checkpoint from before intent channel persistence may recover an
+            # already executed query. Pending or v1 requests never self-authorize.
+            allowed_channels = {channel}
+
+        if not has_strategy_metadata:
+            # Pre-query-strategy checkpoints contain only query+channel.  Rebuild
+            # metadata from the current private brief; never copy user prose into
+            # private fields or preserve the old sentinel ``legacy`` signature.
+            terms = [
+                token.strip('"')
+                for token in query.split()
+                if token.strip('"')
+            ][:12] or ["legacy_search"]
+            proposal: dict[str, Any] = {
+                "facet_id": brief.evidence_facets[0].facet_id,
+                "query_terms": terms,
+                "strategy": "initial_precise",
+                "query": query,
+                "channel": channel,
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "retained_constraint_ids": [],
+                "relaxed_should_ids": [],
+            }
+            proposal = complete_query_constraint_terms(
+                brief,
+                proposal,
+                complete_all_should=True,
+            )
+            proposal["query_terms"] = [
+                token.strip('"')
+                for token in str(proposal["query"]).split()
+                if token.strip('"')
+            ][:12] or ["legacy_search"]
+            accepted = validate_query_proposal(
+                brief,
+                proposal,
+                run_id=state.get("run_id") or "legacy-run",
+                iteration=max(1, int(state.get("round") or 1)),
+                initial=True,
+                allowed_channels=allowed_channels,
+                prior_attempts=[],
+                open_gaps=[],
+            )
+        else:
+            # A partially populated or forged v1 request is unsafe.  Require the
+            # complete protocol shape and validate it against current state before
+            # allowing it to become a real tool target.
+            if any(key not in item for key in _SEARCH_METADATA_FIELDS):
+                return None
+            if str(item.get("constraint_signature") or "") != constraint_signature(brief):
+                return None
+            raw = {key: item.get(key) for key in _SEARCH_METADATA_FIELDS}
+            raw.update({"query": query, "channel": channel})
+            supplied_attempt_id = str(item.get("attempt_id") or "")
+            all_attempts = [
+                dict(attempt) for attempt in state.get("search_attempts") or []
+            ]
+            accepted_index = next(
+                (
+                    index
+                    for index, attempt in enumerate(all_attempts)
+                    if str(attempt.get("attempt_id") or "") == supplied_attempt_id
+                ),
+                None,
+            )
+            if not historical and accepted_index is not None:
+                return None
+            prior_attempts = (
+                all_attempts[:accepted_index]
+                if historical and accepted_index is not None
+                else [
+                    attempt
+                    for attempt in all_attempts
+                    if str(attempt.get("attempt_id") or "") != supplied_attempt_id
+                ]
+            )
+            validation_gaps = [
+                dict(gap) for gap in state.get("evidence_gaps") or []
+            ]
+            if historical and strategy != "initial_precise":
+                for gap in validation_gaps:
+                    if str(gap.get("gap_id") or "") == str(raw.get("gap_id") or ""):
+                        gap["status"] = "open"
+                        gap["closed_iteration"] = None
+                        gap["resolved_by_attempt_id"] = None
+                        break
+            accepted = validate_query_proposal(
+                brief,
+                raw,
+                run_id=state.get("run_id") or "legacy-run",
+                iteration=max(1, int(state.get("round") or 1)),
+                initial=strategy == "initial_precise",
+                allowed_channels=allowed_channels,
+                prior_attempts=prior_attempts,
+                open_gaps=validation_gaps,
+            )
+            # Checkpoints can hold either the current or next planned round.
+            # Validate that bounded lineage, then preserve the supplied ID so a
+            # later round can never rewrite an already accepted identity.
+            max_iteration = min(
+                32,
+                max(1, int(state.get("round") or 1) + 1),
+            )
+            valid_attempt_ids = {
+                stable_attempt_id(
+                    state.get("run_id") or "legacy-run",
+                    iteration,
+                    accepted,
+                )
+                for iteration in range(1, max_iteration + 1)
+            }
+            if supplied_attempt_id not in valid_attempt_ids:
+                return None
+            accepted["attempt_id"] = supplied_attempt_id
+
+        request = SearchRequest(
+            query=accepted["query"],
+            channel=accepted["channel"],
+        )
+        if step_id:
+            request["step_id"] = step_id
+        for key in _SEARCH_METADATA_FIELDS:
+            request[key] = accepted[key]  # type: ignore[literal-required]
+        return request
+    except (QueryGateError, TypeError, ValueError, KeyError):
+        return None
+
+
 def _state_searches(state: SearchState) -> list[SearchRequest]:
     searches: list[SearchRequest] = []
+    structured_present = "searches" in state
     for item in state.get("searches") or []:
-        query = _normalize_query(str(item.get("query") or ""))
-        channel = str(item.get("channel") or "")
-        if query and channel in _RESEARCH_CHANNELS:
-            request = SearchRequest(query=query, channel=channel)
-            step_id = str(item.get("step_id") or "")
-            if step_id:
-                request["step_id"] = step_id
+        request = _normalized_search_request(state, item, historical=True)
+        if request is not None:
             searches.append(request)
-    if searches:
+    if structured_present:
         return searches
 
-    # 兼容升级前的内存 checkpoint；新运行始终使用 searches。
+    # Only a checkpoint that predates the structured key may use the legacy
+    # projection. Present-but-empty or invalid structured state is authoritative.
     query_channels = state.get("query_channels") or {}
     for query_value in state.get("queries") or []:
         query = _normalize_query(query_value)
         channel = str(query_channels.get(query) or "")
         if query and channel in _RESEARCH_CHANNELS:
-            searches.append(SearchRequest(query=query, channel=channel))
+            request = _normalized_search_request(
+                state,
+                {"query": query, "channel": channel},
+                historical=True,
+            )
+            if request is not None:
+                searches.append(request)
     return searches
 
 
 def _pending_searches(state: SearchState) -> list[SearchRequest]:
     pending: list[SearchRequest] = []
+    structured_present = "pending_searches" in state
     for item in state.get("pending_searches") or []:
-        query = _normalize_query(str(item.get("query") or ""))
-        channel = str(item.get("channel") or "")
-        if query and channel in _RESEARCH_CHANNELS:
-            request = SearchRequest(query=query, channel=channel)
-            step_id = str(item.get("step_id") or "")
-            if step_id:
-                request["step_id"] = step_id
+        request = _normalized_search_request(state, item)
+        if request is not None:
             pending.append(request)
-    if pending:
+    if structured_present:
+        attempt_ids = [str(item.get("attempt_id") or "") for item in pending]
+        step_ids = [str(item.get("step_id") or "") for item in pending]
+        query_channels = [_search_key(item["query"], item["channel"]) for item in pending]
+        if (
+            len(attempt_ids) != len(set(attempt_ids))
+            or len([value for value in step_ids if value])
+            != len({value for value in step_ids if value})
+            or len(query_channels) != len(set(query_channels))
+        ):
+            return []
         return pending
 
     query_channels = state.get("query_channels") or {}
@@ -863,11 +1119,55 @@ def _pending_searches(state: SearchState) -> list[SearchRequest]:
         query = _normalize_query(query_value)
         channel = str(query_channels.get(query) or "")
         if query and channel in _RESEARCH_CHANNELS:
-            pending.append(SearchRequest(query=query, channel=channel))
+            request = _normalized_search_request(
+                state,
+                {"query": query, "channel": channel},
+            )
+            if request is not None and _search_key(
+                request["query"], request["channel"]
+            ) not in {
+                _search_key(item["query"], item["channel"]) for item in pending
+            }:
+                pending.append(request)
     return pending
 
 
-def _tool_feedback(state: SearchState) -> list[dict[str, Any]]:
+def _tool_feedback(
+    state: SearchState,
+    *,
+    include_limitation: bool = True,
+) -> list[dict[str, Any]]:
+    attempts = list(state.get("search_attempts") or [])[-12:]
+    if attempts:
+        traces = {
+            item["tool_call_id"]: item for item in state.get("tool_traces") or []
+        }
+        feedback: list[dict[str, Any]] = []
+        for item in attempts:
+            value = {
+                "attemptId": item["attempt_id"],
+                "facetId": item["facet_id"],
+                "gapId": item.get("gap_id"),
+                "parentAttemptId": item.get("parent_attempt_id"),
+                "strategy": item["strategy"],
+                "query": item["query"],
+                "channel": item["channel"],
+                "status": item["status"],
+                "resultCount": item["result_count"],
+                "evidenceCount": item["evidence_count"],
+                "uniqueSourceDomains": item["unique_source_domains"],
+                "newCandidateCount": item["new_candidate_count"],
+                "newEvidenceCount": item["new_evidence_count"],
+                "newConstraintIds": item["new_constraint_ids"],
+                "progress": item["progress"],
+                "errorCode": item.get("error_code"),
+            }
+            if include_limitation:
+                value["limitation"] = (
+                    traces.get(item["tool_call_id"], {}).get("limitation")
+                )
+            feedback.append(value)
+        return feedback
     return [
         {
             "query": item["query"],
@@ -924,22 +1224,92 @@ def _verification_channel_coverage(
     return required, covered, missing
 
 
+def _fallback_gap_proposals(
+    state: SearchState,
+    *,
+    kind: str,
+    description: str,
+    required_channels: list[str] | None = None,
+) -> list[EvidenceGapProposal]:
+    brief = _state_query_brief(state)
+    facets = brief.evidence_facets
+    channels = required_channels or [None]
+    return [
+        EvidenceGapProposal(
+            gap_id=f"runtime_gap_{index + 1}",
+            facet_id=facets[min(index, len(facets) - 1)].facet_id,
+            kind=kind,  # type: ignore[arg-type]
+            subject=(
+                facets[min(index, len(facets) - 1)].required_fields[0]
+                if kind in {"missing_claim", "conflicting_sources", "missing_field"}
+                else None
+            ),
+            description=description,
+            missing_constraint_ids=[],
+            required_channel=channel,  # type: ignore[arg-type]
+            evidence_type=facets[min(index, len(facets) - 1)].evidence_type,
+            priority=100 - index,
+        )
+        for index, channel in enumerate(channels[:8])
+    ]
+
+
 def _fresh_follow_up_searches(
-    state: SearchState, items: list[Any]
-) -> list[SearchRequest]:
-    seen = {
-        _search_key(item["query"], item["channel"]) for item in _state_searches(state)
-    }
+    state: SearchState,
+    items: list[Any],
+    proposals: list[EvidenceGapProposal],
+    *,
+    sufficient: bool,
+) -> tuple[list[SearchRequest], list[dict[str, Any]]]:
+    brief = _state_query_brief(state)
+    attempts = [dict(item) for item in state.get("search_attempts") or []]
+    try:
+        gaps, local_to_stable = reconcile_evidence_gaps(
+            brief,
+            state.get("evidence_gaps") or [],
+            proposals,
+            attempts,
+            run_id=state["run_id"],
+            iteration=max(1, int(state.get("round") or 1)),
+            sufficient=sufficient,
+        )
+    except QueryGateError:
+        return [], [dict(item) for item in state.get("evidence_gaps") or []]
+    if sufficient:
+        return [], gaps
+
+    allowed = set((state.get("intent") or {}).get("channels") or ["web"])
+    open_gaps = [item for item in gaps if item.get("status") == "open"]
     fresh: list[SearchRequest] = []
     for item in items:
-        query = _normalize_query(item.query)
-        channel = item.channel
-        key = _search_key(query, channel)
-        if not query or channel not in _RESEARCH_CHANNELS or key in seen:
+        raw = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        stable_gap_id = local_to_stable.get(str(raw.get("gap_id") or ""))
+        if not stable_gap_id:
             continue
-        seen.add(key)
-        fresh.append(SearchRequest(query=query, channel=channel))
-    return fresh
+        raw["gap_id"] = stable_gap_id
+        channel = str(raw.get("channel") or "")
+        try:
+            accepted = validate_query_proposal(
+                brief,
+                raw,
+                run_id=state["run_id"],
+                iteration=max(1, int(state.get("round") or 1)) + 1,
+                initial=False,
+                allowed_channels=allowed | {channel},
+                prior_attempts=attempts,
+                open_gaps=open_gaps,
+            )
+        except QueryGateError:
+            continue
+        request = SearchRequest(
+            query=accepted["query"],
+            channel=accepted["channel"],
+        )
+        for key in _SEARCH_METADATA_FIELDS:
+            request[key] = accepted[key]  # type: ignore[literal-required]
+        fresh.append(request)
+        attempts.append(accepted)
+    return fresh[:2], gaps
 
 
 def _result_limitation(result: SearchExecutionResult) -> str | None:
@@ -1073,15 +1443,25 @@ async def _recall_memory_candidates(
 async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, Any]:
     if runtime.context.config.search.force_search:
         channels = _forced_search_channels(state["question"])
+        brief = normalize_query_brief(
+            None,
+            question=state["question"],
+            channels=channels,
+            current_date=_state_date(state),
+        )
         result = IntentResult(
             task_type="research",
             need_search=True,
             channels=channels,
             use_history=False,
+            evidence_depth="multi_source",
+            fast_search=None,
+            query_brief=brief,
             summary="",
         )
         return {
-            "intent": result.model_dump(),
+            "intent": result.model_dump(mode="json"),
+            "query_brief": brief.model_dump(mode="json"),
             "need_search": True,
             "steps": _step(
                 "classify_intent",
@@ -1113,12 +1493,29 @@ async def classify_intent(state: SearchState, runtime: Runtime[RunContext]) -> d
     )
     freshness_override = _freshness_required(state["question"])
     need_search = result.need_search or freshness_override
-    intent = result.model_dump()
+    intent = result.model_dump(mode="json")
+    brief = result.query_brief
     if freshness_override and not result.need_search:
-        intent["need_search"] = True
-        intent["channels"] = _forced_search_channels(state["question"])
+        channels = _forced_search_channels(state["question"])
+        brief = normalize_query_brief(
+            None,
+            question=state["question"],
+            channels=channels,
+            current_date=_state_date(state),
+        )
+        intent.update({
+            "task_type": "fact_lookup",
+            "need_search": True,
+            "channels": channels,
+            "evidence_depth": "multi_source",
+            "fast_search": None,
+            "query_brief": brief.model_dump(mode="json"),
+        })
     return {
         "intent": intent,
+        "query_brief": (
+            brief.model_dump(mode="json") if brief is not None else None
+        ),
         "need_search": need_search,
         **_structured_usage_patch(state, usage),
         "steps": _step(
@@ -1176,6 +1573,13 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
         "memory_candidates": memory_candidates,
         "memory_recall_status": memory_recall_status,
     }
+    brief = _state_query_brief(state)
+    prior_attempts = [dict(item) for item in state.get("search_attempts") or []]
+    open_gaps = [
+        dict(item)
+        for item in state.get("evidence_gaps") or []
+        if item.get("status") == "open"
+    ]
     prior_searches = _state_searches(state)
     prior = [item["query"] for item in prior_searches]
     prior_channels = dict(state.get("query_channels") or {})
@@ -1210,6 +1614,42 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
         prompt.append(
             "已执行 query+channel（禁止重复）："
             + json.dumps(prior_searches, ensure_ascii=False)
+        )
+    prompt.append(
+        "私有 QueryBrief（只能用于检索决策，不得进入公开 summary）："
+        + json.dumps(brief.model_dump(mode="json"), ensure_ascii=False)
+    )
+    prompt.append(
+        "hardConstraintIds（retained_constraint_ids 必须完整保留）："
+        + json.dumps(list(hard_constraint_ids(brief)), ensure_ascii=False)
+    )
+    if prior_attempts:
+        prompt.append(
+            "真实 SearchAttempt（只使用这些稳定 ID 和客观增益）："
+            + json.dumps(prior_attempts[-12:], ensure_ascii=False)
+        )
+    if open_gaps:
+        gap_context: list[dict[str, Any]] = []
+        for gap in open_gaps:
+            facet_candidates = [
+                item["attempt_id"]
+                for item in prior_attempts
+                if item.get("facet_id") == gap.get("facet_id")
+            ]
+            candidates = facet_candidates
+            if not candidates and gap.get("origin") == "facet_discovery":
+                candidates = [
+                    item["attempt_id"]
+                    for item in prior_attempts
+                    if item.get("attempt_id")
+                ]
+            gap_context.append({
+                **gap,
+                "candidateParentAttemptIds": candidates[-4:],
+            })
+        prompt.append(
+            "当前 open gaps（后续轮只能绑定这些 gapId）："
+            + json.dumps(gap_context, ensure_ascii=False)
         )
     feedback = _tool_feedback(state)
     if feedback:
@@ -1265,6 +1705,16 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     # Supervisor 约束首轮范围；后续只有 Reflector/Verifier 的结构化建议
     # 可以显式开放互补渠道，避免 Planner 任意越权。
     allowed_channels.update(item["channel"] for item in suggested)
+    if any(
+        _gap_authorizes_search_channel(
+            gap,
+            channel="web",
+            strategy="channel_fallback",
+            historical=False,
+        )
+        for gap in open_gaps
+    ):
+        allowed_channels.add("web")
     iteration = state.get("round", 0) + 1
     revision = state.get("plan_revision", 0) + 1
 
@@ -1280,25 +1730,25 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
             max_steps=max_plan_steps,
             max_evidence_per_step=max_evidence_per_step,
             max_total_evidence=max_total_evidence,
+            query_brief=brief,
+            prior_attempts=prior_attempts,
+            open_gaps=open_gaps,
+            initial=(iteration == 1 and not prior_attempts and not open_gaps),
         )
 
     try:
         plan = build_budgeted_plan(result)
     except PlanValidationError as exc:
-        repairable_budget_codes = {
-            "PLAN_TOOL_BUDGET_EXCEEDED",
-            "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY",
-            "PLAN_EVIDENCE_BUDGET_EXCEEDED",
-        }
         if (
-            exc.code in repairable_budget_codes
+            exc.code.startswith(("PLAN_", "QUERY_"))
             and _remaining_model_calls(state) >= usage.attempts + 3
         ):
             repair_prompt = [
                 *prompt[:-1],
                 (
-                    "上一份结构化计划违反本轮硬预算，必须完整重新生成；"
-                    f"错误码：{exc.code}。不得复用超预算的 steps 或 evidence_needed。"
+                    "上一份结构化计划被确定性门禁拒绝，必须根据当前输入完整重新生成；"
+                    f"错误码：{exc.code}。不得放宽硬约束、编造 ID、复用被拒绝的"
+                    "字段组合，或绕过本轮预算。"
                 ),
                 current_task,
             ]
@@ -1351,10 +1801,6 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
                 ),
             }
     fresh_searches = requests_for_steps(plan["steps"])
-    audit_searches = [
-        SearchRequest(query=item["query"], channel=item["channel"])
-        for item in fresh_searches
-    ]
     fresh_channels = {
         item["query"]: item["channel"] for item in fresh_searches
     }
@@ -1368,7 +1814,7 @@ async def plan_research(state: SearchState, runtime: Runtime[RunContext]) -> dic
     return {
         **fast_path_clear,
         **memory_patch,
-        "searches": prior_searches + audit_searches,
+        "searches": prior_searches + fresh_searches,
         "pending_searches": [],
         "queries": prior + fresh,
         "query_channels": {**prior_channels, **fresh_channels},
@@ -1440,6 +1886,14 @@ async def plan_fast_search(
     iteration = state.get("round", 0) + 1
     revision = state.get("plan_revision", 0) + 1
     max_evidence_per_step = runtime.context.config.graph.max_pages_per_call
+    brief = _state_query_brief(state)
+    facet = brief.evidence_facets[0]
+    query_terms = [
+        *brief.entities,
+        *(term for item in brief.must for term in item.terms),
+    ][:12]
+    if not query_terms:
+        query_terms = [request["query"][:80]]
     try:
         plan = build_plan_snapshot(
             run_id=state["run_id"],
@@ -1448,10 +1902,20 @@ async def plan_fast_search(
             created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             planned_steps=[{
                 "local_id": "fast_fact",
+                "facet_id": facet.facet_id,
                 "facet": "单事实取证",
                 "objective": "读取权威正文确认该事实",
+                "query_terms": query_terms,
+                "strategy": "initial_precise",
                 "query": request["query"],
                 "channel": request["channel"],
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "retained_constraint_ids": [
+                    *hard_constraint_ids(brief),
+                    *(item.constraint_id for item in brief.should),
+                ],
+                "relaxed_should_ids": [],
                 "depends_on": [],
                 "priority": 100,
                 "evidence_needed": min(2, max_evidence_per_step),
@@ -1465,6 +1929,12 @@ async def plan_fast_search(
             max_steps=1,
             max_evidence_per_step=max_evidence_per_step,
             max_total_evidence=max_evidence_per_step,
+            query_brief=brief,
+            prior_attempts=[
+                dict(item) for item in state.get("search_attempts") or []
+            ],
+            open_gaps=[],
+            initial=True,
         )
     except PlanValidationError as exc:
         return {
@@ -1483,10 +1953,7 @@ async def plan_fast_search(
     prior_searches = _state_searches(state)
     return {
         "fast_path": True,
-        "searches": prior_searches + [
-            SearchRequest(query=item["query"], channel=item["channel"])
-            for item in fresh_searches
-        ],
+        "searches": prior_searches + fresh_searches,
         "pending_searches": [],
         "queries": [item["query"] for item in prior_searches] + [
             item["query"] for item in fresh_searches
@@ -1602,6 +2069,7 @@ async def _run_one_search(
     tool_call_id: str,
     arguments: SearchToolInput,
     *,
+    attempt_id: str | None = None,
     plan_step_id: str | None = None,
     research_batch_id: str | None = None,
     research_result_id: str | None = None,
@@ -1882,6 +2350,7 @@ async def _run_one_search(
             execution,
             arguments,
             result,
+            attempt_id=attempt_id,
             plan_step_id=plan_step_id,
             research_batch_id=research_batch_id,
             research_result_id=research_result_id,
@@ -1927,6 +2396,7 @@ async def _run_one_search(
         execution,
         arguments,
         result,
+        attempt_id=attempt_id,
         plan_step_id=plan_step_id,
         research_batch_id=research_batch_id,
         research_result_id=research_result_id,
@@ -2025,6 +2495,7 @@ def _search_trace(
     arguments: SearchToolInput,
     result: SearchExecutionResult,
     *,
+    attempt_id: str | None,
     plan_step_id: str | None,
     research_batch_id: str | None,
     research_result_id: str | None,
@@ -2036,6 +2507,7 @@ def _search_trace(
     decision = execution.decision
     return SearchTrace(
         tool_call_id=prepared.tool_call_id,
+        **({"attempt_id": attempt_id} if attempt_id else {}),
         **({"plan_step_id": plan_step_id} if plan_step_id else {}),
         **(
             {"research_batch_id": research_batch_id}
@@ -2100,10 +2572,15 @@ def _planned_tool_call_id(
     index: int,
     search: SearchRequest,
 ) -> str:
+    attempt_id = str(search.get("attempt_id") or "")
     material = (
-        f"{state['run_id']}|{state.get('round', 0)}|{index}|"
-        f"{search.get('step_id') or 'legacy'}|"
-        f"{search['channel']}|{search['query'].casefold().strip()}"
+        f"{state['run_id']}|attempt|{attempt_id}"
+        if attempt_id
+        else (
+            f"{state['run_id']}|{state.get('round', 0)}|{index}|"
+            f"{search.get('step_id') or 'legacy'}|"
+            f"{search['channel']}|{search['query'].casefold().strip()}"
+        )
     )
     return f"call_search_{hashlib.sha256(material.encode()).hexdigest()[:24]}"
 
@@ -2165,6 +2642,15 @@ def build_research_work_items(state: SearchState) -> list[ResearchWorkItem]:
         targets.append(ResearchTarget(
             order=index,
             plan_step_id=target.get("step_id"),
+            attempt_id=str(target["attempt_id"]),
+            facet_id=str(target["facet_id"]),
+            gap_id=target.get("gap_id"),
+            parent_attempt_id=target.get("parent_attempt_id"),
+            strategy=str(target["strategy"]),
+            query_terms=list(target["query_terms"]),
+            retained_constraint_ids=list(target["retained_constraint_ids"]),
+            relaxed_should_ids=list(target["relaxed_should_ids"]),
+            constraint_signature=str(target["constraint_signature"]),
             tool_call_id=_planned_tool_call_id(state, index, target),
             query=target["query"],
             channel=channel,
@@ -2216,6 +2702,15 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             executions.append(ResearchExecution(
                 order=target["order"],
                 plan_step_id=target["plan_step_id"],
+                attempt_id=target["attempt_id"],
+                facet_id=target["facet_id"],
+                gap_id=target["gap_id"],
+                parent_attempt_id=target["parent_attempt_id"],
+                strategy=target["strategy"],
+                query_terms=list(target["query_terms"]),
+                retained_constraint_ids=list(target["retained_constraint_ids"]),
+                relaxed_should_ids=list(target["relaxed_should_ids"]),
+                constraint_signature=target["constraint_signature"],
                 tool_call_id=target["tool_call_id"],
                 query=target["query"],
                 channel=target["channel"],
@@ -2234,6 +2729,7 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
             runtime,
             target["tool_call_id"],
             arguments,
+            attempt_id=target["attempt_id"],
             plan_step_id=target["plan_step_id"],
             research_batch_id=work_item["batch_id"],
             research_result_id=work_item["result_id"],
@@ -2245,6 +2741,15 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
         executions.append(ResearchExecution(
             order=target["order"],
             plan_step_id=target["plan_step_id"],
+            attempt_id=target["attempt_id"],
+            facet_id=target["facet_id"],
+            gap_id=target["gap_id"],
+            parent_attempt_id=target["parent_attempt_id"],
+            strategy=target["strategy"],
+            query_terms=list(target["query_terms"]),
+            retained_constraint_ids=list(target["retained_constraint_ids"]),
+            relaxed_should_ids=list(target["relaxed_should_ids"]),
+            constraint_signature=target["constraint_signature"],
             tool_call_id=target["tool_call_id"],
             query=target["query"],
             channel=target["channel"],
@@ -2266,6 +2771,58 @@ async def research(state: SearchState, runtime: Runtime[RunContext]) -> dict[str
     return {"research_results": [branch_result]}
 
 
+_MAX_SEARCH_ATTEMPTS = 12
+_MAX_ATTEMPT_DOMAINS = 12
+
+
+def _result_source_domains(result: SearchExecutionResult) -> list[str]:
+    domains = {
+        hostname.casefold().rstrip(".")
+        for item in [*result.results, *result.evidence]
+        if (hostname := urlsplit(item.url).hostname)
+    }
+    if len(domains) > _MAX_ATTEMPT_DOMAINS:
+        raise ResearchResultConflictError("search result domain limit exceeded")
+    return sorted(domains)
+
+
+def _search_attempt_record(
+    execution: ResearchExecution,
+    trace: SearchTrace,
+    result: SearchExecutionResult,
+    *,
+    unique_source_domains: list[str],
+    new_candidate_count: int,
+    new_evidence_count: int,
+    new_constraint_ids: list[str],
+    progress: bool,
+) -> SearchAttempt:
+    return SearchAttempt(
+        attempt_id=execution["attempt_id"],
+        tool_call_id=execution["tool_call_id"],
+        plan_step_id=execution["plan_step_id"],
+        facet_id=execution["facet_id"],
+        gap_id=execution["gap_id"],
+        parent_attempt_id=execution["parent_attempt_id"],
+        strategy=execution["strategy"],
+        query_terms=list(execution["query_terms"]),
+        query=execution["query"],
+        channel=execution["channel"],
+        retained_constraint_ids=list(execution["retained_constraint_ids"]),
+        relaxed_should_ids=list(execution["relaxed_should_ids"]),
+        constraint_signature=execution["constraint_signature"],
+        status=trace["status"],
+        result_count=len(result.results),
+        evidence_count=len(result.evidence),
+        unique_source_domains=list(unique_source_domains),
+        new_candidate_count=new_candidate_count,
+        new_evidence_count=new_evidence_count,
+        new_constraint_ids=list(new_constraint_ids),
+        progress=progress,
+        error_code=trace.get("error_code") or result.error_code,
+    )
+
+
 async def merge_research(
     state: SearchState,
     runtime: Runtime[RunContext],
@@ -2275,8 +2832,22 @@ async def merge_research(
     del runtime
     batch_id = _research_batch_id(state)
     merged_result_ids = list(state.get("merged_research_result_ids") or [])
+    if len(merged_result_ids) != len(set(merged_result_ids)):
+        raise ResearchResultConflictError("duplicate merged research resultId")
     already_merged = set(merged_result_ids)
+    merged_result_hashes = dict(state.get("merged_research_result_hashes") or {})
+    if not set(merged_result_hashes) <= already_merged:
+        raise ResearchResultConflictError("orphan merged research result hash")
     all_results = list(state.get("research_results") or [])
+    for item in all_results:
+        result_id = str(item.get("result_id") or "")
+        if result_id not in already_merged:
+            continue
+        expected_hash = merged_result_hashes.get(result_id)
+        if expected_hash is None or expected_hash != research_result_hash(item):
+            raise ResearchResultConflictError(
+                f"conflicting merged research result: {result_id}"
+            )
     stale = [
         item["result_id"]
         for item in all_results
@@ -2318,8 +2889,27 @@ async def merge_research(
     existing_traces = list(state.get("tool_traces") or [])
     trace_by_call = {item["tool_call_id"]: item for item in existing_traces}
     traces: list[SearchTrace] = []
-    new_candidates: list[Candidate] = []
-    new_evidence: list[Evidence] = []
+    attempts = list(state.get("search_attempts") or [])
+    if len(attempts) > _MAX_SEARCH_ATTEMPTS:
+        raise ResearchResultConflictError("search attempt limit exceeded")
+    attempt_by_id: dict[str, SearchAttempt] = {}
+    for attempt in attempts:
+        attempt_id = str(attempt.get("attempt_id") or "")
+        if not attempt_id or attempt_id in attempt_by_id:
+            raise ResearchResultConflictError("conflicting search attempt")
+        attempt_by_id[attempt_id] = attempt
+    covered_constraint_ids = {
+        constraint_id
+        for attempt in attempts
+        for constraint_id in attempt.get("new_constraint_ids") or []
+    }
+    hard_ids = set(hard_constraint_ids(_state_query_brief(state)))
+    candidates = list(state.get("candidates") or [])
+    seen_candidates = {item["url"] for item in candidates}
+    evidence = [normalize_evidence(item) for item in state.get("evidence") or []]
+    evidence_by_url = {item["url"]: item for item in evidence}
+    writer = _event_writer()
+    new_attempts: list[SearchAttempt] = []
     executed_tool_calls = 0
     interaction_wait_seconds = 0.0
     projected_limit: str | None = None
@@ -2341,12 +2931,53 @@ async def merge_research(
         tool_call_id = execution["tool_call_id"]
         if (
             trace["tool_call_id"] != tool_call_id
+            or trace.get("attempt_id") != execution["attempt_id"]
             or trace["query"] != execution["query"]
             or trace["channel"] != execution["channel"]
+            or result.query != execution["query"]
+            or result.channel != execution["channel"]
         ):
             raise ResearchResultConflictError(
                 f"research trace mismatch: {tool_call_id}"
             )
+        if (
+            trace["status"] != "unknown"
+            and trace.get("output_hash") != payload_hash(result.public_dict())
+        ):
+            raise ResearchResultConflictError(
+                f"research trace mismatch: {tool_call_id}"
+            )
+        domains = _result_source_domains(result)
+        prior_attempt = attempt_by_id.get(execution["attempt_id"])
+        if prior_attempt is not None:
+            replayed_attempt = _search_attempt_record(
+                execution,
+                trace,
+                result,
+                unique_source_domains=domains,
+                new_candidate_count=prior_attempt["new_candidate_count"],
+                new_evidence_count=prior_attempt["new_evidence_count"],
+                new_constraint_ids=prior_attempt["new_constraint_ids"],
+                progress=prior_attempt["progress"],
+            )
+            if replayed_attempt != prior_attempt:
+                raise ResearchResultConflictError("conflicting search attempt")
+            prior_trace = trace_by_call.get(tool_call_id)
+            if prior_trace != trace:
+                raise ResearchResultConflictError("conflicting search attempt")
+            if plan_step_id:
+                if trace["status"] not in {"completed", "cached"}:
+                    outcomes[plan_step_id] = (
+                        trace.get("error_code") or "SEARCH_FAILED"
+                    )
+                elif (
+                    not result.evidence
+                    and evidence_targets.get(plan_step_id, 0) > 0
+                ):
+                    outcomes[plan_step_id] = "PLAN_EVIDENCE_TARGET_UNMET"
+                else:
+                    outcomes[plan_step_id] = None
+            continue
         prior_trace = trace_by_call.get(tool_call_id)
         if prior_trace is not None:
             if prior_trace != trace:
@@ -2361,17 +2992,15 @@ async def merge_research(
         if plan_step_id:
             if trace["status"] not in {"completed", "cached"}:
                 outcomes[plan_step_id] = trace.get("error_code") or "SEARCH_FAILED"
-            elif (
-                trace["evidence_count"] == 0
-                and evidence_targets.get(plan_step_id, 0) > 0
-            ):
+            elif not result.evidence and evidence_targets.get(plan_step_id, 0) > 0:
                 outcomes[plan_step_id] = "PLAN_EVIDENCE_TARGET_UNMET"
             else:
                 outcomes[plan_step_id] = None
         if result.error_code == "RUN_TIME_RESERVE":
             projected_limit = projected_limit or "RUN_TIME_RESERVE"
+        new_candidate_count = 0
         for item in result.results:
-            new_candidates.append(Candidate(
+            candidate = Candidate(
                 channel=item.channel,
                 tool_call_id=tool_call_id,
                 iteration=state.get("round", 0),
@@ -2384,9 +3013,14 @@ async def merge_research(
                 published_at=item.published_at,
                 metrics=item.metrics,
                 limitation=item.limitation,
-            ))
+            )
+            if candidate["url"] not in seen_candidates:
+                seen_candidates.add(candidate["url"])
+                candidates.append(candidate)
+                new_candidate_count += 1
+        new_evidence_count = 0
         for item in result.evidence:
-            new_evidence.append(normalize_evidence(Evidence(
+            normalized = normalize_evidence(Evidence(
                 channel=item.channel,
                 tool_call_id=tool_call_id,
                 iteration=state.get("round", 0),
@@ -2401,27 +3035,51 @@ async def merge_research(
                 published_at=item.published_at,
                 metrics=item.metrics,
                 limitation=item.limitation,
-            )))
+            ))
+            previous = evidence_by_url.get(normalized["url"])
+            if previous is None:
+                evidence_by_url[normalized["url"]] = normalized
+                evidence.append(normalized)
+                new_evidence_count += 1
+                writer(runtime_event(
+                    "evidence.updated",
+                    **evidence_event_payload(normalized),
+                ))
+            elif previous["evidence_id"] != normalized["evidence_id"]:
+                raise EvidenceStateConflictError("same URL returned conflicting body")
+        new_constraint_ids: list[str] = []
+        if result.results or result.evidence:
+            for constraint_id in execution["retained_constraint_ids"]:
+                if (
+                    constraint_id in hard_ids
+                    and constraint_id not in covered_constraint_ids
+                    and (
+                        not constraint_id.startswith("required_channel:")
+                        or constraint_id
+                        == f"required_channel:{execution['channel']}"
+                    )
+                ):
+                    covered_constraint_ids.add(constraint_id)
+                    new_constraint_ids.append(constraint_id)
+        progress = bool(
+            new_candidate_count or new_evidence_count or new_constraint_ids
+        )
+        attempt = _search_attempt_record(
+            execution,
+            trace,
+            result,
+            unique_source_domains=domains,
+            new_candidate_count=new_candidate_count,
+            new_evidence_count=new_evidence_count,
+            new_constraint_ids=new_constraint_ids,
+            progress=progress,
+        )
+        if len(attempts) + len(new_attempts) >= _MAX_SEARCH_ATTEMPTS:
+            raise ResearchResultConflictError("search attempt limit exceeded")
+        attempt_by_id[attempt["attempt_id"]] = attempt
+        new_attempts.append(attempt)
 
-    seen_candidates = {item["url"] for item in state.get("candidates") or []}
-    candidates = list(state.get("candidates") or [])
-    for item in new_candidates:
-        if item["url"] not in seen_candidates:
-            seen_candidates.add(item["url"])
-            candidates.append(item)
-    evidence = [normalize_evidence(item) for item in state.get("evidence") or []]
-    evidence_by_url = {item["url"]: item for item in evidence}
-    writer = _event_writer()
-    for item in new_evidence:
-        previous = evidence_by_url.get(item["url"])
-        if previous is None:
-            evidence_by_url[item["url"]] = item
-            evidence.append(item)
-            writer(runtime_event("evidence.updated", **evidence_event_payload(item)))
-        elif previous["evidence_id"] != item["evidence_id"]:
-            raise EvidenceStateConflictError("same URL returned conflicting body")
-
-    gained = len(evidence) - len(state.get("evidence") or [])
+    gained = sum(item["new_evidence_count"] for item in new_attempts)
     plan_patch: dict[str, Any] = {"pending_plan_step_ids": []}
     current_plan = state.get("plan")
     if current_plan and state.get("pending_plan_step_ids"):
@@ -2440,15 +3098,19 @@ async def merge_research(
         for item in branch_results
         if item["result_id"] not in already_merged
     )
-    had_pending = bool(
-        state.get("pending_plan_step_ids") or _pending_searches(state)
-    )
+    for item in branch_results:
+        merged_result_hashes[item["result_id"]] = research_result_hash(item)
+    no_progress_count = state.get("no_progress_count", 0)
+    for attempt in new_attempts:
+        no_progress_count = 0 if attempt["progress"] else no_progress_count + 1
     return {
         "research_results": [],
         "merged_research_result_ids": merged_result_ids,
+        "merged_research_result_hashes": merged_result_hashes,
         "candidates": candidates,
         "evidence": evidence,
         "tool_traces": existing_traces + traces,
+        "search_attempts": attempts + new_attempts,
         "tool_calls": state.get("tool_calls", 0) + executed_tool_calls,
         "external_wait_seconds": (
             float(state.get("external_wait_seconds") or 0.0)
@@ -2458,22 +3120,15 @@ async def merge_research(
         "pending_queries": [],
         **plan_patch,
         "stop_reason": state.get("stop_reason") or projected_limit,
-        "no_progress_count": (
-            0
-            if gained
-            else (
-                state.get("no_progress_count", 0) + 1
-                if had_pending
-                else state.get("no_progress_count", 0)
-            )
-        ),
+        "no_progress_count": no_progress_count,
         "replan_required": False,
         "steps": _step(
             "merge_research",
             "deterministic",
             None,
             f"branches={len(branch_results)} executed_searches={executed_tool_calls} "
-            f"new_evidence={gained}",
+            f"new_evidence={gained} progressed_attempts="
+            f"{sum(1 for item in new_attempts if item['progress'])}",
         ),
     }
 
@@ -2538,6 +3193,9 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
                     ModelMessage(role="system", content=REFLECTOR_PROMPT),
                     ModelMessage(role="user", content=(
                         f"用户问题：{state['question']}"
+                        f"\n私有 QueryBrief：{json.dumps(_state_query_brief(state).model_dump(mode='json'), ensure_ascii=False)}"
+                        f"\nhardConstraintIds：{json.dumps(list(hard_constraint_ids(_state_query_brief(state))), ensure_ascii=False)}"
+                        f"\n当前 open gaps：{json.dumps([item for item in state.get('evidence_gaps') or [] if item.get('status') == 'open'], ensure_ascii=False)}"
                         f"\n逐次真实工具反馈：{json.dumps(feedback, ensure_ascii=False)}"
                         f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
                         f"\n\n当前轮候选反馈（仅用于判断覆盖，不得为未读候选生成来源说明）：\n"
@@ -2557,15 +3215,25 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         # Curator；否则真实来源计数存在，但详情永远不会产生。
         structured_failed = True
         usage = exc.usage
+        fallback_sufficient = bool(evidence)
         result = ReflectResult(
-            sufficient=bool(evidence),
-            missing="证据评估未返回有效结构，交由后续核验收口",
+            sufficient=fallback_sufficient,
+            missing=(
+                "" if fallback_sufficient else "现有结果没有可核验正文"
+            ),
             extra_searches=[],
+            evidence_gaps=(
+                []
+                if fallback_sufficient
+                else _fallback_gap_proposals(
+                    state,
+                    kind="no_readable_evidence",
+                    description="现有结果没有可核验正文",
+                )
+            ),
             source_presentations=[],
             summary="",
         )
-    extra_searches = _fresh_follow_up_searches(state, result.extra_searches)[:2]
-    extra = [item["query"] for item in extra_searches]
     sufficient = bool(result.sufficient and evidence)
     usages = [usage]
     presentations_by_call = _group_source_presentations(
@@ -2676,8 +3344,6 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     )
     if contract_sufficient:
         sufficient = True
-        extra_searches = []
-        extra = []
     accepted_urls = set(presented_urls)
     # Source Curator 是 Reflector 漏项后的权威复核；后续明确 include 可以覆盖
     # 同轮较早的 exclude，但一旦写入状态仍只能沿合法单向迁移。
@@ -2703,6 +3369,29 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
         writer(runtime_event("evidence.updated", **evidence_event_payload(item)))
     # 被 Reflector/Source Curator 排除的正文不能继续满足事实写作条件。
     sufficient = bool(sufficient and answerable_evidence(lifecycle_evidence))
+    gap_proposals = list(result.evidence_gaps)
+    if not sufficient and not gap_proposals:
+        gap_kind = (
+            "no_results"
+            if not current_candidates
+            else (
+                "no_readable_evidence"
+                if not current_evidence
+                else "missing_claim"
+            )
+        )
+        gap_proposals = _fallback_gap_proposals(
+            state,
+            kind=gap_kind,
+            description=result.missing or "现有证据仍未覆盖关键主张",
+        )
+    extra_searches, reconciled_gaps = _fresh_follow_up_searches(
+        state,
+        [] if contract_sufficient else result.extra_searches,
+        gap_proposals,
+        sufficient=sufficient,
+    )
+    extra = [item["query"] for item in extra_searches]
     for tool_call_id, presentations in presentations_by_call.items():
         for presentation in presentations:
             writer(runtime_event(
@@ -2730,12 +3419,17 @@ async def reflect(state: SearchState, runtime: Runtime[RunContext]) -> dict[str,
     extra_channels = {item["query"]: item["channel"] for item in extra_searches}
     return {
         "evidence": lifecycle_evidence,
+        "evidence_gaps": reconciled_gaps,
         "sufficient": sufficient,
         "pending_searches": extra_searches,
         "pending_queries": extra,
         "query_channels": {**(state.get("query_channels") or {}), **extra_channels},
         "replan_required": replan_required,
-        "verification_issue": "" if contract_sufficient else result.missing,
+        "verification_issue": (
+            ""
+            if contract_sufficient
+            else result.missing or ("" if sufficient else "现有证据仍不充分")
+        ),
         "stop_reason": stop_reason,
         **_structured_usage_patch(state, _sum_usage(usages)),
         "steps": _step(
@@ -2903,16 +3597,27 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
     if not state.get("need_search"):
         return {
             "verification_passed": False,
-            "verification_action": "pass",
+            "verification_action": "",
             "verification_issue": "直接回答未执行外部事实核验",
             "replan_required": False,
             "steps": _step("verify", "deterministic", None, "direct_answer_not_externally_verified"),
         }
     if not evidence or not answer:
+        _, reconciled_gaps = _fresh_follow_up_searches(
+            state,
+            [],
+            _fallback_gap_proposals(
+                state,
+                kind="missing_claim",
+                description="缺少可核验的公开来源",
+            ),
+            sufficient=False,
+        )
         return {
             "verification_passed": False,
             "verification_action": "research_more",
             "verification_issue": "缺少可核验的公开来源",
+            "evidence_gaps": reconciled_gaps,
             "replan_required": not bool(state.get("stop_reason")),
             "steps": _step("verify", "deterministic", None, "missing_evidence"),
         }
@@ -2945,6 +3650,10 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
                 ModelMessage(role="system", content=VERIFIER_PROMPT),
                 ModelMessage(role="user", content=(
                     f"用户问题：{state['question']}"
+                    f"\n私有 QueryBrief：{json.dumps(_state_query_brief(state).model_dump(mode='json'), ensure_ascii=False)}"
+                    f"\nhardConstraintIds：{json.dumps(list(hard_constraint_ids(_state_query_brief(state))), ensure_ascii=False)}"
+                    f"\n真实 SearchAttempt：{json.dumps(_tool_feedback(state, include_limitation=False), ensure_ascii=False)}"
+                    f"\n当前 open gaps：{json.dumps([item for item in state.get('evidence_gaps') or [] if item.get('status') == 'open'], ensure_ascii=False)}"
                     f"\n已执行 query+channel：{json.dumps(_state_searches(state), ensure_ascii=False)}"
                     f"\n调用级搜索统计（只表示发现与已读数量，不得据此否定下方已读来源）："
                     f"{json.dumps(_verification_tool_feedback(state), ensure_ascii=False)}"
@@ -2959,8 +3668,8 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         VerifyResult,
         allow_repair=_allow_structured_repair(state),
     )
-    action = "pass" if result.passed else result.action
-    passed = result.passed and action == "pass"
+    action = result.action
+    passed = result.passed
     issue = result.issue
     coverage_compliant = not missing_channels or (
         not result.passed and result.action == "research_more"
@@ -2977,10 +3686,23 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         action = "rewrite"
         passed = False
         issue = "；".join(value for value in (format_issue, issue) if value)
-    extra_searches = (
-        _fresh_follow_up_searches(state, result.extra_searches)[:2]
-        if action == "research_more"
-        else []
+    gap_proposals = list(result.evidence_gaps)
+    if action == "research_more" and not gap_proposals:
+        gap_proposals = _fallback_gap_proposals(
+            state,
+            kind="missing_channel" if missing_channels else "missing_claim",
+            description=(
+                "缺少用户指定渠道的可核验正文"
+                if missing_channels
+                else issue or "回答仍缺少可核验证据"
+            ),
+            required_channels=missing_channels or None,
+        )
+    extra_searches, reconciled_gaps = _fresh_follow_up_searches(
+        state,
+        result.extra_searches if action == "research_more" else [],
+        gap_proposals,
+        sufficient=passed,
     )
     extra = [item["query"] for item in extra_searches]
     stop_reason = state.get("stop_reason")
@@ -3016,6 +3738,7 @@ async def verify(state: SearchState, runtime: Runtime[RunContext]) -> dict[str, 
         "verification_passed": passed,
         "verification_action": action,
         "verification_issue": issue,
+        "evidence_gaps": reconciled_gaps,
         "pending_searches": extra_searches,
         "pending_queries": extra,
         "query_channels": {**(state.get("query_channels") or {}), **extra_channels},

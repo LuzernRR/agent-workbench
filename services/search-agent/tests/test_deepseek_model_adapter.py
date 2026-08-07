@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +19,12 @@ class DemoResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     value: str
+
+
+class UnsupportedDateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: date
 
 
 def runtime() -> SimpleNamespace:
@@ -62,6 +69,11 @@ def test_structured_sdk_client_has_no_hidden_retries(
     assert captured["max_retries"] == 0
     assert captured["timeout"] == 30
     deepseek._structured_chat_model.cache_clear()
+
+
+def test_strict_schema_rejects_provider_unsupported_string_formats() -> None:
+    with pytest.raises(deepseek.StrictSchemaError, match="unsupported format"):
+        deepseek.validate_strict_schema(UnsupportedDateResult)
 
 
 def test_streaming_sdk_client_has_no_hidden_retries(

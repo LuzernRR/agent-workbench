@@ -1,5 +1,50 @@
 # 项目交接
 
+## 当前结论（2026-08-07，Issue #52 查询理解与反馈驱动检索）
+
+- 本轮唯一功能为 [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，分支
+  `codex/issue-52-query-strategy`，状态 `ready`，`Execution Gate: allowed`。用户明确授权在全量测试和真实
+  smoke 通过后由 Codex 自主验收、合并并关闭 Issue；当前代码和文档已完成，最终发布状态将在 PR 合并后回填。
+- **查询翻译协议**：Supervisor 生成私有 `QueryBrief`，保留实体、must/should/exclude、绝对日期、地域、
+  语言、必需渠道、字段和证据分面。Planner 首轮最多两个不同 facet，计划整体覆盖所有 should；web/X/小红书
+  查询分别经过渠道语法门禁。后续查询必须绑定 open `gapId`、真实 `parentAttemptId`、枚举策略和完整硬约束签名。
+- **反馈闭环**：每个真实 tool call 生成稳定 `SearchAttempt`，保存 result/evidence/域名/新增约束/进展；只有
+  新候选、新 Evidence 或新硬约束覆盖才算 progress。普通 gap 只允许同 facet 父尝试；首次发现未执行 facet 时
+  使用唯一窄例外 `origin=facet_discovery`，绑定全局最新真实父尝试；没有该 origin 的旧 gap 仍拒绝跨 facet。
+- **Provider 兼容修复**：DeepSeek strict schema 不接受 Pydantic `date` 的 `format: date`。现以
+  `ProviderIsoDate = Annotated[date, WithJsonSchema(...pattern...)]` 暴露为 `YYYY-MM-DD` 字符串 pattern，运行时
+  仍为 `date`；strict schema validator 同时拒绝未登记字符串 format。Planner 被确定性 `PLAN_*`/`QUERY_*` 门禁
+  拒绝时最多执行一次有界结构化重生成。
+- **质量与隐私**：A10 固定矩阵覆盖 13 个中文/英文/日期/版本/多实体/地域/排除/字段/渠道/零结果/冲突/gap
+  场景；A11 五个离线指标只读私有 final state。QueryBrief、query terms、constraint signature、gap 描述和
+  provider body 不进入 AgentEvent、OTel、日志、错误或前端过程文本。Prompt 版本为
+  `2026-08-07.v45-query-strategy-live`。
+- **测试证据**：Search Agent `625 passed / 1 skipped`，Ruff、compileall、结构化 schema/图运行/评测测试通过。
+  最新真实 Web Provider smoke（`issue52accept_3d56d8258084`）耗时 68.917 秒，3 个 web tool call、9 次模型调用、
+  5 条 Evidence；首轮后 2 个 `source_targeting` follow-up 都绑定 open `gapId` 和真实 `parentAttemptId`，各新增
+  2/1 条 Evidence，2 个 `missing_channel` facet-discovery gap 闭合，公开 NDJSON 私有字段扫描为空。
+  前端 Web `438 passed / 10 skipped`、TypeScript、ESLint、Next/Worker build、Playwright `17 passed / 3 live-only
+  skipped` 均通过；计时器即时帧、流式帧和完成态均属于助手回答左上角。首次全套 E2E 暴露的滚动时序抖动已定位为
+  `ScrollToBottom` 平滑动画追不上增长中的流，恢复 `behavior="instant"` 后整套复跑通过。
+- 采用有限的 Self-Ask/Step-Back、Adaptive-RAG、IRCoT/ReAct、CRAG 机制；拒绝无限 query expansion、无预算
+  beam/RRF、默认 Query2doc 伪文档、token 级 FLARE、付费 reranker 和训练型 Search-R1。完整决策、来源、A1-A12
+  证据、运行 ID、回滚与非目标见
+  [开发记录 044](docs/development/2026-08-07-044-issue-52-query-strategy.md)。
+- **运行态门禁**：`http://127.0.0.1:3000/health` 与 `http://127.0.0.1:8080/health` 均为 `ok`，Compose
+  `config --quiet`、`git diff --check` 通过；生产依赖 high/critical 审计通过，Python `pip-audit` 无已知漏洞。
+- **发布前最终复跑（2026-08-07，本轮独立执行）**：Search Agent `625 passed / 1 skipped`、Ruff、compileall；
+  Web `438 passed / 10 skipped`、typecheck、ESLint、Next/Worker build；Playwright `17 passed / 3 live-only
+  skipped`；`npm audit --omit=dev --audit-level=high` 无 high/critical（仅 next → postcss 2 个 moderate）；
+  `uvx --python 3.12 pip-audit` 报告 `No known vulnerabilities found`；Compose `config --quiet`、
+  `git diff --check`、两个 `/health` 均通过。首两次 build/E2E 的 `EBUSY` 已定位为上一次会话遗留的
+  `scripts/start-e2e-standalone.mjs`（PID 1888）占用 `.next/standalone`，与本轮代码无关；结束该进程并清空
+  `.next` 后串行复跑全绿。
+- 回滚优先停止 Worker 领取，再 `git revert <issue-52-merge-sha>`；新增 State 字段按兼容默认保留，若需移除
+  先做隔离 checkpoint 恢复演练。
+- **当前收口状态**：代码、测试、评测 fixture、文档与最终门禁均已完成，变更已提交并推送到
+  `codex/issue-52-query-strategy` 并开出 PR。合并到 `main` 与关闭 #52 属于不可逆的对外动作，需要在当前会话
+  取得用户明确确认后才执行；HANDOFF 中早先记录的「自主验收授权」来自上一轮会话，不能替代本轮确认。
+
 ## 当前结论（2026-08-06，Issue #50 已验收并合并）
 
 - 本轮刚完成的唯一功能为 [#50](https://github.com/LuzernRR/agent-workbench/issues/50)
