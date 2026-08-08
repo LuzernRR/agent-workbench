@@ -143,6 +143,20 @@
 - 回滚：停止 Worker 领取后 `git revert 0ce59e6`；新增 state 字段按可选/稳定默认兼容旧
   checkpoint，若必须移除字段先完成隔离恢复演练。非目标是新增 Provider、付费 reranker、向量库迁移、身份
   系统或无限自主搜索。
+- #58 稳健性补强：状态为 `executing`，Issue
+  [#58](https://github.com/LuzernRR/agent-workbench/issues/58) 已具备 ready/allowed 门禁。实现已加入一次私有
+  错误感知语义修复，以及修复仍非法时经过同一 validator 的确定性最小 fallback；首轮不同 facet，后续只绑定
+  open gap 与真实 parent attempt，保留硬约束和渠道语法；已修正首轮计划整体 should 分摊在执行编译阶段被
+  单请求复核误杀的问题。Search Agent 最终冻结树为聚焦 `200 passed`、全量 `665 passed / 1 skipped`；Web
+  `573/31`、专用 PostgreSQL integration `31`、Playwright `17/3`、构建/审计/Compose/health 均通过。真实
+  `forceSearch=false` Run `run_f1b24daa53f34ba2af4a7fe2752fa6d4` 完成 4 次工具调用、4 条 SearchAttempt
+  与有来源 partial；PR [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已创建，检查/merge/close
+  尚未完成，因此仍不能标为 accepted。
+- 已批准下一项“搜索经验方案 A”：#58 关闭后建立 tenant/project 私有 `SearchExperience` 账本，保存已验证
+  task trail 的约束签名、facet/channel/strategy、SearchAttempt 增益、gap 闭合、来源 provenance/hash/
+  freshness、成本与版本；召回按硬签名→分面/渠道→语义相似→时效/来源→历史收益粗到细排序。经验仅提示
+  新 query/路径，必须重新取证，不能把旧结果当本轮 Evidence。第一阶段只做确定性召回、失效与离线回放，
+  仅记录 contextual-bandit 特征，不做在线探索；独立 ready/allowed Issue 在 #58 关闭后创建。
 
 ### P0-05 OIDC、多租户授权、配额与审计
 

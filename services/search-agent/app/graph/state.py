@@ -394,6 +394,9 @@ class SearchState(TypedDict, total=False):
     plan_revision: int
     plan_ready: bool
     plan_error_code: str | None
+    plan_source: Literal["model", "runtime"]
+    plan_repair_count: int
+    plan_fallback_count: int
     fast_path: bool  # 本轮是否走单事实快路径；退回完整规划后必须复位为 False
     pending_plan_step_ids: list[str]
     searches: list[SearchRequest]  # 已接受的查询+渠道历史；去重以二者组合为准
@@ -502,6 +505,9 @@ def initial_state(
         plan_revision=0,
         plan_ready=False,
         plan_error_code=None,
+        plan_source="runtime",
+        plan_repair_count=0,
+        plan_fallback_count=0,
         fast_path=False,
         query_brief=None,
         pending_plan_step_ids=[],

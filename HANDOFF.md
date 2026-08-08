@@ -1,6 +1,47 @@
 # 项目交接
 
-## 当前结论（2026-08-08，Issue #56 已验收、合并并关闭）
+## 当前结论（2026-08-08，Issue #58 已通过本地验收，正在 GitHub 收口）
+
+- 当前唯一活动功能为 [#58](https://github.com/LuzernRR/agent-workbench/issues/58)“搜索计划校验失败后的关键词
+  修复与确定性 fallback”，分支 `codex/issue-58-query-plan-fallback`；GitHub 状态为 `Status: ready`、
+  `Execution Gate: allowed`，PR [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已创建。用户已确认
+  方案并授权 Codex 在完整测试后自主验收；代码、全量门禁和真实 Provider smoke 已通过，但 PR 检查/合并与
+  Issue 关闭尚未完成，因此状态仍是 `executing`，不能提前写成 accepted。
+- **真实根因**：#56 最终 smoke 中 `run_278120d58722490b883333c9b5f8ce0d` 与
+  `run_d0d13d42b61e4c35824ae51689a697da` 先后触发 `PLAN_INITIAL_FACET_DUPLICATE` 和
+  `QUERY_FOLLOW_UP_LINEAGE_REQUIRED`；Provider 没有被调用，最终 `toolCalls=0` partial。#58 将 planner
+  拒绝转换为一次带 `errorCode/fieldPath/rejectedPlan` 的私有语义修复；修复仍非法时，从 QueryBrief、授权渠道、
+  facet、真实 SearchAttempt 和 open EvidenceGap 生成稳定、可验证的最小 fallback。
+- **当前实现**：首轮 fallback 最多两个不同 facet，保留 must/exclude/date/region/language/source tier/字段/渠道并
+  继续经过既有 validator；后续 fallback 只能绑定真实 parent attempt 与 open gap，按 no-results、不可读正文、
+  缺字段、缺渠道或冲突选择枚举策略。零 SearchAttempt 的旧 checkpoint 重新按 initial 规划，不伪造 lineage；
+  X 双语要求每次只选择一个 `lang:`，避免不可能的语言交集；Planner 改写不再清零真实 no-progress 计数。
+- **运行态追加根因与修复**：首个重建后 Run `run_5617c38ab51e48fa944e97e6c639a5c7` 暴露第二层缺口：
+  两个合法首轮 PlanStep 已进入 running，但执行编译把“计划整体分摊 should”错误地按“每个请求包含全部 should”
+  二次校验，两个请求均被静默丢弃为 `branches=0`。现仅当请求与当前/历史首轮 PlanStep 逐字段完全绑定、且计划
+  整体覆盖所有 should 时允许分摊；未绑定、越权、重复或伪造 checkpoint 仍 fail closed。
+- **最新代码门禁**：最终冻结树 Search Agent 全量 `665 passed / 1 skipped`，聚焦
+  structured-plan/query-strategy/graph-runtime `200 passed`，Ruff、compileall 与 `git diff --check` 通过。
+  离线矩阵已经覆盖 Web 官方/学术来源、奖学金日期地域、X 近 90 天、小红书自然关键词、零结果 `broaden_should`、
+  冲突补证、双重非法 planner、无最终化预算和旧 checkpoint 恢复。
+- **完整发布门禁**：Web `573 passed / 31 skipped`，专用 loopback PostgreSQL integration `31 passed`，
+  typecheck、ESLint、Next/Worker build 通过；Playwright 最终整套 `17 passed / 3 live-only skipped`（首轮一个滚动
+  时序用例失败，聚焦复跑与完整复跑均通过）；npm audit 为 0，pip-audit 无已知漏洞，Compose config、8 项本地
+  secret/ACL 检查与 Web/Search Agent health 全通过。
+- **真实 `forceSearch=false` 验收**：`run_f1b24daa53f34ba2af4a7fe2752fa6d4` 唯一 `run.completed`，4 个非空
+  toolCallId、4 个 completed SearchAttempt；首轮两个不同 facet，两个 `source_targeting` follow-up 均绑定真实
+  parentAttemptId/open gap。账本为 20 results、10 次正文读取、9 Evidence、5 citations、48,749 tokens；127 条
+  outbox 全发布，pending settlement=0，lease owner/expiry 已清空。终态因 `TOOL_CALL_LIMIT` 为有来源 partial，
+  符合 A6；公开事件敏感字段扫描为 0。
+- **经验方案 A 已批准，但不混入 #58**：下一独立 Issue 将建立私有 `SearchExperience` 账本，只沉淀已验证任务的
+  QueryBrief 签名、facet/channel/strategy、SearchAttempt 客观增益、EvidenceGap 闭合、来源 provenance、
+  freshness、版本与成本；召回顺序为硬约束签名 → facet/channel → 语义相似 → 时效/来源校验 → 历史收益。
+  经验只能作为新 query/路径提示，必须重新搜索和核验证据，不能把旧结果直接当当前 Evidence。第一阶段只记录
+  contextual-bandit 特征并做离线回放，不启用在线探索；#58 关闭前不创建第二个活动 Issue。
+- **#58 剩余闭环**：等待并处理 PR #59 的真实检查/评论，合并、关闭 Issue、同步 main 并回填真实 merge SHA；
+  随后才从已批准方案 A 创建唯一下一 Issue。
+
+## 上一轮结论（2026-08-08，Issue #56 已验收、合并并关闭）
 
 - [#56](https://github.com/LuzernRR/agent-workbench/issues/56) 已按用户预授权完成 Codex 自主验收；PR
   [#57](https://github.com/LuzernRR/agent-workbench/pull/57) 已 squash 合入 `main`，merge commit 为
@@ -68,7 +109,7 @@
   PR #55 合入 `main@314e28d`，Issue #54 随后关闭。历史实现、当时测试数字和 post-merge 勘误见
   [开发记录 045](docs/development/2026-08-08-045-issue-54-tenant-isolation.md)。
 - post-merge 审查发现两项未满足原 DoD 的缺口：断言密钥复用 transport token；审计仅覆盖 Run admission，
-  尚未完整覆盖资源授权拒绝与 Run queued/terminal 生命周期。这两项由当前唯一活动 Issue #56 收口。
+  尚未完整覆盖资源授权拒绝与 Run queued/terminal 生命周期。这两项当时由唯一活动 Issue #56 收口。
 
 ## 上一轮结论（2026-08-07，Issue #52 查询理解与反馈驱动检索已验收并合并）
 

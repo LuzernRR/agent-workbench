@@ -5,16 +5,20 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app.graph.query_strategy import (
+    EvidenceFacet,
     QueryBrief,
     QueryGateError,
     complete_initial_plan_should_metadata,
     complete_query_constraint_terms,
     complete_query_lineage,
+    hard_constraint_ids,
     stable_attempt_id,
+    validate_channel_query,
     validate_query_proposal,
 )
 from app.graph.state import PlanSnapshot, PlanStep, SearchRequest
@@ -27,6 +31,457 @@ class PlanValidationError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+_PLAN_ERROR_FIELD_PATHS = {
+    "PLAN_TOOL_BUDGET_EXCEEDED": "steps",
+    "PLAN_INITIAL_QUERY_LIMIT": "steps",
+    "PLAN_INITIAL_FACET_DUPLICATE": "steps[*].facet_id",
+    "PLAN_EVIDENCE_TARGET_EXCEEDS_CALL_CAPACITY": "steps[*].evidence_needed",
+    "PLAN_EVIDENCE_BUDGET_EXCEEDED": "steps[*].evidence_needed",
+    "PLAN_DUPLICATE_STEP_ID": "steps[*].local_id",
+    "PLAN_CHANNEL_NOT_ALLOWED": "steps[*].channel",
+    "PLAN_QUERY_ALREADY_EXECUTED": "steps[*].query",
+    "PLAN_DUPLICATE_QUERY": "steps[*].query",
+    "PLAN_DEPENDENCY_MISSING": "steps[*].depends_on",
+    "PLAN_DEPENDENCY_DUPLICATE": "steps[*].depends_on",
+    "PLAN_DEPENDENCY_CYCLE": "steps[*].depends_on",
+    "PLAN_NO_RUNNABLE_ROOT": "steps[*].depends_on",
+    "QUERY_FOLLOW_UP_LINEAGE_REQUIRED": "steps[*].parent_attempt_id",
+    "QUERY_PARENT_ATTEMPT_UNKNOWN": "steps[*].parent_attempt_id",
+    "QUERY_PARENT_ATTEMPT_FACET_MISMATCH": "steps[*].parent_attempt_id",
+    "QUERY_GAP_NOT_OPEN": "steps[*].gap_id",
+    "QUERY_GAP_FACET_MISMATCH": "steps[*].facet_id",
+    "QUERY_FACET_UNKNOWN": "steps[*].facet_id",
+    "QUERY_CHANNEL_INVALID": "steps[*].channel",
+    "QUERY_CHANNEL_NOT_ALLOWED": "steps[*].channel",
+    "QUERY_TEXT_INVALID": "steps[*].query",
+    "QUERY_LENGTH_INVALID": "steps[*].query",
+    "QUERY_TOO_LONG_FOR_CHANNEL": "steps[*].query",
+    "QUERY_OPERATOR_UNSUPPORTED": "steps[*].query",
+    "QUERY_MUST_CONSTRAINT_DROPPED": "steps[*].query",
+    "QUERY_SHOULD_CONSTRAINT_DROPPED": "steps[*].query",
+    "QUERY_LOCATION_DROPPED": "steps[*].query",
+    "QUERY_TIME_RANGE_DROPPED": "steps[*].query",
+    "QUERY_EXCLUSION_DROPPED": "steps[*].query",
+    "QUERY_REQUIRED_CHANNEL_DROPPED": "steps[*].query",
+    "QUERY_TERMS_INVALID": "steps[*].query_terms",
+    "QUERY_INITIAL_LINEAGE_INVALID": "steps[*].gap_id",
+    "QUERY_STRATEGY_GAP_MISMATCH": "steps[*].strategy",
+    "QUERY_RELAXATION_NOT_ALLOWED": "steps[*].relaxed_should_ids",
+    "QUERY_NEAR_DUPLICATE": "steps[*].query",
+    "QUERY_CONSTRAINT_SIGNATURE_DROPPED": "steps[*].retained_constraint_ids",
+    "QUERY_CONSTRAINT_SIGNATURE_INVALID": "steps[*].retained_constraint_ids",
+    "QUERY_SHOULD_CONSTRAINT_CONFLICT": "steps[*].retained_constraint_ids",
+    "QUERY_SHOULD_CONSTRAINT_UNACCOUNTED": "steps[*].retained_constraint_ids",
+}
+
+_CHANNEL_ORDER: tuple[ChannelName, ...] = ("web", "x", "xiaohongshu")
+_CHANNEL_BY_NAME: dict[str, ChannelName] = {
+    channel: channel for channel in _CHANNEL_ORDER
+}
+_EVIDENCE_TYPE_HINTS = {
+    "official": "official documentation",
+    "primary": "primary source",
+    "independent": "independent analysis",
+    "social": "user experience",
+    "comparison": "comparison",
+    "field": "field evidence",
+}
+_XIAOHONGSHU_EVIDENCE_TYPE_HINTS = {
+    "official": "官方资料",
+    "primary": "一手资料",
+    "independent": "独立评测",
+    "social": "用户体验",
+    "comparison": "真实对比",
+    "field": "实地证据",
+}
+_QUERY_VARIANTS = {
+    "web": ("source", "documentation", "reference", "case study", "analysis", "evidence"),
+    "x": ("announcement", "update", "thread", "discussion", "source", "evidence"),
+    "xiaohongshu": ("实测", "体验", "攻略", "对比", "测评", "案例"),
+}
+_STRATEGY_BY_GAP = {
+    "no_results": "terminology_variant",
+    "no_readable_evidence": "source_targeting",
+    "missing_claim": "facet_expansion",
+    "missing_constraint": "facet_expansion",
+    "missing_channel": "source_targeting",
+    "conflicting_sources": "conflict_resolution",
+    "missing_field": "field_completion",
+}
+
+
+def plan_validation_feedback(
+    error: PlanValidationError,
+    rejected_plan: Any,
+) -> dict[str, Any]:
+    """Return bounded private feedback for one semantic planner repair.
+
+    This payload is sent only back to the planner model.  It is deliberately
+    separate from AgentEvent/public summaries so invalid queries, lineage and
+    private QueryBrief-derived metadata never become UI text.
+    """
+
+    payload = (
+        rejected_plan.model_dump(mode="json")
+        if hasattr(rejected_plan, "model_dump")
+        else dict(rejected_plan)
+        if isinstance(rejected_plan, Mapping)
+        else {"steps": []}
+    )
+    return {
+        "errorCode": error.code,
+        "fieldPath": _PLAN_ERROR_FIELD_PATHS.get(error.code, "steps"),
+        "message": str(error)[:240],
+        "rejectedPlan": payload,
+    }
+
+
+def _ordered_channels(
+    brief: QueryBrief,
+    allowed_channels: set[ChannelName],
+) -> list[ChannelName]:
+    required = [
+        channel
+        for channel in brief.required_channels
+        if channel in allowed_channels
+    ]
+    return [
+        *required,
+        *(
+            channel
+            for channel in _CHANNEL_ORDER
+            if channel in allowed_channels and channel not in required
+        ),
+    ]
+
+
+def _contains_excluded_term(brief: QueryBrief, value: str) -> bool:
+    normalized = _normalized_query(value).strip('"')
+    for constraint in brief.exclude:
+        for term in constraint.terms:
+            target = _normalized_query(term).strip('"')
+            if not target:
+                continue
+            if re.search(r"[a-z0-9]", target):
+                if re.search(
+                    rf"(?<![a-z0-9_]){re.escape(target)}(?![a-z0-9_])",
+                    normalized,
+                ):
+                    return True
+            elif target in normalized:
+                return True
+    return False
+
+
+def _language_markers(
+    brief: QueryBrief,
+    channel: ChannelName,
+    *,
+    variant_index: int,
+) -> list[str]:
+    markers: list[str] = []
+    for language in brief.languages:
+        normalized = language.casefold()
+        base = normalized.split("-", 1)[0]
+        if channel == "x":
+            marker = f"lang:{base}"
+        elif base == "zh":
+            marker = "中文"
+        elif base == "en":
+            marker = "English"
+        else:
+            marker = language
+        if marker not in markers:
+            markers.append(marker)
+    # X treats repeated lang: operators as an intersection, so a bilingual
+    # brief must distribute languages across attempts instead of generating an
+    # impossible `lang:zh lang:en` query. Other channels accept natural
+    # language cues together.
+    if channel == "x" and markers:
+        return [markers[variant_index % len(markers)]]
+    return markers
+
+
+def _bounded_query_chunks(
+    brief: QueryBrief,
+    candidates: Iterable[str],
+    *,
+    maximum_chars: int,
+) -> list[str]:
+    chunks: list[str] = []
+    normalized_seen: set[str] = set()
+    for candidate in candidates:
+        value = " ".join(str(candidate).split())
+        if not value or _contains_excluded_term(brief, value):
+            continue
+        # query_terms has an 80-character item cap.  Keeping the same bound on
+        # chunks also prevents a single verbose objective from crowding out the
+        # facet, language and source-tier markers.
+        value = value[:80].rstrip()
+        key = _normalized_query(value)
+        if not value or key in normalized_seen:
+            continue
+        prospective = " ".join([*chunks, value])
+        if len(prospective) > maximum_chars:
+            continue
+        chunks.append(value)
+        normalized_seen.add(key)
+    return chunks
+
+
+def _query_terms(value: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in value.split():
+        term = raw.strip('"')[:80]
+        key = term.casefold()
+        if not term or key in seen:
+            continue
+        terms.append(term)
+        seen.add(key)
+        if len(terms) == 12:
+            break
+    return terms or ["evidence"]
+
+
+def _fallback_query_proposal(
+    brief: QueryBrief,
+    *,
+    facet: EvidenceFacet,
+    channel: ChannelName,
+    strategy: str,
+    variant_index: int,
+    gap_id: str | None,
+    parent_attempt_id: str | None,
+    relaxed_should_ids: list[str],
+) -> dict[str, Any]:
+    variant_values = _QUERY_VARIANTS[channel]
+    variant = variant_values[variant_index % len(variant_values)]
+    evidence_hint = (
+        _XIAOHONGSHU_EVIDENCE_TYPE_HINTS.get(facet.evidence_type, "可核验证据")
+        if channel == "xiaohongshu"
+        else _EVIDENCE_TYPE_HINTS.get(facet.evidence_type, "evidence")
+    )
+    anchors = [
+        *brief.entities[:4],
+        *(item.terms[0] for item in brief.must),
+    ]
+    objective_cue = (
+        brief.objective[:20].rstrip()
+        if channel == "xiaohongshu"
+        else brief.objective
+    )
+    candidates = [
+        *anchors,
+        *([objective_cue] if not anchors else []),
+        *facet.required_fields[:3],
+        evidence_hint,
+        *_language_markers(
+            brief,
+            channel,
+            variant_index=variant_index,
+        ),
+        variant,
+        facet.description,
+        *([brief.objective] if anchors else []),
+    ]
+    maximum_seed_chars = 44 if channel == "xiaohongshu" else 180
+    chunks = _bounded_query_chunks(
+        brief,
+        candidates,
+        maximum_chars=maximum_seed_chars,
+    )
+    if not chunks:
+        chunks = ["公开证据" if channel == "xiaohongshu" else "public evidence"]
+    raw = {
+        "facet_id": facet.facet_id,
+        "query_terms": chunks[:12],
+        "strategy": strategy,
+        "query": " ".join(chunks),
+        "channel": channel,
+        "gap_id": gap_id,
+        "parent_attempt_id": parent_attempt_id,
+        "retained_constraint_ids": list(hard_constraint_ids(brief)),
+        "relaxed_should_ids": relaxed_should_ids,
+    }
+    repaired = complete_query_constraint_terms(
+        brief,
+        raw,
+        complete_all_should=strategy != "initial_precise",
+    )
+    try:
+        repaired["query"] = validate_channel_query(repaired["query"], channel)
+    except QueryGateError as exc:
+        raise PlanValidationError(exc.code, str(exc)) from exc
+    repaired["query_terms"] = _query_terms(repaired["query"])
+    return repaired
+
+
+def _fallback_parent(
+    gap: Mapping[str, Any],
+    prior_attempts: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    facet_id = str(gap.get("facet_id") or "")
+    facet_attempts = [
+        item
+        for item in prior_attempts
+        if str(item.get("facet_id") or "") == facet_id
+        and str(item.get("attempt_id") or "")
+    ]
+    if facet_attempts:
+        return facet_attempts[-1]
+    if gap.get("origin") == "facet_discovery":
+        return next(
+            (
+                item
+                for item in reversed(prior_attempts)
+                if str(item.get("attempt_id") or "")
+            ),
+            None,
+        )
+    return None
+
+
+def build_deterministic_fallback_steps(
+    *,
+    query_brief: QueryBrief,
+    allowed_channels: set[ChannelName],
+    prior_attempts: Sequence[dict[str, Any]],
+    open_gaps: Sequence[dict[str, Any]],
+    max_steps: int,
+    max_evidence_per_step: int,
+    initial: bool,
+) -> list[dict[str, Any]]:
+    """Build a stable executable plan after bounded model repair is exhausted."""
+
+    channels = _ordered_channels(query_brief, allowed_channels)
+    if max_steps < 1 or not channels:
+        raise PlanValidationError(
+            "PLAN_FALLBACK_UNAVAILABLE",
+            "确定性计划没有可用步骤预算或授权渠道",
+        )
+    facets = {item.facet_id: item for item in query_brief.evidence_facets}
+    evidence_needed = min(1, max(0, max_evidence_per_step))
+    steps: list[dict[str, Any]] = []
+
+    if initial:
+        gap_facets = [
+            str(item.get("facet_id") or "")
+            for item in open_gaps
+            if item.get("status") == "open"
+            and str(item.get("facet_id") or "") in facets
+        ]
+        ordered_facet_ids = list(dict.fromkeys([
+            *gap_facets,
+            *(item.facet_id for item in query_brief.evidence_facets),
+        ]))
+        for index, facet_id in enumerate(ordered_facet_ids[: min(max_steps, 2)]):
+            facet = facets[facet_id]
+            channel = channels[index % len(channels)]
+            proposal = _fallback_query_proposal(
+                query_brief,
+                facet=facet,
+                channel=channel,
+                strategy="initial_precise",
+                variant_index=index,
+                gap_id=None,
+                parent_attempt_id=None,
+                relaxed_should_ids=[],
+            )
+            steps.append({
+                "local_id": f"fallback_initial_{index + 1}",
+                "facet_id": facet.facet_id,
+                "facet": facet.description[:200],
+                "objective": query_brief.objective,
+                **proposal,
+                "depends_on": [],
+                "priority": 100 - index,
+                "evidence_needed": evidence_needed,
+                "can_parallelize": len(ordered_facet_ids) > 1,
+            })
+        return steps
+
+    ordered_gaps = sorted(
+        (
+            item
+            for item in open_gaps
+            if item.get("status") == "open"
+            and str(item.get("facet_id") or "") in facets
+        ),
+        key=lambda item: (
+            -int(item.get("priority") or 0),
+            int(item.get("opened_iteration") or 0),
+            str(item.get("gap_id") or ""),
+        ),
+    )
+    for gap in ordered_gaps:
+        parent = _fallback_parent(gap, prior_attempts)
+        if parent is None:
+            continue
+        facet = facets[str(gap["facet_id"])]
+        required_channel = str(gap.get("required_channel") or "")
+        parent_channel = str(parent.get("channel") or "")
+        channel = next(
+            (
+                _CHANNEL_BY_NAME[item]
+                for item in (required_channel, parent_channel, *channels)
+                if item in _CHANNEL_BY_NAME
+                and _CHANNEL_BY_NAME[item] in allowed_channels
+            ),
+            channels[0],
+        )
+        kind = str(gap.get("kind") or "missing_claim")
+        strategy = _STRATEGY_BY_GAP.get(kind, "facet_expansion")
+        if kind == "no_results" and query_brief.should:
+            strategy = "broaden_should"
+        if (
+            kind in {"missing_channel", "no_readable_evidence"}
+            and channel == "web"
+            and parent_channel in {"x", "xiaohongshu"}
+        ):
+            strategy = "channel_fallback"
+        relaxed_should_ids = (
+            [item.constraint_id for item in query_brief.should]
+            if strategy == "broaden_should"
+            else []
+        )
+        same_scope_attempts = sum(
+            1
+            for item in prior_attempts
+            if str(item.get("facet_id") or "") == facet.facet_id
+            and str(item.get("channel") or "") == channel
+        )
+        proposal = _fallback_query_proposal(
+            query_brief,
+            facet=facet,
+            channel=channel,
+            strategy=strategy,
+            variant_index=same_scope_attempts,
+            gap_id=str(gap["gap_id"]),
+            parent_attempt_id=str(parent["attempt_id"]),
+            relaxed_should_ids=relaxed_should_ids,
+        )
+        steps.append({
+            "local_id": f"fallback_follow_up_{len(steps) + 1}",
+            "facet_id": facet.facet_id,
+            "facet": facet.description[:200],
+            "objective": str(gap.get("description") or query_brief.objective)[:500],
+            **proposal,
+            "depends_on": [],
+            "priority": 100 - len(steps),
+            "evidence_needed": evidence_needed,
+            "can_parallelize": False,
+        })
+        if len(steps) >= max_steps:
+            break
+    if not steps:
+        raise PlanValidationError(
+            "PLAN_FALLBACK_LINEAGE_UNAVAILABLE",
+            "确定性补搜没有可绑定的真实 open gap 与父尝试",
+        )
+    return steps
 
 
 def _normalized_query(value: str) -> str:
