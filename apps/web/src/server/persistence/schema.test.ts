@@ -63,5 +63,63 @@ describe("工作台数据库结构", () => {
     expect(WORKBENCH_SCHEMA_SQL).toContain("wb_agent_event_outbox_attempts_nonnegative");
     expect(WORKBENCH_SCHEMA_SQL).toContain("wb_agent_events_outbox_identity");
     expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE INDEX IF NOT EXISTS wb_agent_event_outbox_pending_idx");
+
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS wb_run_terminal_settlements");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("staged_lease_owner text NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("staged_lease_epoch bigint NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("source_events jsonb NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("projected_events jsonb NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("terminal_status text NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CHECK (terminal_status IN ('failed', 'stopped'))");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("stopped_payload jsonb NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("settled_status text");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("ALTER COLUMN terminal_status DROP DEFAULT");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("canonical_hash char(64) NOT NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_run_terminal_settlements_run_visitor_fk");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_run_terminal_settlements_pending_status_null");
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "settled_at IS NOT NULL OR settled_status IS NULL"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_run_terminal_settlements_terminal_to_settled_status_valid");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("settled_at IS NULL");
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "(terminal_status = 'stopped' AND settled_status = 'stopped')"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "(terminal_status = 'failed' AND settled_status IN ('failed', 'stopped'))"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "DROP CONSTRAINT IF EXISTS wb_run_terminal_settlements_status_transition_valid"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).not.toContain(
+      "ADD CONSTRAINT wb_run_terminal_settlements_status_transition_valid"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain("settled_lease_epoch >= staged_lease_epoch");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("wb_run_terminal_settlements_immutable");
+  });
+
+  it("租户 usage 与 audit 通过复合外键绑定到真实访客和运行", () => {
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CONSTRAINT wb_visitors_id_tenant_key UNIQUE (id, tenant_id)");
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "CONSTRAINT wb_tenant_usage_visitor_tenant_fk FOREIGN KEY (visitor_id, tenant_id) REFERENCES wb_visitors(id, tenant_id) ON DELETE CASCADE"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "CONSTRAINT wb_tenant_usage_run_visitor_fk FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "CONSTRAINT wb_audit_events_visitor_tenant_fk FOREIGN KEY (visitor_id, tenant_id) REFERENCES wb_visitors(id, tenant_id) ON DELETE SET NULL (visitor_id)"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain("UPDATE wb_tenant_usage AS usage");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("UPDATE wb_audit_events AS audit");
+  });
+
+  it("Run 生命周期审计允许排队和终态，并由两个唯一索引幂等", () => {
+    expect(WORKBENCH_SCHEMA_SQL).toContain(
+      "CHECK (outcome IN ('allowed', 'denied', 'queued', 'completed', 'failed', 'stopped'))"
+    );
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE UNIQUE INDEX IF NOT EXISTS wb_audit_events_run_queued_once_idx");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("outcome = 'queued'");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("CREATE UNIQUE INDEX IF NOT EXISTS wb_audit_events_run_terminal_once_idx");
+    expect(WORKBENCH_SCHEMA_SQL).toContain("outcome IN ('completed', 'failed', 'stopped')");
   });
 });

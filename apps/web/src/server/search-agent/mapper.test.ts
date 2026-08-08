@@ -327,14 +327,21 @@ describe("Search Agent v1 白名单投影", () => {
   });
 
   it("诚实映射 partial、failed、unknown 与 stopped", () => {
+    const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 };
     const partial = mapSearchAgentEvent(source({ type: "run.completed", answerMarkdown: "证据不足的回答", answerSource: "model", answerModelCalls: 1, promptVersion: "2026-07-28.v2", responseStatus: "partial", citations: [], verificationPassed: false, stopReason: "SEARCH_UNAVAILABLE", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0 }, modelCalls: 2, toolCalls: 1, evidenceCount: 0 }));
     expect(partial.terminal).toEqual(expect.objectContaining({ kind: "completed", remember: false, payload: expect.objectContaining({ promptVersion: "2026-07-28.v2", partial: true, responseStatus: "partial", answerSource: "model", answerModelCalls: 1 }) }));
+
+    const failed = mapSearchAgentEvent(source({ type: "run.failed", reasonCode: "SEARCH_UNAVAILABLE", message: "搜索不可用", usage }));
+    expect(failed.terminal).toEqual(expect.objectContaining({
+      kind: "failed",
+      payload: expect.objectContaining({ reasonCode: "SEARCH_UNAVAILABLE", usage })
+    }));
 
     const unknown = mapSearchAgentEvent(source({ type: "tool.unknown", toolCallId: "call_unknown", toolName: "web_search", query: "查询", channel: "web", reasonCode: "OUTCOME_UNKNOWN" }));
     expect(unknown.events[0]).toEqual(expect.objectContaining({ type: "tool.unknown", payload: expect.objectContaining({ status: "unknown", nextAction: "check_operation" }) }));
 
-    const stopped = mapSearchAgentEvent(source({ type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED" }));
-    expect(stopped.terminal).toEqual(expect.objectContaining({ kind: "stopped", payload: expect.objectContaining({ reasonCode: "USER_STOPPED", partial: true, sourceEventId: "stream_test_000001" }) }));
+    const stopped = mapSearchAgentEvent(source({ type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED", usage }));
+    expect(stopped.terminal).toEqual(expect.objectContaining({ kind: "stopped", payload: expect.objectContaining({ reasonCode: "USER_STOPPED", partial: true, usage, sourceEventId: "stream_test_000001" }) }));
   });
 
   it("direct completed 不误报外部证据核验", () => {

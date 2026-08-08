@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query, transaction } from "@/server/persistence/database";
 
@@ -121,7 +122,7 @@ export type AuditInput = {
   tenantId: string;
   visitorId: string | null;
   action: string;
-  outcome: "allowed" | "denied";
+  outcome: "allowed" | "denied" | "queued" | "completed" | "failed" | "stopped";
   reasonCode: string;
   resourceKind?: string | null;
   resourceId?: string | null;
@@ -157,6 +158,79 @@ export async function recordAuditEvent(input: AuditInput): Promise<void> {
   ]);
 }
 
+export type AuthorizationAuditAction =
+  | "project.read"
+  | "project.update"
+  | "project.delete"
+  | "project.reorder"
+  | "thread.create"
+  | "thread.read"
+  | "thread.update"
+  | "thread.delete"
+  | "run.start"
+  | "run.read"
+  | "run.stop"
+  | "run.verification.read"
+  | "run.verification.cancel"
+  | "attachment.upload"
+  | "attachment.use"
+  | "attachment.read"
+  | "memory.read"
+  | "memory.write"
+  | "memory.delete";
+
+export type AuthorizationResourceKind = "project" | "thread" | "run" | "attachment" | "memory";
+
+export type AuthorizationDeniedInput = {
+  tenantId: string;
+  visitorId: string;
+  action: AuthorizationAuditAction;
+  resourceKind: AuthorizationResourceKind;
+  resourceId?: string | null;
+};
+
+export function memoryAuthorizationScope(
+  parentKind: Extract<AuthorizationResourceKind, "project" | "thread">,
+  parentId: string
+) {
+  return `${parentKind}:${parentId}`;
+}
+
+function safeAuditResourceId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (/^[A-Za-z0-9_.:-]{1,128}$/u.test(value)) return value;
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+export async function recordAuthorizationDenialsWithClient(
+  client: PoolClient,
+  inputs: AuthorizationDeniedInput[]
+): Promise<void> {
+  for (const input of inputs) {
+    await recordAuditEventWithClient(client, {
+      ...input,
+      outcome: "denied",
+      reasonCode: "RESOURCE_NOT_OWNED_OR_MISSING",
+      resourceId: safeAuditResourceId(input.resourceId)
+    });
+  }
+}
+
+export async function recordAuthorizationDeniedWithClient(
+  client: PoolClient,
+  input: AuthorizationDeniedInput
+): Promise<void> {
+  await recordAuthorizationDenialsWithClient(client, [input]);
+}
+
+export async function recordAuthorizationDenials(inputs: AuthorizationDeniedInput[]): Promise<void> {
+  await transaction((client) => recordAuthorizationDenialsWithClient(client, inputs));
+}
+
+export async function recordAuthorizationDenied(input: AuthorizationDeniedInput): Promise<void> {
+  await recordAuthorizationDenials([input]);
+}
+
 /**
  * Evaluate all four dimensions for one run admission and persist the decision.
  * Dimensions are checked cheapest-first and the first breach wins, so a denied
@@ -165,8 +239,22 @@ export async function recordAuditEvent(input: AuditInput): Promise<void> {
 export async function checkRunAdmission(input: {
   tenantId: string;
   visitorId: string;
+  resourceId?: string | null;
 }): Promise<QuotaDecision> {
-  return transaction(async (client) => {
+  return transaction((client) => checkRunAdmissionWithClient(client, input));
+}
+
+/**
+ * Transaction-scoped admission check. `prepareLiveRun` uses this overload so
+ * the allowed decision, durable Run insert, and queued lifecycle audit either
+ * commit together or all roll back. A denied decision is returned rather than
+ * thrown so its audit row can commit before the caller maps it to HTTP 429.
+ */
+export async function checkRunAdmissionWithClient(client: PoolClient, input: {
+  tenantId: string;
+  visitorId: string;
+  resourceId?: string | null;
+}): Promise<QuotaDecision> {
     const limits = await tenantLimits(client, input.tenantId);
 
     const recent = await client.query<{ count: string }>(`
@@ -215,10 +303,10 @@ export async function checkRunAdmission(input: {
       action: "run.start",
       outcome: "allowed",
       reasonCode: "QUOTA_WITHIN_LIMITS",
-      resourceKind: "run"
+      resourceKind: "run",
+      resourceId: input.resourceId ?? null
     });
     return { allowed: true };
-  });
 }
 
 async function deny(
@@ -267,4 +355,46 @@ export async function recordRunUsage(input: {
     Math.max(0, Math.floor(input.totalTokens)),
     Math.max(0, input.costUsd)
   ]);
+}
+
+const usageNumber = (source: Record<string, unknown>, key: string) => {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+};
+
+/**
+ * Persist one durable Run lifecycle state. Terminal usage and audit share the
+ * caller's transaction with the Run status and public terminal AgentEvent.
+ */
+export async function recordRunLifecycleWithClient(client: PoolClient, input: {
+  runId: string;
+  tenantId: string;
+  visitorId: string;
+  status: "queued" | "completed" | "failed" | "stopped";
+  payload: Record<string, unknown>;
+}): Promise<void> {
+  if (input.status !== "queued") {
+    const raw = input.payload.usage;
+    const usage = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    await recordRunUsage({
+      runId: input.runId,
+      tenantId: input.tenantId,
+      visitorId: input.visitorId,
+      inputTokens: usageNumber(usage, "input_tokens"),
+      outputTokens: usageNumber(usage, "output_tokens"),
+      totalTokens: usageNumber(usage, "total_tokens"),
+      costUsd: typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0
+        ? usage.cost_usd
+        : 0
+    }, client);
+  }
+  await recordAuditEventWithClient(client, {
+    tenantId: input.tenantId,
+    visitorId: input.visitorId,
+    action: "run.lifecycle",
+    outcome: input.status,
+    reasonCode: `RUN_${input.status.toUpperCase()}`,
+    resourceKind: "run",
+    resourceId: input.runId
+  });
 }

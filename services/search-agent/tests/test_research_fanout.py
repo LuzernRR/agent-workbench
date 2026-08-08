@@ -10,6 +10,7 @@ import pytest
 
 from app.config.agent import agent_config
 from app.graph import nodes
+from app.graph.build import build_graph
 from app.graph.plan import (
     build_plan_snapshot,
     requests_for_steps,
@@ -96,16 +97,22 @@ async def test_public_graph_definition_exposes_real_fanout_and_fanin_nodes(
         "load_context",
         "classify_intent",
         "plan_research",
+        "plan_fast_search",
         "mark_plan_running",
         "research",
         "merge_research",
+        "accept_fast_evidence",
         "reflect",
         "compose",
         "verify",
         "finalize",
     ]
+    compiled_nodes = set(build_graph().get_graph().nodes) - {"__start__", "__end__"}
+    assert set(graph["nodes"]) == compiled_nodes
+    assert "plan_fast_search" in graph["flow"]
     assert "Send(research fan-out)" in graph["flow"]
     assert "merge_research fan-in" in graph["flow"]
+    assert "accept_fast_evidence" in graph["flow"]
 
 
 def test_work_items_fan_out_regular_steps_and_group_xiaohongshu() -> None:

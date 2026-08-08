@@ -3,7 +3,8 @@ import type { ClaimedCheckpointBatch } from "@/server/live/checkpoint-batches";
 import type { ClaimedLiveRun, LiveCheckpointReference } from "@/server/live/store";
 
 const searchAgent = vi.hoisted(() => ({
-  streamSearchAgentRun: vi.fn()
+  streamSearchAgentRun: vi.fn(),
+  requestSearchAgentStop: vi.fn()
 }));
 
 const checkpointBatches = vi.hoisted(() => ({
@@ -29,8 +30,10 @@ const store = vi.hoisted(() => {
       _payload: Record<string, unknown>,
       _completion?: unknown
     ) => [{ type: "run.completed" }]),
-    renewLiveRunLease: vi.fn(async () => true),
+    renewLiveRunLease: vi.fn(async () => ({ renewed: true, stopRequested: false })),
     releaseLiveRunLease: vi.fn(async () => true),
+    stageClaimedTerminalSettlement: vi.fn(async (_claim: ClaimedLiveRun, _settlement: unknown) => ({ status: "staged" as const, hash: "a".repeat(64), settled: false })),
+    settleClaimedTerminalSettlement: vi.fn(async (_claim: ClaimedLiveRun) => ({ kind: "settled" as const, terminalStatus: "stopped" as "failed" | "stopped", events: [{ type: "run.cancelled" }] })),
     readClaimedLiveCheckpoint: vi.fn(async (): Promise<{
       valid: boolean;
       checkpoint: LiveCheckpointReference | null;
@@ -49,7 +52,8 @@ vi.mock("@/server/config/runtime-config", () => ({
 }));
 vi.mock("@/server/search-agent/client", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/server/search-agent/client")>(),
-  streamSearchAgentRun: searchAgent.streamSearchAgentRun
+  streamSearchAgentRun: searchAgent.streamSearchAgentRun,
+  requestSearchAgentStop: searchAgent.requestSearchAgentStop
 }));
 vi.mock("@/server/live/store", () => store);
 vi.mock("@/server/live/checkpoint-batches", async (importOriginal) => ({
@@ -58,6 +62,7 @@ vi.mock("@/server/live/checkpoint-batches", async (importOriginal) => ({
 }));
 
 import { SearchAgentRequestError } from "@/server/search-agent/client";
+import { TerminalSettlementConflictError } from "@/server/live/terminal-settlements";
 import {
   MAX_CHECKPOINT_SOURCE_BYTES,
   MAX_CHECKPOINT_SOURCE_EVENTS,
@@ -155,8 +160,10 @@ describe("durable run Worker executor", () => {
     store.reset();
     store.persistClaimedLiveEvent.mockClear();
     store.finalizeClaimedLiveRun.mockReset().mockResolvedValue([{ type: "run.completed" }]);
-    store.renewLiveRunLease.mockReset().mockResolvedValue(true);
+    store.renewLiveRunLease.mockReset().mockResolvedValue({ renewed: true, stopRequested: false });
     store.releaseLiveRunLease.mockReset().mockResolvedValue(true);
+    store.stageClaimedTerminalSettlement.mockReset().mockResolvedValue({ status: "staged", hash: "a".repeat(64), settled: false });
+    store.settleClaimedTerminalSettlement.mockReset().mockResolvedValue({ kind: "settled", terminalStatus: "stopped", events: [{ type: "run.cancelled" }] });
     store.readClaimedLiveCheckpoint.mockReset().mockResolvedValue({ valid: true, checkpoint: null });
     store.liveId.mockClear();
     checkpointBatches.commitClaimedCheckpointBatch.mockReset().mockImplementation(async (_claim, batch) => ({
@@ -168,9 +175,11 @@ describe("durable run Worker executor", () => {
         namespace: batch.boundary.checkpointNs,
         sessionId: batch.boundary.checkpointSessionId,
         step: batch.boundary.step
-      }
+      },
+      terminalStatus: batch.terminal?.status ?? null
     }));
     searchAgent.streamSearchAgentRun.mockReset();
+    searchAgent.requestSearchAgentStop.mockReset().mockResolvedValue("requested");
   });
 
   afterEach(() => {
@@ -230,6 +239,317 @@ describe("durable run Worker executor", () => {
         citations: [{ label: "官方来源", url: "https://example.com/source" }]
       }
     }]);
+  });
+
+  it("使用 checkpoint 事务返回的实际终态覆盖上游投影结果", async () => {
+    checkpointBatches.commitClaimedCheckpointBatch.mockImplementationOnce(async (_claim, batch) => ({
+      status: "committed",
+      revision: 1,
+      checkpoint: {
+        id: batch.boundary.checkpointId,
+        parentId: batch.boundary.parentCheckpointId,
+        namespace: batch.boundary.checkpointNs,
+        sessionId: batch.boundary.checkpointSessionId,
+        step: batch.boundary.step
+      },
+      terminalStatus: "stopped"
+    }));
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield completedEvent;
+      yield boundary();
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("stopped");
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      source: {
+        ...sourceEnvelope,
+        type: "run.failed" as const,
+        reasonCode: "SEARCH_UNAVAILABLE",
+        message: "搜索不可用",
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6, cost_usd: 0.01 }
+      },
+      outcome: "failed",
+      projectedType: "run.failed"
+    },
+    {
+      source: {
+        ...sourceEnvelope,
+        type: "run.stopped" as const,
+        runId: "run_one",
+        responseStatus: "partial" as const,
+        reasonCode: "USER_STOPPED",
+        usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4, cost_usd: 0.005 }
+      },
+      outcome: "stopped",
+      projectedType: "run.cancelled"
+    }
+  ] as const)("$source.type 终态把部分 usage 传给 $projectedType", async ({ source, outcome, projectedType }) => {
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield source;
+      yield boundary();
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe(outcome);
+    const committed = checkpointBatches.commitClaimedCheckpointBatch.mock.calls.at(-1)?.[1] as ClaimedCheckpointBatch;
+    expect(committed.events.at(-1)).toEqual({
+      type: projectedType,
+      payload: expect.objectContaining({ usage: source.usage })
+    });
+    expect(committed.terminal).toEqual({ status: outcome });
+  });
+
+  it("首个 checkpoint 前的唯一 run.failed 先耐久 stage 再以真实 usage 和过程事件原子收口", async () => {
+    const usage = { input_tokens: 5, output_tokens: 2, total_tokens: 7, cost_usd: 0.012 };
+    store.settleClaimedTerminalSettlement.mockResolvedValueOnce({ kind: "settled", terminalStatus: "failed", events: [{ type: "run.failed" }] });
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "node.completed",
+        node: "plan_research",
+        nodeRunId: "plan_before_direct_failure",
+        agent: "planner",
+        iteration: 0,
+        durationMs: 8,
+        publicSummary: "已完成恢复前检查",
+        publicSummarySource: "model"
+      };
+      yield {
+        ...sourceEnvelope,
+        eventId: "stream_test_000002",
+        streamSeq: 2,
+        seq: 2,
+        type: "run.failed",
+        reasonCode: "CHECKPOINT_NOT_FOUND",
+        message: "恢复点不存在",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("failed");
+    expect(checkpointBatches.commitClaimedCheckpointBatch).not.toHaveBeenCalled();
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledWith(
+      expect.objectContaining({ lease: { owner: "worker_one", epoch: 1 } }),
+      expect.objectContaining({
+        terminalStatus: "failed",
+        terminalPayload: expect.objectContaining({ reasonCode: "CHECKPOINT_NOT_FOUND", usage }),
+        events: expect.arrayContaining([expect.objectContaining({ type: "thinking.started" })])
+      })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(1);
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+  });
+
+  it("无 checkpoint run.failed 的终态事务暂时失败时重试同一真实 payload", async () => {
+    const usage = { input_tokens: 6, output_tokens: 1, total_tokens: 7, cost_usd: 0.009 };
+    store.settleClaimedTerminalSettlement
+      .mockRejectedValueOnce(new Error("temporary audit failure"))
+      .mockResolvedValueOnce({ kind: "settled", terminalStatus: "failed", events: [{ type: "run.failed" }] });
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "run.failed",
+        reasonCode: "RESUME_SCOPE_MISMATCH",
+        message: "恢复作用域不一致",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("failed");
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledTimes(2);
+    expect(store.stageClaimedTerminalSettlement.mock.calls[0]?.[1]).toEqual(
+      store.stageClaimedTerminalSettlement.mock.calls[1]?.[1]
+    );
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        terminalStatus: "failed",
+        terminalPayload: expect.objectContaining({ reasonCode: "RESUME_SCOPE_MISMATCH", usage })
+      })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(2);
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+  });
+
+  it("只有一个 run.stopped 且没有 checkpoint boundary 时直接受限收口并保留 usage", async () => {
+    const usage = { input_tokens: 9, output_tokens: 4, total_tokens: 13, cost_usd: 0.025 };
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "run.stopped",
+        runId: "run_one",
+        responseStatus: "partial",
+        reasonCode: "USER_STOPPED",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("stopped");
+    expect(checkpointBatches.commitClaimedCheckpointBatch).not.toHaveBeenCalled();
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledWith(
+      expect.objectContaining({ lease: { owner: "worker_one", epoch: 1 } }),
+      expect.objectContaining({
+        sourceEvents: [expect.objectContaining({ type: "run.stopped", usage })],
+        events: [],
+        terminalStatus: "stopped",
+        terminalPayload: expect.objectContaining({ reasonCode: "USER_STOPPED", partial: true, usage })
+      })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledWith(
+      expect.objectContaining({ lease: { owner: "worker_one", epoch: 1 } })
+    );
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+    expect(searchAgent.streamSearchAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("无 boundary 的过程事件与末尾唯一 run.stopped 在同一事务保留公开 ledger", async () => {
+    const usage = { input_tokens: 12, output_tokens: 3, total_tokens: 15, cost_usd: 0.04 };
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "node.completed",
+        node: "plan_research",
+        nodeRunId: "node_research_one",
+        agent: "planner",
+        iteration: 0,
+        durationMs: 12,
+        publicSummary: "已形成一条检索计划",
+        publicSummarySource: "model"
+      };
+      yield {
+        ...sourceEnvelope,
+        eventId: "stream_test_000002",
+        streamSeq: 2,
+        seq: 2,
+        type: "tool.started",
+        toolCallId: "call_without_boundary",
+        toolName: "web_search",
+        query: "LangGraph durable execution",
+        channel: "web",
+        cached: false
+      };
+      yield {
+        ...sourceEnvelope,
+        eventId: "stream_test_000003",
+        streamSeq: 3,
+        seq: 3,
+        type: "run.stopped",
+        runId: "run_one",
+        responseStatus: "partial",
+        reasonCode: "USER_STOPPED",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("stopped");
+    expect(checkpointBatches.commitClaimedCheckpointBatch).not.toHaveBeenCalled();
+    const staged = store.stageClaimedTerminalSettlement.mock.calls[0]?.[1] as {
+      events: Array<{ type: string; payload: Record<string, unknown> }>;
+      terminalPayload: Record<string, unknown>;
+    };
+    expect(staged.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "thinking.started" }),
+      expect.objectContaining({
+        type: "tool.started",
+        payload: expect.objectContaining({ toolCallId: "call_without_boundary" })
+      })
+    ]));
+    expect(staged.terminalPayload).toEqual(expect.objectContaining({ usage }));
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(1);
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+    expect(searchAgent.streamSearchAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("首次 settle 失败后重放同一 immutable stage 并保留真实 usage", async () => {
+    const usage = { input_tokens: 21, output_tokens: 8, total_tokens: 29, cost_usd: 0.08 };
+    store.settleClaimedTerminalSettlement
+      .mockRejectedValueOnce(new Error("audit temporarily unavailable"))
+      .mockResolvedValueOnce({ kind: "settled", terminalStatus: "stopped", events: [{ type: "run.cancelled" }] });
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "run.stopped",
+        runId: "run_one",
+        responseStatus: "partial",
+        reasonCode: "USER_STOPPED",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), options())).resolves.toBe("stopped");
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledTimes(2);
+    expect(store.stageClaimedTerminalSettlement.mock.calls[0]?.[1]).toEqual(
+      store.stageClaimedTerminalSettlement.mock.calls[1]?.[1]
+    );
+    expect(store.stageClaimedTerminalSettlement.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ terminalPayload: expect.objectContaining({ usage }) })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(2);
+    expect(store.releaseLiveRunLease).not.toHaveBeenCalled();
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+  });
+
+  it("direct failed settle 重试耗尽后保留同一 stage、只释放租约供 takeover", async () => {
+    const onError = vi.fn();
+    const usage = { input_tokens: 13, output_tokens: 5, total_tokens: 18, cost_usd: 0.03 };
+    store.settleClaimedTerminalSettlement.mockRejectedValue(new Error("usage transaction unavailable"));
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "run.failed",
+        reasonCode: "SEARCH_UNAVAILABLE",
+        message: "搜索服务不可用",
+        usage
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), { ...options(), onError })).resolves.toBe("released");
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledTimes(4);
+    expect(store.stageClaimedTerminalSettlement.mock.calls.map((call) => call[1])).toEqual([
+      store.stageClaimedTerminalSettlement.mock.calls[0]?.[1],
+      store.stageClaimedTerminalSettlement.mock.calls[0]?.[1],
+      store.stageClaimedTerminalSettlement.mock.calls[0]?.[1],
+      store.stageClaimedTerminalSettlement.mock.calls[0]?.[1]
+    ]);
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        terminalStatus: "failed",
+        terminalPayload: expect.objectContaining({ reasonCode: "SEARCH_UNAVAILABLE", usage })
+      })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(4);
+    expect(store.releaseLiveRunLease).toHaveBeenCalledWith(expect.objectContaining({
+      lease: { owner: "worker_one", epoch: 1 }
+    }));
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ operation: "terminal-settlement" }));
+  });
+
+  it("非法 direct terminal stream fail-closed，不伪造 run.failed 或零 usage", async () => {
+    const onError = vi.fn();
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      yield {
+        ...sourceEnvelope,
+        type: "run.stopped",
+        runId: "run_foreign",
+        responseStatus: "partial",
+        reasonCode: "USER_STOPPED",
+        usage: { input_tokens: 7, output_tokens: 2, total_tokens: 9, cost_usd: 0.02 }
+      };
+    });
+
+    await expect(runClaimedLiveRun(claim(), { ...options(), onError })).resolves.toBe("lease-lost");
+    expect(store.stageClaimedTerminalSettlement).not.toHaveBeenCalled();
+    expect(store.settleClaimedTerminalSettlement).not.toHaveBeenCalled();
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
+    expect(store.releaseLiveRunLease).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.any(TerminalSettlementConflictError), expect.objectContaining({
+      operation: "terminal-settlement-conflict"
+    }));
   });
 
   it("流中断后以同一 runId 有界重连并启用 checkpoint resume", async () => {
@@ -416,7 +736,7 @@ describe("durable run Worker executor", () => {
   });
 
   it("heartbeat 失租后立即中断上游且不再 finalize 或 release", async () => {
-    store.renewLiveRunLease.mockResolvedValue(false);
+    store.renewLiveRunLease.mockResolvedValue({ renewed: false, stopRequested: false });
     searchAgent.streamSearchAgentRun.mockImplementation(async function* (_input, signal: AbortSignal) {
       await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
     });
@@ -426,6 +746,42 @@ describe("durable run Worker executor", () => {
     expect(store.renewLiveRunLease).toHaveBeenCalled();
     expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
     expect(store.releaseLiveRunLease).not.toHaveBeenCalled();
+  });
+
+  it("heartbeat 发现 stop intent 后重试上游通知，accepted 后继续 drain 且不失租", async () => {
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const usage = { input_tokens: 5, output_tokens: 2, total_tokens: 7, cost_usd: 0.01 };
+    store.renewLiveRunLease.mockResolvedValue({ renewed: true, stopRequested: true });
+    searchAgent.requestSearchAgentStop
+      .mockResolvedValueOnce("not_running")
+      .mockResolvedValueOnce("requested");
+    searchAgent.streamSearchAgentRun.mockImplementation(async function* () {
+      await streamGate;
+      yield {
+        ...sourceEnvelope,
+        type: "run.stopped",
+        runId: "run_one",
+        responseStatus: "partial",
+        reasonCode: "USER_STOPPED",
+        usage
+      };
+    });
+
+    const result = runClaimedLiveRun(claim(), options(new AbortController().signal, 5));
+    await vi.waitFor(() => expect(searchAgent.requestSearchAgentStop).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(searchAgent.requestSearchAgentStop).toHaveBeenCalledTimes(2);
+    expect(store.releaseLiveRunLease).not.toHaveBeenCalled();
+
+    releaseStream();
+    await expect(result).resolves.toBe("stopped");
+    expect(store.stageClaimedTerminalSettlement).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ terminalPayload: expect.objectContaining({ usage }) })
+    );
+    expect(store.settleClaimedTerminalSettlement).toHaveBeenCalledTimes(1);
+    expect(store.finalizeClaimedLiveRun).not.toHaveBeenCalled();
   });
 
   it("SIGTERM 等外部停止信号会取消上游并主动交还租约", async () => {

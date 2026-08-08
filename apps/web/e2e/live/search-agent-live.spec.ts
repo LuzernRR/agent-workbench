@@ -677,7 +677,8 @@ test("真实搜索运行可停止，终态唯一且刷新后可继续发送", as
 
   const stopResponse = await page.request.post(`/api/v1/runs/${runId}/stop`, { data: {} });
   expect(stopResponse.ok()).toBe(true);
-  expect(await stopResponse.json()).toMatchObject({ status: "stopped" });
+  const firstStop = await stopResponse.json() as { status: string };
+  expect(["stopping", "stopped"]).toContain(firstStop.status);
 
   const firstEventsResponse = await page.request.get(`/api/v1/runs/${runId}/events?after=0`);
   expect(firstEventsResponse.ok()).toBe(true);
@@ -700,5 +701,6 @@ test("真实搜索运行可停止，终态唯一且刷新后可继续发送", as
   expect(secondRun.runId).not.toBe(runId);
   const secondStop = await page.request.post(`/api/v1/runs/${secondRun.runId}/stop`, { data: {} });
   expect(secondStop.ok()).toBe(true);
-  expect(await secondStop.json()).toMatchObject({ status: "stopped" });
+  const secondStopBody = await secondStop.json() as { status: string };
+  expect(["stopping", "stopped"]).toContain(secondStopBody.status);
 });

@@ -10,14 +10,18 @@ vi.mock("@/server/persistence/database", () => database);
 import {
   buildProjectMemoryContext,
   claimNextLiveRun,
+  createUserStoppedPayload,
   deleteExpiredLiveThreads,
+  deleteLiveThread,
   finalizeClaimedLiveRun,
   finalizeLiveRun,
   getLiveSnapshot,
   persistClaimedLiveEvent,
   prepareLiveRun,
   releaseLiveRunLease,
+  requestLiveRunStop,
   rememberProjectExchange,
+  reorderLiveProjects,
   renewLiveRunLease,
   updateLiveThread
 } from "./store";
@@ -69,6 +73,62 @@ describe("live 数据保留与项目记忆", () => {
     expect(values).toEqual([3]);
   });
 
+  it("拒绝删除不存在的会话时不会先删除保留的项目记忆", async () => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return { rowCount: 0, rows: [] };
+      throw new Error(`拒绝路径不应继续执行：${sql}`);
+    });
+    database.transaction.mockImplementationOnce((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(deleteLiveThread("visitor-one", "thread-stale")).resolves.toBe(false);
+    expect(clientQuery).toHaveBeenCalledTimes(1);
+    expect(String(clientQuery.mock.calls[0][0])).toContain("FOR UPDATE");
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("DELETE FROM wb_project_memories"))).toBe(false);
+  });
+
+  it("只在 owned 会话锁定成功后于同一事务删除记忆和会话", async () => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return { rowCount: 1, rows: [{}] };
+      if (sql.includes("DELETE FROM wb_project_memories")) return { rowCount: 2, rows: [] };
+      if (sql.includes("DELETE FROM wb_threads")) return { rowCount: 1, rows: [] };
+      return { rowCount: 0, rows: [] };
+    });
+    database.transaction.mockImplementationOnce((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(deleteLiveThread("visitor-one", "thread-one")).resolves.toBe(true);
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/u).slice(0, 3).join(" "))).toEqual([
+      "SELECT 1 FROM",
+      "DELETE FROM wb_project_memories",
+      "DELETE FROM wb_threads"
+    ]);
+  });
+
+  it("项目排序区分无效顺序与首个无权或不存在的项目", async () => {
+    const execute = async (projectIds: string[]) => {
+      const clientQuery = vi.fn(async (sql: string) => {
+        if (sql.includes("SELECT id FROM wb_projects")) return { rowCount: 2, rows: [{ id: "project-one" }, { id: "project-two" }] };
+        return { rowCount: 1, rows: [] };
+      });
+      database.transaction.mockImplementationOnce((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+      return { result: await reorderLiveProjects("visitor-one", projectIds), clientQuery };
+    };
+
+    const duplicate = await execute(["project-one", "project-one"]);
+    expect(duplicate.result).toEqual({ kind: "invalid_order" });
+    expect(duplicate.clientQuery.mock.calls.some(([sql]) => String(sql).includes("UPDATE wb_projects"))).toBe(false);
+
+    const missingOwned = await execute(["project-one"]);
+    expect(missingOwned.result).toEqual({ kind: "invalid_order" });
+
+    const foreign = await execute(["project-one", "project-foreign"]);
+    expect(foreign.result).toEqual({ kind: "not_owned_or_missing", resourceId: "project-foreign" });
+    expect(foreign.clientQuery.mock.calls.some(([sql]) => String(sql).includes("UPDATE wb_projects"))).toBe(false);
+
+    const reordered = await execute(["project-two", "project-one"]);
+    expect(reordered.result).toEqual({ kind: "reordered" });
+    expect(reordered.clientQuery.mock.calls.filter(([sql]) => String(sql).includes("UPDATE wb_projects"))).toHaveLength(2);
+  });
+
   it("Worker 尚未领取时快照仍保留 queued Run 的活动状态", async () => {
     database.query.mockImplementation((sql: string) => {
       if (sql.includes("FROM wb_threads WHERE")) {
@@ -96,6 +156,7 @@ describe("live 数据保留与项目记忆", () => {
     const count = await rememberProjectExchange({
       id: "run-one",
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-one",
       projectId: "project-one",
       modelId: "deepseek-v4-flash"
@@ -149,6 +210,7 @@ describe("live 数据保留与项目记忆", () => {
     const result = await finalizeLiveRun({
       id: "run-one",
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-one",
       projectId: "project-one",
       modelId: "deepseek-v4-flash"
@@ -161,6 +223,8 @@ describe("live 数据保留与项目记忆", () => {
     const transition = clientQuery.mock.calls.find(([sql]) => String(sql).includes("UPDATE wb_runs"));
     expect(String(transition?.[0])).toContain("status IN ('queued', 'running', 'waiting')");
     expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_project_memories"))).toHaveLength(2);
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_tenant_usage"))).toHaveLength(1);
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"))).toHaveLength(1);
   });
 
   it("终态已经被其他请求抢占时不重复写终态事件", async () => {
@@ -174,8 +238,45 @@ describe("live 数据保留与项目记忆", () => {
       projectId: null,
       modelId: "deepseek-v4-flash"
     }, "stopped", {})).resolves.toBeNull();
-    expect(clientQuery).toHaveBeenCalledTimes(1);
-    expect(String(clientQuery.mock.calls[0][0])).toContain("status IN ('queued', 'running', 'waiting')");
+    expect(clientQuery).toHaveBeenCalledTimes(2);
+    expect(String(clientQuery.mock.calls[0][0])).toContain("FOR UPDATE");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("status IN ('queued', 'running', 'waiting')");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("lease_expires_at <= now()");
+  });
+
+  it("无 pending 的本地终态兜底也不能抢占刚被 Worker 领取的有效租约", async () => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT status, archived_at")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            status: "running",
+            archived_at: null,
+            lease_owner: "worker-new",
+            lease_epoch: "4",
+            lease_expires_at: new Date("2099-01-01T00:00:00Z"),
+            lease_valid: true,
+            stop_requested_at: new Date("2026-08-08T00:00:00Z")
+          }]
+        };
+      }
+      if (sql.includes("FROM wb_run_terminal_settlements")) return { rowCount: 0, rows: [] };
+      return { rowCount: 0, rows: [] };
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(finalizeLiveRun({
+      id: "run-race",
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-one",
+      projectId: null,
+      modelId: "deepseek-v4-flash"
+    }, "stopped", createUserStoppedPayload())).resolves.toBeNull();
+
+    const transitionSql = String(clientQuery.mock.calls.find(([sql]) => String(sql).includes("UPDATE wb_runs"))?.[0]);
+    expect(transitionSql).toContain("lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= now()");
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_agent_events"))).toBe(false);
   });
 
   it("以 FIFO 和 SKIP LOCKED 原子领取运行并递增 fencing epoch", async () => {
@@ -286,22 +387,57 @@ describe("live 数据保留与项目记忆", () => {
   });
 
   it("heartbeat 与 release 都要求 owner、epoch 和未过期租约", async () => {
-    database.query.mockResolvedValue({ rowCount: 1, rows: [] });
+    database.query
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ stop_requested: true }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
     const claimed = {
       run: { id: "run-one", visitorId: "visitor-one", threadId: "thread-one", projectId: null, modelId: "deepseek-v4-flash" },
       lease: { owner: "worker-one", epoch: 7 }
     };
 
-    await expect(renewLiveRunLease(claimed, 30_000)).resolves.toBe(true);
+    await expect(renewLiveRunLease(claimed, 30_000)).resolves.toEqual({
+      renewed: true,
+      stopRequested: true
+    });
     await expect(releaseLiveRunLease(claimed)).resolves.toBe(true);
 
     const renewSql = String(database.query.mock.calls[0][0]);
     const releaseSql = String(database.query.mock.calls[1][0]);
     expect(renewSql).toContain("lease_owner = $2 AND lease_epoch = $3");
     expect(renewSql).toContain("lease_expires_at > now()");
+    expect(renewSql).toContain("RETURNING stop_requested_at IS NOT NULL AS stop_requested");
     expect(releaseSql).toContain("lease_owner = $2 AND lease_epoch = $3");
     expect(releaseSql).toContain("lease_expires_at > now()");
     expect(releaseSql).toContain("status = 'queued'");
+  });
+
+  it("停止请求先持久化且只把有效租约交给上游收口", async () => {
+    const clientQuery = vi.fn()
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          id: "run-one",
+          thread_id: "thread-one",
+          project_id: "project-one",
+          model_id: "deepseek-v4-flash",
+          agent_id: "search-agent",
+          status: "running",
+          tenant_id: "tenant-one",
+          lease_owner: "worker-one",
+          lease_valid: true
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(requestLiveRunStop("visitor-one", "run-one")).resolves.toMatchObject({
+      status: "running",
+      hasActiveLease: true,
+      run: { id: "run-one", tenantId: "tenant-one" }
+    });
+
+    expect(String(clientQuery.mock.calls[0][0])).toContain("FOR UPDATE OF run");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("stop_requested_at = COALESCE(stop_requested_at, now())");
   });
 
   it("迟到 Worker 无法写事件或抢占终态", async () => {
@@ -317,8 +453,9 @@ describe("live 数据保留与项目记忆", () => {
 
     expect(String(clientQuery.mock.calls[0][0])).toContain("FOR UPDATE");
     expect(String(clientQuery.mock.calls[0][0])).toContain("lease_owner = $2 AND lease_epoch = $3");
-    expect(String(clientQuery.mock.calls[1][0])).toContain("lease_owner = $2 AND lease_epoch = $3");
-    expect(String(clientQuery.mock.calls[1][0])).toContain("lease_expires_at > now()");
+    expect(String(clientQuery.mock.calls[1][0])).toContain("FOR UPDATE");
+    expect(String(clientQuery.mock.calls[2][0])).toContain("lease_owner = $2 AND lease_epoch = $3");
+    expect(String(clientQuery.mock.calls[2][0])).toContain("lease_expires_at > now()");
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_agent_events"))).toBe(false);
   });
 
@@ -356,6 +493,7 @@ describe("live 数据保留与项目记忆", () => {
       { role: "user", content: "我叫林舟" },
       { role: "assistant", content: "已记住你的名字" }
     ]);
+    expect(prepared?.run.tenantId).toBe("tenant-one");
     expect(prepared?.history.some((message) => message.content.includes("不应进入历史"))).toBe(false);
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("FROM wb_project_memories"))).toBe(false);
   });
@@ -495,18 +633,16 @@ describe("live 数据保留与项目记忆", () => {
   });
 
   it("配额超限时 prepareLiveRun 抛出 QuotaExceededError 且不插入运行", async () => {
-    const clientQuery = vi.fn().mockResolvedValue({ rowCount: 1, rows: [] });
-    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
-    // The gate is a separate transaction ahead of the run transaction; this
-    // mock drives that gate to a denied decision.
-    database.transaction.mockImplementationOnce((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => {
-      const gate = vi.fn(async (sql: string) => {
-        if (sql.includes("FROM wb_tenant_quotas")) return Promise.resolve({ rowCount: 0, rows: [] });
-        if (sql.includes("FROM wb_audit_events")) return Promise.resolve({ rowCount: 1, rows: [{ count: 9999 }] });
-        return Promise.resolve({ rowCount: 1, rows: [] });
-      });
-      return operation({ query: gate });
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      if (sql.includes("FROM wb_threads") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [{ id: "thread-current", project_id: null, title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: null }] };
+      }
+      if (sql.includes("FROM wb_agent_events")) return { rowCount: 0, rows: [] };
+      if (sql.includes("FROM wb_tenant_quotas")) return { rowCount: 0, rows: [] };
+      if (sql.includes("FROM wb_audit_events")) return { rowCount: 1, rows: [{ count: 9999 }] };
+      return { rowCount: 1, rows: [] };
     });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
 
     await expect(prepareLiveRun({
       visitorId: "visitor-one",
@@ -519,29 +655,165 @@ describe("live 数据保留与项目记忆", () => {
       memoryMaxChars: 16_000
     })).rejects.toMatchObject({ name: "QuotaExceededError", reasonCode: "QUOTA_REQUESTS_PER_MINUTE_EXCEEDED" });
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_runs"))).toBe(false);
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"))).toHaveLength(1);
+  });
+
+  it.each(["running", "waiting"] as const)("%s 会话不会被误记为 memory 授权拒绝", async (status) => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM wb_threads") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [{ id: "thread-current", project_id: null, title: "测试", status, updated_at: timestamp, last_user_message_at: null }] };
+      }
+      throw new Error(`忙碌会话不应继续执行：${sql}`);
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(prepareLiveRun({
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-current",
+      message: "重复运行",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).resolves.toBeNull();
+
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"))).toHaveLength(0);
+  });
+
+  it("无效 replaceMessageId 不会被误记为 memory 授权拒绝", async () => {
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM wb_threads") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [{ id: "thread-current", project_id: null, title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: null }] };
+      }
+      if (sql.includes("FROM wb_agent_events")) return { rowCount: 0, rows: [] };
+      throw new Error(`无效替换不应继续执行：${sql}`);
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(prepareLiveRun({
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-current",
+      message: "编辑不存在的消息",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      replaceMessageId: "message-missing",
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).resolves.toBeNull();
+
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"))).toHaveLength(0);
+  });
+
+  it("越权或不存在的会话在配额检查前 fail-closed 并写 run.start 与 memory.read denied", async () => {
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      if (sql.includes("FROM wb_threads") && sql.includes("FOR UPDATE")) return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [] };
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(prepareLiveRun({
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-foreign",
+      message: "越权运行",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).resolves.toBeNull();
+
+    const audits = clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"));
+    expect(audits).toHaveLength(2);
+    expect(audits[0]?.[1]).toEqual([
+      "tenant-one", "visitor-one", "run.start", "denied", "RESOURCE_NOT_OWNED_OR_MISSING", "thread", "thread-foreign"
+    ]);
+    expect(audits[1]?.[1]).toEqual([
+      "tenant-one", "visitor-one", "memory.read", "denied", "RESOURCE_NOT_OWNED_OR_MISSING", "memory", "thread:thread-foreign"
+    ]);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("FROM wb_tenant_quotas"))).toBe(false);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_runs"))).toBe(false);
+  });
+
+  it("外来附件不会被静默丢弃，且不产生 allowed 或 Run 半写", async () => {
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      if (sql.includes("FROM wb_threads") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [{ id: "thread-current", project_id: null, title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: null }] };
+      }
+      if (sql.includes("FROM wb_agent_events")) return { rowCount: 0, rows: [] };
+      if (sql.includes("FROM wb_attachments")) return { rowCount: 0, rows: [] };
+      return { rowCount: 1, rows: [] };
+    });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(prepareLiveRun({
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-current",
+      message: "使用外来附件",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: ["attachment-foreign"],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).resolves.toBeNull();
+
+    const audits = clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.[1]).toEqual(expect.arrayContaining([
+      "attachment.use", "denied", "RESOURCE_NOT_OWNED_OR_MISSING", "attachment", "attachment-foreign"
+    ]));
+    expect(audits.some(([, values]) => Array.isArray(values) && values.includes("memory.read"))).toBe(false);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("QUOTA_WITHIN_LIMITS"))).toBe(false);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_runs"))).toBe(false);
   });
 
   it("会话跨项目移动时迁移活动记忆，移出项目时归档活动记忆", async () => {
     const moveQuery = vi.fn().mockImplementation((sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return Promise.resolve({ rowCount: 1, rows: [{}] });
       if (sql.includes("SELECT 1 FROM wb_projects")) return Promise.resolve({ rowCount: 1, rows: [{}] });
       if (sql.includes("UPDATE wb_threads")) return Promise.resolve({ rowCount: 1, rows: [{ id: "thread-one", project_id: "project-two", title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: timestamp }] });
       return Promise.resolve({ rowCount: 1, rows: [] });
     });
     database.transaction.mockImplementationOnce((operation: (client: { query: typeof moveQuery }) => Promise<unknown>) => operation({ query: moveQuery }));
-    await updateLiveThread("visitor-one", "thread-one", { projectId: "project-two" });
+    await expect(updateLiveThread("visitor-one", "thread-one", { projectId: "project-two" })).resolves.toMatchObject({ kind: "updated" });
     const migrate = moveQuery.mock.calls.find(([sql]) => String(sql).includes("UPDATE wb_project_memories SET project_id"));
     expect(migrate?.[1]).toEqual(["thread-one", "visitor-one", "project-two"]);
     expect(String(migrate?.[0])).toContain("archived_at IS NULL");
 
     const exitQuery = vi.fn().mockImplementation((sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return Promise.resolve({ rowCount: 1, rows: [{}] });
       if (sql.includes("UPDATE wb_threads")) return Promise.resolve({ rowCount: 1, rows: [{ id: "thread-one", project_id: null, title: "测试", status: "idle", updated_at: timestamp, last_user_message_at: timestamp }] });
       return Promise.resolve({ rowCount: 1, rows: [] });
     });
     database.transaction.mockImplementationOnce((operation: (client: { query: typeof exitQuery }) => Promise<unknown>) => operation({ query: exitQuery }));
-    await updateLiveThread("visitor-one", "thread-one", { projectId: null });
+    await expect(updateLiveThread("visitor-one", "thread-one", { projectId: null })).resolves.toMatchObject({ kind: "updated" });
     const archive = exitQuery.mock.calls.find(([sql]) => String(sql).includes("UPDATE wb_project_memories SET archived_at"));
     expect(archive?.[1]).toEqual(["thread-one", "visitor-one"]);
     expect(String(archive?.[0])).toContain("archived_at IS NULL");
+  });
+
+  it("会话更新能区分 source thread 与 target project 的拒绝对象", async () => {
+    const threadDeniedQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return { rowCount: 0, rows: [] };
+      throw new Error(`thread denied 后不应继续查询：${sql}`);
+    });
+    database.transaction.mockImplementationOnce((operation: (client: { query: typeof threadDeniedQuery }) => Promise<unknown>) => operation({ query: threadDeniedQuery }));
+    await expect(updateLiveThread("visitor-one", "thread-foreign", { projectId: "project-one" })).resolves.toEqual({
+      kind: "thread_denied",
+      resourceId: "thread-foreign"
+    });
+
+    const projectDeniedQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT 1 FROM wb_threads")) return { rowCount: 1, rows: [{}] };
+      if (sql.includes("SELECT 1 FROM wb_projects")) return { rowCount: 0, rows: [] };
+      throw new Error(`project denied 后不应继续更新：${sql}`);
+    });
+    database.transaction.mockImplementationOnce((operation: (client: { query: typeof projectDeniedQuery }) => Promise<unknown>) => operation({ query: projectDeniedQuery }));
+    await expect(updateLiveThread("visitor-one", "thread-one", { projectId: "project-foreign" })).resolves.toEqual({
+      kind: "target_project_denied",
+      resourceId: "project-foreign"
+    });
   });
 
   it("停止运行不写项目记忆", async () => {
@@ -556,9 +828,11 @@ describe("live 数据保留与项目记忆", () => {
     });
     database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
 
-    const events = await finalizeLiveRun({ id: "run-stop", visitorId: "visitor-one", threadId: "thread-one", projectId: "project-one", modelId: "deepseek-v4-flash" }, "stopped", {});
+    const events = await finalizeLiveRun({ id: "run-stop", visitorId: "visitor-one", tenantId: "tenant-one", threadId: "thread-one", projectId: "project-one", modelId: "deepseek-v4-flash" }, "stopped", {});
     expect(events?.map((event) => event.type)).toEqual(["run.cancelled"]);
     expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_project_memories"))).toBe(false);
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_tenant_usage"))).toHaveLength(1);
+    expect(clientQuery.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO wb_audit_events"))).toHaveLength(1);
   });
 
 });

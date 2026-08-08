@@ -8,6 +8,7 @@ import {
   commitClaimedCheckpointBatch,
   type ClaimedCheckpointBatch
 } from "./checkpoint-batches";
+import { requestLiveRunStop } from "./store";
 
 const runLiveIntegration = process.env.WORKBENCH_LIVE_INTEGRATION === "1";
 const visitors = new Set<string>();
@@ -42,6 +43,7 @@ async function createClaim() {
     run: {
       id: runId,
       visitorId,
+      tenantId: "local",
       threadId,
       projectId: null,
       modelId: "deepseek-v4-flash",
@@ -54,6 +56,7 @@ async function createClaim() {
 function checkpointBatch(suffix: string, input: {
   checkpointId?: string;
   parentCheckpointId?: string | null;
+  checkpointSessionId?: string;
   step?: number;
   streamSeq?: number;
 } = {}): ClaimedCheckpointBatch {
@@ -84,7 +87,7 @@ function checkpointBatch(suffix: string, input: {
       checkpointId: input.checkpointId ?? `checkpoint_${suffix}`,
       parentCheckpointId: input.parentCheckpointId ?? null,
       checkpointNs: "",
-      checkpointSessionId: `session_${suffix}`,
+      checkpointSessionId: input.checkpointSessionId ?? `session_${suffix}`,
       step: input.step ?? -1
     },
     events: [{ type: "run.status", payload: { status: "running", suffix } }]
@@ -111,14 +114,18 @@ async function projectionCounts(runId: string) {
 
 async function installFailureTrigger(
   stage: string,
-  table: "wb_runs" | "wb_source_event_inbox" | "wb_agent_events" | "wb_agent_event_outbox",
+  table: "wb_runs" | "wb_source_event_inbox" | "wb_agent_events" | "wb_agent_event_outbox" | "wb_tenant_usage" | "wb_audit_events",
   runId: string
 ) {
   const token = randomUUID().replaceAll("-", "");
   const functionName = `wb_issue50_fail_${stage}_${token}`;
   const trigger = `wb_issue50_trigger_${stage}_${token}`;
   const operation = table === "wb_runs" ? "UPDATE OF revision" : "INSERT";
-  const runColumn = table === "wb_runs" ? "NEW.id" : "NEW.run_id";
+  const runColumn = table === "wb_runs"
+    ? "NEW.id"
+    : table === "wb_audit_events"
+      ? "NEW.resource_id"
+      : "NEW.run_id";
   await query(`
     CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $function$
     BEGIN
@@ -218,11 +225,16 @@ describe.skipIf(!runLiveIntegration)("Issue 50 checkpoint batch 真实 PostgreSQ
       createdAt: "2026-08-06T00:00:01Z",
       type: "run.failed",
       reasonCode: "TEST_FAILURE",
-      message: "测试失败"
+      message: "测试失败",
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5, cost_usd: 0.01 }
     }];
     batch.events = [{
       type: "run.failed",
-      payload: { reasonCode: "TEST_FAILURE", message: "测试失败" }
+      payload: {
+        reasonCode: "TEST_FAILURE",
+        message: "测试失败",
+        usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5, cost_usd: 0.01 }
+      }
     }];
     batch.terminal = { status: "failed" };
 
@@ -272,6 +284,161 @@ describe.skipIf(!runLiveIntegration)("Issue 50 checkpoint batch 真实 PostgreSQ
         outbox: "1"
       });
     }
+  });
+
+  it("usage 或生命周期审计失败会回滚终态、事件与记账，重试后只提交一次", async () => {
+    for (const stage of [
+      { name: "usage", table: "wb_tenant_usage" as const },
+      { name: "audit", table: "wb_audit_events" as const }
+    ]) {
+      const claim = await createClaim();
+      const batch = checkpointBatch(`terminal_${stage.name}`);
+      const usage = { input_tokens: 9, output_tokens: 4, total_tokens: 13, cost_usd: 0.02 };
+      batch.sourceEvents = [{
+        version: 1,
+        eventId: `${batch.boundary.streamId}_1`,
+        streamId: batch.boundary.streamId,
+        streamSeq: 1,
+        seq: 1,
+        createdAt: "2026-08-06T00:00:01Z",
+        type: "run.failed",
+        reasonCode: "TEST_FAILURE",
+        message: "测试失败",
+        usage
+      }];
+      batch.events = [{
+        type: "run.failed",
+        payload: { reasonCode: "TEST_FAILURE", message: "测试失败", usage }
+      }];
+      batch.terminal = { status: "failed" };
+
+      const trigger = await installFailureTrigger(stage.name, stage.table, claim.run.id);
+      await expect(commitClaimedCheckpointBatch(claim, batch)).rejects.toThrow(`issue50 injected ${stage.name} failure`);
+      const rolledBack = await query<{ status: string; revision: string; usage: string; lifecycle: string; events: string }>(`
+        SELECT run.status, run.revision::text,
+          (SELECT count(*) FROM wb_tenant_usage WHERE run_id = run.id)::text AS usage,
+          (SELECT count(*) FROM wb_audit_events WHERE action = 'run.lifecycle' AND resource_id = run.id)::text AS lifecycle,
+          (SELECT count(*) FROM wb_agent_events WHERE run_id = run.id)::text AS events
+        FROM wb_runs run WHERE run.id = $1
+      `, [claim.run.id]);
+      expect(rolledBack.rows).toEqual([{
+        status: "running",
+        revision: "0",
+        usage: "0",
+        lifecycle: "0",
+        events: "0"
+      }]);
+
+      await removeFailureTrigger(trigger);
+      await expect(commitClaimedCheckpointBatch(claim, batch)).resolves.toMatchObject({ status: "committed" });
+      await expect(commitClaimedCheckpointBatch(claim, batch)).resolves.toMatchObject({ status: "duplicate" });
+      const committed = await query<{ status: string; usage: string; lifecycle: string; events: string }>(`
+        SELECT run.status,
+          (SELECT count(*) FROM wb_tenant_usage WHERE run_id = run.id)::text AS usage,
+          (SELECT count(*) FROM wb_audit_events WHERE action = 'run.lifecycle' AND resource_id = run.id)::text AS lifecycle,
+          (SELECT count(*) FROM wb_agent_events WHERE run_id = run.id AND event_type = 'run.failed')::text AS events
+        FROM wb_runs run WHERE run.id = $1
+      `, [claim.run.id]);
+      expect(committed.rows).toEqual([{
+        status: "failed",
+        usage: "1",
+        lifecycle: "1",
+        events: "1"
+      }]);
+    }
+  });
+
+  it("停止请求后普通 checkpoint 继续推进，迟到 completed 原子收敛为 stopped 且不写 memory", async () => {
+    const claim = await createClaim();
+    const requested = await requestLiveRunStop(claim.run.visitorId, claim.run.id);
+    expect(requested).toMatchObject({ status: "running", hasActiveLease: true });
+
+    const progress = checkpointBatch("stop_progress");
+    await expect(commitClaimedCheckpointBatch(claim, progress)).resolves.toMatchObject({
+      status: "committed",
+      revision: 1,
+      terminalStatus: null
+    });
+
+    const completed = checkpointBatch("stop_completed", {
+      parentCheckpointId: progress.boundary.checkpointId,
+      checkpointSessionId: progress.boundary.checkpointSessionId,
+      step: 0
+    });
+    const completedUsage = { input_tokens: 11, output_tokens: 5, total_tokens: 16, cost_usd: 0.03125 };
+    completed.sourceEvents = [{
+      version: 1,
+      eventId: `${completed.boundary.streamId}_1`,
+      streamId: completed.boundary.streamId,
+      streamSeq: 1,
+      seq: 1,
+      createdAt: "2026-08-06T00:00:01Z",
+      type: "run.completed",
+      answerMarkdown: "迟到的完整回答",
+      answerSource: "model",
+      answerModelCalls: 1,
+      promptVersion: "2026-08-06.v1",
+      responseStatus: "completed",
+      citations: [],
+      verificationPassed: true,
+      stopReason: "VERIFIED",
+      usage: completedUsage,
+      modelCalls: 1,
+      toolCalls: 0,
+      evidenceCount: 1
+    }];
+    completed.events = [{ type: "run.completed", payload: { usage: completedUsage } }];
+    completed.terminal = {
+      status: "completed",
+      memory: { userMessage: "问题", assistantMessage: "迟到的完整回答" }
+    };
+
+    await expect(commitClaimedCheckpointBatch(claim, completed)).resolves.toMatchObject({
+      status: "committed",
+      revision: 2,
+      terminalStatus: "stopped"
+    });
+    await expect(commitClaimedCheckpointBatch(claim, completed)).resolves.toMatchObject({
+      status: "duplicate",
+      terminalStatus: "stopped"
+    });
+    const settled = await query<{
+      status: string;
+      stop_requested: boolean;
+      revision: string;
+      commits: string;
+      input_tokens: string;
+      output_tokens: string;
+      total_tokens: string;
+      cost_usd: string;
+      lifecycle: string;
+      terminal_events: string;
+      memories: string;
+    }>(`
+      SELECT run.status, run.stop_requested_at IS NOT NULL AS stop_requested, run.revision::text,
+        (SELECT count(*) FROM wb_checkpoint_commits WHERE run_id = run.id)::text AS commits,
+        usage.input_tokens::text, usage.output_tokens::text, usage.total_tokens::text,
+        usage.cost_usd::text,
+        (SELECT count(*) FROM wb_audit_events WHERE action = 'run.lifecycle' AND resource_id = run.id AND outcome = 'stopped')::text AS lifecycle,
+        (SELECT count(*) FROM wb_agent_events WHERE run_id = run.id AND event_type = 'run.cancelled')::text AS terminal_events,
+        (SELECT count(*) FROM wb_project_memories WHERE source_run_id = run.id)::text AS memories
+      FROM wb_runs run
+      JOIN wb_tenant_usage usage ON usage.run_id = run.id
+      WHERE run.id = $1
+    `, [claim.run.id]);
+    expect(settled.rows).toEqual([{
+      status: "stopped",
+      stop_requested: true,
+      revision: "2",
+      commits: "2",
+      input_tokens: "11",
+      output_tokens: "5",
+      total_tokens: "16",
+      cost_usd: "0.031250",
+      lifecycle: "1",
+      terminal_events: "1",
+      memories: "0"
+    }]);
   });
 
   it("schema 可重复执行并由目录约束与 revision trigger 强制不变量", async () => {

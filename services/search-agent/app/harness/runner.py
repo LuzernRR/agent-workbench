@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -126,6 +127,32 @@ async def _never_disconnected() -> bool:
     return False
 
 
+def _terminal_usage(state: dict[str, Any] | None) -> dict[str, int | float]:
+    """只公开可持久记账的四个累计用量字段。"""
+    raw = state.get("usage") if state else None
+    usage = raw if isinstance(raw, dict) else {}
+
+    def nonnegative_int(key: str) -> int:
+        value = usage.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    cost = usage.get("cost_usd")
+    cost_usd = (
+        float(cost)
+        if isinstance(cost, (int, float))
+        and not isinstance(cost, bool)
+        and math.isfinite(cost)
+        and cost >= 0
+        else 0.0
+    )
+    return {
+        "input_tokens": nonnegative_int("input_tokens"),
+        "output_tokens": nonnegative_int("output_tokens"),
+        "total_tokens": nonnegative_int("total_tokens"),
+        "cost_usd": cost_usd,
+    }
+
+
 def _new_stream_id() -> str:
     return f"stream_{uuid.uuid4().hex}"
 
@@ -215,9 +242,9 @@ class HarnessRunner:
         self,
         payload: SearchRunRequest,
         graph_config: dict[str, Any],
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if not payload.resume:
-            return self._new_state(payload)
+            return self._new_state(payload), None
         snapshot = await self._dependencies.graph.aget_state(graph_config)
         if (
             not snapshot
@@ -253,7 +280,7 @@ class HarnessRunner:
         }
         if any(values.get(key) != value for key, value in expected.items()):
             raise ResumeScopeError("checkpoint scope mismatch")
-        return None
+        return None, dict(values)
 
     @staticmethod
     def _checkpoint_thread_id(payload: SearchRunRequest) -> str:
@@ -380,13 +407,16 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode="RUN_ALREADY_ACTIVE",
                 message="相同运行 ID 已在执行",
+                usage=_terminal_usage(None),
             )
             return
 
         last_state: dict[str, Any] | None = None
         pending_checkpoint: dict[str, Any] | None = None
         try:
-            graph_input = await self._resolve_graph_input(payload, graph_config)
+            graph_input, last_state = await self._resolve_graph_input(
+                payload, graph_config
+            )
             timeout_context = self._timeout_factory(config.graph.max_run_seconds + 10)
             verification_waits: dict[str, tuple[float, float]] = {}
             async with timeout_context:
@@ -460,6 +490,7 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode="RUN_TIMEOUT",
                 message="Agent 运行超时",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -469,6 +500,7 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode="RECURSION_LIMIT",
                 message="Agent 循环达到上限",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -478,6 +510,7 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode="RESUME_SCOPE_MISMATCH",
                 message="恢复请求与已有运行作用域不一致",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -494,6 +527,7 @@ class HarnessRunner:
                 runId=payload.run_id,
                 responseStatus="partial",
                 reasonCode="CLIENT_DISCONNECTED" if disconnected else "USER_STOPPED",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -510,6 +544,7 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode=reason_code,
                 message="Search Agent 运行失败",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -536,6 +571,7 @@ class HarnessRunner:
                 "run.failed",
                 reasonCode=reason_code,
                 message="Agent 没有生成可交付的模型回答",
+                usage=_terminal_usage(last_state),
             )
             if pending_checkpoint is not None:
                 yield runtime_event("checkpoint.committed", **pending_checkpoint)
@@ -550,7 +586,7 @@ class HarnessRunner:
             citations=last_state.get("citations") or [],
             verificationPassed=bool(last_state.get("verification_passed")),
             stopReason=last_state.get("stop_reason") or "UNKNOWN",
-            usage=last_state.get("usage") or {},
+            usage=_terminal_usage(last_state),
             modelCalls=model_calls,
             toolCalls=int(last_state.get("tool_calls") or 0),
             evidenceCount=len(last_state.get("evidence") or []),

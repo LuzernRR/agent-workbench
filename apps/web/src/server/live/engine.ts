@@ -1,7 +1,14 @@
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig } from "@/server/config/runtime-config";
 import { requestSearchAgentStop } from "@/server/search-agent/client";
-import { finalizeLiveRun, liveRun, prepareLiveRun, type LiveRunStatus } from "./store";
+import {
+  createUserStoppedPayload,
+  finalizeLiveRun,
+  liveRun,
+  prepareLiveRun,
+  requestLiveRunStop,
+  type LiveRunStatus
+} from "./store";
 
 export async function startLiveRun(input: {
   visitorId: string;
@@ -34,6 +41,8 @@ export async function startLiveRun(input: {
 const terminalStatus = (status: LiveRunStatus): status is Extract<LiveRunStatus, "completed" | "failed" | "stopped"> =>
   ["completed", "failed", "stopped"].includes(status);
 
+export type StopLiveRunStatus = Extract<LiveRunStatus, "completed" | "failed" | "stopped"> | "stopping";
+
 async function currentTerminalStatus(visitorId: string, runId: string) {
   const current = await liveRun(visitorId, runId);
   return current && terminalStatus(current.status) ? current.status : null;
@@ -42,15 +51,19 @@ async function currentTerminalStatus(visitorId: string, runId: string) {
 export async function stopLiveRun(
   visitorId: string,
   runId: string
-): Promise<Extract<LiveRunStatus, "completed" | "failed" | "stopped"> | null> {
-  const record = await liveRun(visitorId, runId);
+): Promise<StopLiveRunStatus | null> {
+  const record = await requestLiveRunStop(visitorId, runId);
   if (!record) return null;
   if (terminalStatus(record.status)) return record.status;
 
-  // The durable transition clears the lease first, so an old Worker cannot
-  // append events while the best-effort upstream stop request is in flight.
-  const events = await finalizeLiveRun(record.run, "stopped", {});
-  if (!events) return currentTerminalStatus(visitorId, runId);
-  if (record.run.agentId === "search-agent") await requestSearchAgentStop(runId);
+  // An active lease owns terminal settlement. The HTTP request only persists
+  // intent and gives the upstream a bounded best-effort nudge; the Worker keeps
+  // draining until it can atomically commit the authoritative stopped usage.
+  if (record.hasActiveLease) {
+    if (record.run.agentId === "search-agent") await requestSearchAgentStop(runId);
+    return "stopping";
+  }
+  const events = await finalizeLiveRun(record.run, "stopped", createUserStoppedPayload());
+  if (!events) return await currentTerminalStatus(visitorId, runId) ?? "stopping";
   return "stopped";
 }

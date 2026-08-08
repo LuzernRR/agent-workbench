@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS wb_runs (
   lease_expires_at timestamptz,
   heartbeat_at timestamptz,
   worker_attempt integer NOT NULL DEFAULT 0 CONSTRAINT wb_runs_worker_attempt_nonnegative CHECK (worker_attempt >= 0),
+  stop_requested_at timestamptz,
   revision bigint NOT NULL DEFAULT 0 CONSTRAINT wb_runs_revision_nonnegative CHECK (revision >= 0),
   checkpoint_id text,
   checkpoint_session_id text,
@@ -135,6 +136,7 @@ ALTER TABLE wb_runs
   ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
   ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz,
   ADD COLUMN IF NOT EXISTS worker_attempt integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS stop_requested_at timestamptz,
   ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS checkpoint_id text,
   ADD COLUMN IF NOT EXISTS checkpoint_session_id text,
@@ -362,6 +364,212 @@ BEGIN
   END IF;
 END $$;
 
+CREATE TABLE IF NOT EXISTS wb_run_terminal_settlements (
+  run_id text PRIMARY KEY,
+  visitor_id uuid NOT NULL,
+  staged_lease_owner text NOT NULL
+    CONSTRAINT wb_run_terminal_settlements_staged_owner_valid
+    CHECK (length(btrim(staged_lease_owner)) BETWEEN 1 AND 240),
+  staged_lease_epoch bigint NOT NULL
+    CONSTRAINT wb_run_terminal_settlements_staged_epoch_positive
+    CHECK (staged_lease_epoch > 0),
+  source_stream_id text NOT NULL
+    CONSTRAINT wb_run_terminal_settlements_stream_id_valid
+    CHECK (source_stream_id ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+  source_first_seq integer NOT NULL CHECK (source_first_seq > 0),
+  source_last_seq integer NOT NULL CHECK (source_last_seq >= source_first_seq),
+  source_count integer NOT NULL CHECK (source_count > 0 AND source_count <= 10000),
+  source_events jsonb NOT NULL CHECK (
+    jsonb_typeof(source_events) = 'array'
+    AND jsonb_array_length(source_events) = source_count
+  ),
+  projected_count integer NOT NULL CHECK (projected_count >= 0 AND projected_count <= 10000),
+  projected_events jsonb NOT NULL CHECK (
+    jsonb_typeof(projected_events) = 'array'
+    AND jsonb_array_length(projected_events) = projected_count
+  ),
+  terminal_status text NOT NULL
+    CONSTRAINT wb_run_terminal_settlements_terminal_status_valid
+    CHECK (terminal_status IN ('failed', 'stopped')),
+  stopped_payload jsonb NOT NULL CHECK (jsonb_typeof(stopped_payload) = 'object'),
+  usage jsonb NOT NULL CHECK (jsonb_typeof(usage) = 'object'),
+  canonical_hash char(64) NOT NULL CHECK (canonical_hash ~ '^[a-f0-9]{64}$'),
+  staged_at timestamptz NOT NULL DEFAULT now(),
+  settled_lease_owner text,
+  settled_lease_epoch bigint,
+  settled_status text,
+  settled_at timestamptz,
+  CONSTRAINT wb_run_terminal_settlements_identity_key
+    UNIQUE (run_id, visitor_id, staged_lease_owner, staged_lease_epoch),
+  CONSTRAINT wb_run_terminal_settlements_run_visitor_fk
+    FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE,
+  CONSTRAINT wb_run_terminal_settlements_pending_status_null CHECK (
+    settled_at IS NOT NULL OR settled_status IS NULL
+  ),
+  CONSTRAINT wb_run_terminal_settlements_terminal_to_settled_status_valid CHECK (
+    settled_at IS NULL
+    OR (terminal_status = 'stopped' AND settled_status = 'stopped')
+    OR (terminal_status = 'failed' AND settled_status IN ('failed', 'stopped'))
+  ),
+  CONSTRAINT wb_run_terminal_settlements_settled_complete CHECK (
+    (settled_lease_owner IS NULL AND settled_lease_epoch IS NULL AND settled_status IS NULL AND settled_at IS NULL)
+    OR
+    (
+      settled_lease_owner IS NOT NULL
+      AND length(btrim(settled_lease_owner)) BETWEEN 1 AND 240
+      AND settled_lease_epoch IS NOT NULL
+      AND settled_lease_epoch >= staged_lease_epoch
+      AND settled_status IS NOT NULL
+      AND settled_at IS NOT NULL
+      AND settled_at >= staged_at
+    )
+  )
+);
+
+ALTER TABLE wb_run_terminal_settlements
+  ADD COLUMN IF NOT EXISTS terminal_status text NOT NULL DEFAULT 'stopped';
+ALTER TABLE wb_run_terminal_settlements
+  ALTER COLUMN terminal_status DROP DEFAULT;
+ALTER TABLE wb_run_terminal_settlements
+  ADD COLUMN IF NOT EXISTS settled_status text;
+COMMENT ON COLUMN wb_run_terminal_settlements.stopped_payload IS
+  'Legacy physical column name; stores the authoritative failed/stopped terminal payload.';
+UPDATE wb_run_terminal_settlements
+SET settled_status = NULL
+WHERE settled_at IS NULL AND settled_status IS NOT NULL;
+UPDATE wb_run_terminal_settlements
+SET settled_status = 'stopped'
+WHERE settled_at IS NOT NULL AND settled_status IS NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_run_terminal_settlements'::regclass
+      AND conname = 'wb_run_terminal_settlements_terminal_status_valid'
+  ) THEN
+    ALTER TABLE wb_run_terminal_settlements
+      ADD CONSTRAINT wb_run_terminal_settlements_terminal_status_valid
+      CHECK (terminal_status IN ('failed', 'stopped'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_run_terminal_settlements'::regclass
+      AND conname = 'wb_run_terminal_settlements_settled_status_valid'
+  ) THEN
+    ALTER TABLE wb_run_terminal_settlements
+      ADD CONSTRAINT wb_run_terminal_settlements_settled_status_valid
+      CHECK (settled_status IS NULL OR settled_status IN ('failed', 'stopped'));
+  END IF;
+END $$;
+
+ALTER TABLE wb_run_terminal_settlements
+  DROP CONSTRAINT IF EXISTS wb_run_terminal_settlements_status_transition_valid,
+  DROP CONSTRAINT IF EXISTS wb_run_terminal_settlements_pending_status_null,
+  DROP CONSTRAINT IF EXISTS wb_run_terminal_settlements_terminal_to_settled_status_valid;
+ALTER TABLE wb_run_terminal_settlements
+  ADD CONSTRAINT wb_run_terminal_settlements_pending_status_null CHECK (
+    settled_at IS NOT NULL OR settled_status IS NULL
+  );
+ALTER TABLE wb_run_terminal_settlements
+  ADD CONSTRAINT wb_run_terminal_settlements_terminal_to_settled_status_valid CHECK (
+    settled_at IS NULL
+    OR (terminal_status = 'stopped' AND settled_status = 'stopped')
+    OR (terminal_status = 'failed' AND settled_status IN ('failed', 'stopped'))
+  );
+
+ALTER TABLE wb_run_terminal_settlements
+  DROP CONSTRAINT IF EXISTS wb_run_terminal_settlements_settled_complete;
+ALTER TABLE wb_run_terminal_settlements
+  ADD CONSTRAINT wb_run_terminal_settlements_settled_complete CHECK (
+    (settled_lease_owner IS NULL AND settled_lease_epoch IS NULL AND settled_status IS NULL AND settled_at IS NULL)
+    OR
+    (
+      settled_lease_owner IS NOT NULL
+      AND length(btrim(settled_lease_owner)) BETWEEN 1 AND 240
+      AND settled_lease_epoch IS NOT NULL
+      AND settled_lease_epoch >= staged_lease_epoch
+      AND settled_status IS NOT NULL
+      AND settled_at IS NOT NULL
+      AND settled_at >= staged_at
+    )
+  );
+
+CREATE OR REPLACE FUNCTION wb_enforce_terminal_settlement_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF ROW(
+    NEW.run_id,
+    NEW.visitor_id,
+    NEW.staged_lease_owner,
+    NEW.staged_lease_epoch,
+    NEW.source_stream_id,
+    NEW.source_first_seq,
+    NEW.source_last_seq,
+    NEW.source_count,
+    NEW.source_events,
+    NEW.projected_count,
+    NEW.projected_events,
+    NEW.terminal_status,
+    NEW.stopped_payload,
+    NEW.usage,
+    NEW.canonical_hash,
+    NEW.staged_at
+  ) IS DISTINCT FROM ROW(
+    OLD.run_id,
+    OLD.visitor_id,
+    OLD.staged_lease_owner,
+    OLD.staged_lease_epoch,
+    OLD.source_stream_id,
+    OLD.source_first_seq,
+    OLD.source_last_seq,
+    OLD.source_count,
+    OLD.source_events,
+    OLD.projected_count,
+    OLD.projected_events,
+    OLD.terminal_status,
+    OLD.stopped_payload,
+    OLD.usage,
+    OLD.canonical_hash,
+    OLD.staged_at
+  ) THEN
+    RAISE EXCEPTION 'terminal settlement authority is immutable';
+  END IF;
+  IF OLD.settled_at IS NOT NULL AND ROW(
+    NEW.settled_lease_owner,
+    NEW.settled_lease_epoch,
+    NEW.settled_status,
+    NEW.settled_at
+  ) IS DISTINCT FROM ROW(
+    OLD.settled_lease_owner,
+    OLD.settled_lease_epoch,
+    OLD.settled_status,
+    OLD.settled_at
+  ) THEN
+    RAISE EXCEPTION 'terminal settlement cannot be consumed twice';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgrelid = 'wb_run_terminal_settlements'::regclass
+      AND tgname = 'wb_run_terminal_settlements_immutable'
+      AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER wb_run_terminal_settlements_immutable
+    BEFORE UPDATE ON wb_run_terminal_settlements
+    FOR EACH ROW
+    EXECUTE FUNCTION wb_enforce_terminal_settlement_immutable();
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS wb_agent_events (
   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   id text NOT NULL UNIQUE,
@@ -456,6 +664,18 @@ ALTER TABLE wb_visitors
 ALTER TABLE wb_visitors
   ADD CONSTRAINT wb_visitors_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$');
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_visitors'::regclass
+      AND conname = 'wb_visitors_id_tenant_key'
+  ) THEN
+    ALTER TABLE wb_visitors
+      ADD CONSTRAINT wb_visitors_id_tenant_key UNIQUE (id, tenant_id);
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS wb_visitors_tenant_idx
   ON wb_visitors(tenant_id);
 
@@ -475,13 +695,59 @@ CREATE TABLE IF NOT EXISTS wb_tenant_quotas (
 CREATE TABLE IF NOT EXISTS wb_tenant_usage (
   run_id text PRIMARY KEY,
   tenant_id text NOT NULL CONSTRAINT wb_tenant_usage_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$'),
-  visitor_id uuid NOT NULL REFERENCES wb_visitors(id) ON DELETE CASCADE,
+  visitor_id uuid NOT NULL,
   input_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_input_nonnegative CHECK (input_tokens >= 0),
   output_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_output_nonnegative CHECK (output_tokens >= 0),
   total_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_total_nonnegative CHECK (total_tokens >= 0),
   cost_usd numeric(12, 6) NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_cost_nonnegative CHECK (cost_usd >= 0),
-  recorded_at timestamptz NOT NULL DEFAULT now()
+  recorded_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT wb_tenant_usage_visitor_tenant_fk FOREIGN KEY (visitor_id, tenant_id) REFERENCES wb_visitors(id, tenant_id) ON DELETE CASCADE,
+  CONSTRAINT wb_tenant_usage_run_visitor_fk FOREIGN KEY (run_id, visitor_id) REFERENCES wb_runs(id, visitor_id) ON DELETE CASCADE
 );
+
+-- Existing usage rows predate the composite authority keys. A Run is the
+-- authority for visitor ownership, and the Visitor is the authority for its
+-- tenant. Correct only rows whose ownership can be proven; an orphaned row is
+-- intentionally left for the foreign-key installation to reject fail-closed.
+UPDATE wb_tenant_usage AS usage
+SET visitor_id = run.visitor_id,
+    tenant_id = visitor.tenant_id
+FROM wb_runs AS run
+JOIN wb_visitors AS visitor ON visitor.id = run.visitor_id
+WHERE usage.run_id = run.id
+  AND (
+    usage.visitor_id IS DISTINCT FROM run.visitor_id
+    OR usage.tenant_id IS DISTINCT FROM visitor.tenant_id
+  );
+
+ALTER TABLE wb_tenant_usage
+  DROP CONSTRAINT IF EXISTS wb_tenant_usage_visitor_id_fkey;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_tenant_usage'::regclass
+      AND conname = 'wb_tenant_usage_visitor_tenant_fk'
+  ) THEN
+    ALTER TABLE wb_tenant_usage
+      ADD CONSTRAINT wb_tenant_usage_visitor_tenant_fk
+      FOREIGN KEY (visitor_id, tenant_id)
+      REFERENCES wb_visitors(id, tenant_id)
+      ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_tenant_usage'::regclass
+      AND conname = 'wb_tenant_usage_run_visitor_fk'
+  ) THEN
+    ALTER TABLE wb_tenant_usage
+      ADD CONSTRAINT wb_tenant_usage_run_visitor_fk
+      FOREIGN KEY (run_id, visitor_id)
+      REFERENCES wb_runs(id, visitor_id)
+      ON DELETE CASCADE;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS wb_tenant_usage_window_idx
   ON wb_tenant_usage(tenant_id, recorded_at);
@@ -491,15 +757,67 @@ CREATE INDEX IF NOT EXISTS wb_tenant_usage_window_idx
 CREATE TABLE IF NOT EXISTS wb_audit_events (
   id bigserial PRIMARY KEY,
   tenant_id text NOT NULL CONSTRAINT wb_audit_events_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$'),
-  visitor_id uuid REFERENCES wb_visitors(id) ON DELETE SET NULL,
+  visitor_id uuid,
   action text NOT NULL CONSTRAINT wb_audit_events_action_valid CHECK (action ~ '^[a-z][a-z0-9_.]{0,63}$'),
-  outcome text NOT NULL CHECK (outcome IN ('allowed', 'denied')),
+  outcome text NOT NULL CONSTRAINT wb_audit_events_outcome_valid CHECK (outcome IN ('allowed', 'denied', 'queued', 'completed', 'failed', 'stopped')),
   reason_code text NOT NULL CONSTRAINT wb_audit_events_reason_code_valid CHECK (reason_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
   resource_kind text CONSTRAINT wb_audit_events_resource_kind_valid CHECK (resource_kind IS NULL OR resource_kind ~ '^[a-z][a-z0-9_]{0,31}$'),
   resource_id text CONSTRAINT wb_audit_events_resource_id_valid CHECK (resource_id IS NULL OR length(resource_id) <= 128),
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT wb_audit_events_visitor_tenant_fk FOREIGN KEY (visitor_id, tenant_id) REFERENCES wb_visitors(id, tenant_id) ON DELETE SET NULL (visitor_id)
 );
+
+-- Audit rows may outlive a deleted visitor, but every non-null visitor must
+-- belong to the row's tenant. Repair legacy rows from the visitor authority
+-- before installing the composite key.
+UPDATE wb_audit_events AS audit
+SET tenant_id = visitor.tenant_id
+FROM wb_visitors AS visitor
+WHERE audit.visitor_id = visitor.id
+  AND audit.tenant_id IS DISTINCT FROM visitor.tenant_id;
+
+ALTER TABLE wb_audit_events
+  DROP CONSTRAINT IF EXISTS wb_audit_events_visitor_id_fkey,
+  DROP CONSTRAINT IF EXISTS wb_audit_events_outcome_check;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_audit_events'::regclass
+      AND conname = 'wb_audit_events_outcome_valid'
+  ) THEN
+    ALTER TABLE wb_audit_events
+      ADD CONSTRAINT wb_audit_events_outcome_valid
+      CHECK (outcome IN ('allowed', 'denied', 'queued', 'completed', 'failed', 'stopped'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'wb_audit_events'::regclass
+      AND conname = 'wb_audit_events_visitor_tenant_fk'
+  ) THEN
+    ALTER TABLE wb_audit_events
+      ADD CONSTRAINT wb_audit_events_visitor_tenant_fk
+      FOREIGN KEY (visitor_id, tenant_id)
+      REFERENCES wb_visitors(id, tenant_id)
+      ON DELETE SET NULL (visitor_id);
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS wb_audit_events_tenant_idx
   ON wb_audit_events(tenant_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS wb_audit_events_run_queued_once_idx
+  ON wb_audit_events(tenant_id, resource_id)
+  WHERE action = 'run.lifecycle'
+    AND resource_kind = 'run'
+    AND outcome = 'queued'
+    AND resource_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS wb_audit_events_run_terminal_once_idx
+  ON wb_audit_events(tenant_id, resource_id)
+  WHERE action = 'run.lifecycle'
+    AND resource_kind = 'run'
+    AND outcome IN ('completed', 'failed', 'stopped')
+    AND resource_id IS NOT NULL;
 `;

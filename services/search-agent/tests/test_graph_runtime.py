@@ -8,14 +8,14 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from app.config.agent import agent_config
 from app.events.runtime import begin_event_scope, end_event_scope
 from app.graph import nodes
-from app.graph.build import _novel_public_summary, build_graph
+from app.graph.build import _AGENT_BY_NODE, _novel_public_summary, build_graph
 from app.graph.context import RunContext
 from app.graph.query_strategy import (
     QueryBrief,
@@ -32,7 +32,7 @@ from app.graph.schemas import (
     SourcePresentationResult,
     VerifyResult,
 )
-from app.graph.state import initial_state
+from app.graph.state import NodeName, initial_state
 from app.llm.contracts import (
     ModelRequest,
     ModelUsage,
@@ -61,6 +61,11 @@ from app.tools.search_tool import (
     SearchExecutionResult,
 )
 from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
+
+
+def test_node_name_contract_covers_every_evented_graph_node() -> None:
+    graph_nodes = set(build_graph().get_graph().nodes) - {"__start__", "__end__"}
+    assert set(get_args(NodeName)) == set(_AGENT_BY_NODE) == graph_nodes
 
 
 def _checkpoint_query_brief() -> QueryBrief:

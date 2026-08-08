@@ -1,27 +1,74 @@
 # 项目交接
 
-## 当前结论（2026-08-08，Issue #54 租户隔离与配额门禁待用户验收）
+## 当前结论（2026-08-08，Issue #56 本地验收通过，GitHub 交付中）
 
-- 本轮唯一功能为 [#54](https://github.com/LuzernRR/agent-workbench/issues/54)，分支
-  `codex/issue-54-authz-quota-audit`，状态 `awaiting-acceptance`（尚未提 PR，未合并）。
-  详细记录见 [045](docs/development/2026-08-08-045-issue-54-tenant-isolation.md)。
-- **tenant 不再可自述**：`resolveVisitor` 只按访客令牌哈希查库，tenant 由 `wb_visitors` 行回读，
-  请求携带的 `x-tenant-id` 头与 `tenant_id` cookie 一律忽略。tenant 仅在会话行首次创建时播种，
-  `ON CONFLICT` 只更新 `last_seen_at`，因此改 `WORKBENCH_TENANT` 不会静默迁移存量会话。
-- **Search Agent 侧补上签名断言**：改动前该服务完全信任请求体的 `tenantId`，只校验共享
-  `X-Workbench-Token`——持有 token 即可把任意 run 绑到任意租户。现由 BFF 用内部密钥对
-  `tenant:run:visitor` 做 HMAC-SHA256，服务端以 `compare_digest` 常量时间校验；绑定三元组使
-  合法断言无法重放到同租户的其他 run。未配置密钥时回落既有 loopback 开发路径，不新增绕过。
-- **配额与审计**：`wb_quotas`、`wb_audit_events` 幂等建表，配额覆盖 QPS/并发/Token/费用四维。
-  审计表 `tenant_id` 为 `NOT NULL`，故 tenant 未解析的路径不写审计行，改以 run 终态 `reasonCode`
-  记录——这是设计选择，不是遗漏。
-- **门禁**：Python 631 passed/1 skipped、ruff/compileall clean；Web vitest 471 passed/11 skipped；
-  typecheck/lint clean；production build exit 0；Playwright 17 passed/3 live-only skipped。
-  跨租户隔离的真实证据来自真实 PostgreSQL 上的 `store.integration.test.ts`（临时库，4 passed）：
-  跨租户读/写/删除全部 fail-closed。该文件在默认 `vitest run` 中被跳过，需
-  `WORKBENCH_LIVE_INTEGRATION=1`；只看默认套件会误判这条证据缺失。
-- **回滚**：本轮未合并，回滚即丢弃分支改动。已有的 `wb_quotas`/`wb_audit_events` 为幂等建表，
-  保留不影响旧代码路径。
+- 本轮唯一活动功能为 [#56](https://github.com/LuzernRR/agent-workbench/issues/56)，分支
+  `codex/issue-56-tenant-assertion-audit`，Issue 门禁仍为 `Status: ready`、`Execution Gate: allowed`；用户已
+  预授权 Codex 在测试后自行验收。此前所有阶段快照已由 17:04 后的最终树门禁、最终镜像重建和真实运行
+  证据替换；当前本地状态为 `accepted`，GitHub commit/PR/merge/Issue close 仍待真实执行。尚未为 #56
+  杜撰 PR 或 merge SHA，必须在真实创建/合并后回填。详细记录见
+  [046](docs/development/2026-08-08-046-issue-56-tenant-assertion-audit.md)。
+- **#54 权威历史已确认**：Issue [#54](https://github.com/LuzernRR/agent-workbench/issues/54) 已完成，PR
+  [#55](https://github.com/LuzernRR/agent-workbench/pull/55) 于 2026-08-08 合入 `main`，merge commit 为
+  `314e28da32c37ad97596090240e8c09375e77fec`（短 SHA `314e28d`）。记录 045 保留 #54 当时的实现与门禁，
+  并增加 post-merge 安全勘误，不能再写成“待验收、未提 PR、未合并”。
+- **独立租户断言**：#54 合并版本虽然绑定 tenant/run/visitor 并采用 UTF-8 字节长度前缀，但实际复用了
+  `WORKBENCH_INTERNAL_TOKEN` 作为 HMAC key；持有 transport token 的调用方仍能自行签发任意作用域，未形成
+  独立授权边界。#56 改用至少 32 UTF-8 字节的独立 `WORKBENCH_TENANT_ASSERTION_SECRET`，Web/Worker 与
+  Search Agent 对同一长度前缀载荷签发、常量时间校验；缺失、过弱或复用 transport token 时 fail-closed，
+  仅双方都显式处于 loopback 开发模式时允许无断言运行。
+- **租户、配额与审计账本**：tenant 仍只从 `wb_visitors` 服务端回读；真实表名为
+  `wb_tenant_quotas`、`wb_tenant_usage`、`wb_audit_events`、`wb_run_terminal_settlements`。#56 补齐不泄漏
+  资源存在性的授权拒绝审计，
+  reason code 固定为 `RESOURCE_NOT_OWNED_OR_MISSING`；Run 入队写 `run.lifecycle/queued`，唯一终态写
+  `completed`、`failed` 或 `stopped`，终态 usage、Run 状态、公开终态事件和生命周期审计共享事务。
+- **两阶段终态结算**：Worker 仅对没有 checkpoint boundary 的已验证 direct `run.failed` / `run.stopped`
+  先 stage canonical settlement，再在 PostgreSQL
+  事务中 consume；pending settlement 的权威性高于普通 finalize、checkpoint terminal、HTTP stop fallback
+  和零 usage fallback。同 hash 重投幂等、异 hash 冲突，owner+epoch fencing 防止旧 Worker 改写；usage/audit
+  故障回滚业务投影但保留 stage，供新 epoch 接管。无 boundary 的 direct `run.completed` 明确 fail-closed，
+  completed 只能通过 checkpoint batch 的事务边界提交。表由 trigger 保护为 immutable，并约束 source/settled
+  状态及其合法组合。
+- **最终冻结树门禁**：Web `573 passed / 31 skipped`，关键 terminal/store/executor/schema/runner 聚焦
+  `89 passed`，专用 PostgreSQL integration `31 passed`，Search Agent `647 passed / 1 skipped`，
+  Playwright `17 passed / 3 live-only skipped`；TypeScript、ESLint、Next/Worker build、Ruff、compileall、
+  Compose config、`git diff --check` 均通过。`npm audit --audit-level=high` 为 `0 vulnerabilities`，Python
+  `pip-audit` 为 `No known vulnerabilities found`，`new-local-env` 的创建/升级/轮换/ACL/无 secret 输出/
+  临时文件清理 8 项全部为 true。
+- **最终镜像与真实运行**：Web、Worker、Search Agent 已从当前源码重建并强制重建，Web/Search Agent health
+  均为 `ok`；`/v1/graph` 公开 12 个真实节点，包含 `plan_fast_search` 与 `accept_fast_evidence`。租户断言矩阵为
+  正向 `200`、缺断言 `401`、错误断言 `403`、仅 transport token 伪造 HMAC `403`、tenant/run/visitor
+  分别篡改均 `403`、缺 transport token `401`。三类最终 Run 为：completed
+  `run_4d4a46dfd9034199838cb80807e67868`、direct failed
+  `run_3342b99584ef4dbb97bcda830751ff0e`、active tool→stop
+  `run_60623f90c32e4012aef9bd71ce1ae726`；三者均唯一终态、usage/audit/outbox 一致、lease 清除且 pending
+  settlement 为 0，completed/failed/stop 的两次 SSE 全量重放序号一致。
+- **当前运维边界**：已有环境使用 `deploy/new-local-env.ps1 -UpgradeTenantAssertionSecret` 补齐独立密钥；
+  轮换没有双密钥窗口，Web、Worker、Search Agent 必须作为一个发布单元协调重建，不能只重启或回退
+  Search Agent。`npm run test:integration` 必须显式设置 `WORKBENCH_INTEGRATION_DATABASE_URL`，仅允许
+  loopback PostgreSQL 且数据库名以 `_test` 或 `_integration` 结尾；不得回退到业务数据库。数据库新增列、
+  表、复合外键和唯一索引均按 expand-only 处理，代码
+  回滚不自动删表。
+- **仍需诚实保留的边界**：Compose 为 Search Agent 固定 `container_name`，当前取消控制依赖单副本内存
+  `RunRegistry`，横向扩容前必须外置取消路由或去掉固定容器名；项目记忆没有独立公开 API，其授权证据来自
+  thread/project/run 父资源边界；HMAC 是无 nonce/过期时间的确定性断言，同一 tenant/run/visitor 可为恢复
+  重放；设置 `WORKBENCH_API_ORIGIN` 会绕过本地 `handleLive` 审计，外部后端必须实现等价授权与账本；
+  [#27](https://github.com/LuzernRR/agent-workbench/issues/27) 仍为 open，不得仅因当前计时行为已有修复迹象就
+  宣称该 Issue 已关闭。最终 smoke 还发现通用 Agent 框架检索要求可能连续触发
+  `PLAN_INITIAL_FACET_DUPLICATE` / `QUERY_FOLLOW_UP_LINEAGE_REQUIRED`，并以 `toolCalls=0` partial 收口；
+  这是独立的搜索规划稳健性缺口，必须在 #56 关闭后另立 Issue，不能混入本安全修复或伪称已解决。
+- **回滚**：#56 合并前可丢弃本分支；合并后先暂停入口并排空/停止 Worker，再回退实际 #56 merge commit，
+  三端协调重建。若还需回退 #54，必须先回退 #56，再执行 `git revert 314e28d`。回退到 #54 会重新引入
+  transport token 可伪造断言的已知风险，只能作为应急降级；`wb_visitors.tenant_id`、
+  `wb_tenant_quotas`、`wb_tenant_usage`、`wb_audit_events` 与新增约束默认保留，破坏性 contract 另立 migration。
+
+## 上一轮结论（2026-08-08，Issue #54 已验收并合并）
+
+- #54 完成了服务端派生 tenant、每租户 QPS/并发/Token/费用配额和第一版跨租户 fail-closed；用户验收后
+  PR #55 合入 `main@314e28d`，Issue #54 随后关闭。历史实现、当时测试数字和 post-merge 勘误见
+  [开发记录 045](docs/development/2026-08-08-045-issue-54-tenant-isolation.md)。
+- post-merge 审查发现两项未满足原 DoD 的缺口：断言密钥复用 transport token；审计仅覆盖 Run admission，
+  尚未完整覆盖资源授权拒绝与 Run queued/terminal 生命周期。这两项由当前唯一活动 Issue #56 收口。
 
 ## 上一轮结论（2026-08-07，Issue #52 查询理解与反馈驱动检索已验收并合并）
 
@@ -1446,9 +1493,10 @@
 - 定向测试：`event-kernel.test.ts`、`V2ProcessPanel.test.tsx`、`V2ToolActivityRow.test.tsx`、`s01-page-fixture.test.ts` 共 73/73；typecheck、目标 ESLint、`git diff --check` 通过。
 - 实机证据：1440x900 unknown 与 360x800 长文本均无横向溢出；并行顺序稳定，reduced-motion 正常；3100 preview 为 404。
 
-### 后续事务可靠性约束
+### 历史基线：后续事务可靠性约束（已由后续 Issue 部分实现）
 
-以下约束只记录未来真实执行循环、工具闭环和生产加固的实现边界，当前前端功能不实现后端事务：
+以下段落是早期前端切片时期的历史约束，不是 2026-08-08 当前状态。当前 Worker、LangGraph checkpoint、
+terminal settlement 和审计事实以本文顶部与记录 046 为准。
 
 - 单库强事务必须在同一数据库事务中按序提交，任何一步失败立即整体回滚。
 - 跨系统强一致业务优先封装为一个服务端原子业务工具；模型不能拼接多个底层写工具假装原子。
@@ -1457,7 +1505,9 @@
 - timeout/outcome unknown 必须先查询 operation 状态；可能产生副作用的操作禁止盲重试。
 - 后续工具行必须诚实展示 retrying、rolling_back、compensating、unknown 和最终失败；accepted 只代表请求持久化，不等于业务 completed。
 
-## 已实现
+## 历史实现快照（非当前权威状态）
+
+以下表格保留用于追溯早期 Next-only runtime。它不能覆盖本文顶部后续 #48/#50/#52/#54/#56 的现状。
 
 | 领域 | 当前事实 |
 |---|---|
@@ -1478,7 +1528,10 @@
 | 保留 | 会话最后活动超过 3 天且不在运行时自动删除；运行、事件、附件级联；项目记忆完整归档与单轮上下文预算分离 |
 | mock | 仅 `WORKBENCH_LLM_MODE=mock` 与 Playwright `3110` 使用；live 不显示种子、模拟工具或虚构状态 |
 
-## 尚未实现
+## 历史未实现清单（已失效）
+
+以下六项是早期快照：Python/LangGraph、真实搜索、checkpoint/Worker 和 tenant 能力随后已部分或完整落地；
+仍未完成的精确边界请只读本文顶部“仍需诚实保留的边界”和生产化任务清单。
 
 - Python + LangGraph 运行时尚未接入；当前 Agent 编排仍在 Next 服务端。
 - 万能搜索 Agent、真实搜索、抓取、重排、声明级引用和验证循环尚未实现。
@@ -1487,7 +1540,9 @@
 - 匿名 Cookie 不能跨浏览器、设备或清除 Cookie 后恢复；暂无登录、租户、角色和权限系统。
 - 服务进程重启会把未完成运行标记失败；尚无 LangGraph checkpoint 续跑与外部任务队列。
 
-## 关键链路
+## 历史 Next-only 关键链路（已失效）
+
+该图只描述早期 Next 内存执行器，不代表当前 Web→PostgreSQL queue→Worker→Search Agent→LangGraph 路径。
 
 ```mermaid
 flowchart LR
@@ -1509,7 +1564,9 @@ flowchart LR
 
 SSE 订阅不是运行所有者。`apps/web/src/server/live/engine.ts` 中的后台执行先落库，再通知零个或多个订阅者；浏览器关闭只移除订阅者。`apps/web/src/hooks/use-agent-thread.ts` 在页面隐藏后禁用逐字动画并立即应用完整 delta，避免恢复时慢速回放。
 
-同一 live runtime 通过 `eventTail` 串行提交事件。停止先同步设置 `cancelled` 并中止 Provider，再由 `finalizeLiveRun()` 用条件更新抢占终态；线程状态、完成消息、项目记忆和终态事件与抢占结果保持同一事务。终态已存在时 stop API 返回实际状态，不写重复事件。
+历史 Next-only runtime 通过 `eventTail` 串行提交事件，并由 `finalizeLiveRun()` 条件抢占终态。当前权威实现
+已迁移到独立 Worker、lease/epoch fencing、checkpoint batch 与 `wb_run_terminal_settlements` 两阶段结算；
+不得再用本段解释当前 stop/terminal 行为。
 
 ## 数据与配置
 

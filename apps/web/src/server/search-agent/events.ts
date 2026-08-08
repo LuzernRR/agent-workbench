@@ -33,8 +33,22 @@ const base = {
   createdAt,
   type: z.string()
 };
-const node = z.enum(["load_context", "classify_intent", "plan_research", "mark_plan_running", "research", "merge_research", "reflect", "compose", "verify", "finalize"]);
+const node = z.enum(["load_context", "classify_intent", "plan_research", "plan_fast_search", "mark_plan_running", "research", "merge_research", "accept_fast_evidence", "reflect", "compose", "verify", "finalize"]);
 const agent = z.enum(["supervisor", "planner", "researcher", "reflector", "writer", "verifier"]);
+const agentByNode: Record<z.infer<typeof node>, z.infer<typeof agent>> = {
+  load_context: "supervisor",
+  classify_intent: "supervisor",
+  plan_research: "planner",
+  plan_fast_search: "planner",
+  mark_plan_running: "planner",
+  research: "researcher",
+  merge_research: "researcher",
+  accept_fast_evidence: "reflector",
+  reflect: "reflector",
+  compose: "writer",
+  verify: "verifier",
+  finalize: "supervisor"
+};
 const publicToolName = z.enum(["web_search", "unknown_tool"]);
 const searchChannel = z.enum(["web", "x", "xiaohongshu"]);
 const evidenceStatus = z.enum(["read", "accepted", "rejected", "cited"]);
@@ -160,11 +174,21 @@ const searchAgentEventUnion = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("answer.delta"), composeRound: z.number().int().nonnegative().max(10), delta: unicodeText(50_000, 1) }).strict(),
   z.object({ ...base, type: z.literal("answer.completed"), composeRound: z.number().int().nonnegative().max(10) }).strict(),
   z.object({ ...base, type: z.literal("run.completed"), answerMarkdown: unicodeText(100_000, 1), answerSource: z.literal("model"), answerModelCalls: z.number().int().positive().max(100), promptVersion: compactText(120), responseStatus: z.enum(["completed", "partial"]), citations: z.array(z.object({ label: compactText(300), url: httpUrl }).strict()).max(60), verificationPassed: z.boolean(), stopReason: reasonCode, usage: usageSchema, modelCalls: z.number().int().positive().max(100), toolCalls: z.number().int().nonnegative().max(100), evidenceCount: z.number().int().nonnegative().max(1_000) }).strict(),
-  z.object({ ...base, type: z.literal("run.stopped"), runId: identifier, responseStatus: z.literal("partial"), reasonCode }).strict(),
-  z.object({ ...base, type: z.literal("run.failed"), reasonCode, message: compactText(500) }).strict()
+  z.object({ ...base, type: z.literal("run.stopped"), runId: identifier, responseStatus: z.literal("partial"), reasonCode, usage: usageSchema }).strict(),
+  z.object({ ...base, type: z.literal("run.failed"), reasonCode, message: compactText(500), usage: usageSchema }).strict()
 ]);
 
 export const searchAgentEventSchema = searchAgentEventUnion.superRefine((event, context) => {
+  if (
+    (event.type === "node.started" || event.type === "node.completed" || event.type === "node.failed")
+    && agentByNode[event.node] !== event.agent
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agent"],
+      message: `节点 ${event.node} 的 Agent 归属无效`
+    });
+  }
   if (event.type === "plan.updated") {
     const ids = new Set(event.steps.map((step) => step.stepId));
     const queryKeys = new Set<string>();
