@@ -3,7 +3,7 @@ import type { ImageInputReference } from "@/server/media/image-input";
 import { z } from "zod";
 import { loadSearchAgentServiceConfig } from "./config";
 import { decodeSearchAgentNdjson, SearchAgentEventProtocolError, type SearchAgentEvent } from "./events";
-import { TENANT_ASSERTION_HEADER, signTenantAssertion } from "./tenant-assertion";
+import { TENANT_ASSERTION_HEADER, signTenantAssertion, TenantAssertionError } from "./tenant-assertion";
 
 export type SearchAgentRunRequest = {
   runId: string;
@@ -77,6 +77,15 @@ const verificationCancelSchema = z.object({
   status: z.literal("cancelled")
 }).strict();
 
+const stopResponseSchema = z.object({
+  version: z.literal(1),
+  runId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/u),
+  status: z.enum(["stopping", "already_stopped", "not_running"]),
+  taskCancelled: z.boolean()
+}).strict();
+
+export type SearchAgentStopResult = "requested" | "not_running" | "unsupported" | "unavailable";
+
 export type XiaohongshuVerificationStatus = z.infer<typeof verificationStatusSchema>;
 
 export class SearchAgentVerificationError extends Error {
@@ -86,12 +95,16 @@ export class SearchAgentVerificationError extends Error {
   }
 }
 
-function internalHeaders(accept = "application/x-ndjson", assertFor?: { tenantId: string; runId: string; visitorId: string }) {
+function internalHeaders(
+  accept = "application/x-ndjson",
+  assertFor?: { tenantId: string; runId: string; visitorId: string },
+  serviceOrigin?: string
+) {
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", accept });
   const token = process.env.WORKBENCH_INTERNAL_TOKEN;
   if (token) headers.set("X-Workbench-Token", token);
   if (assertFor) {
-    const assertion = signTenantAssertion(assertFor);
+    const assertion = signTenantAssertion(assertFor, { serviceOrigin });
     if (assertion) headers.set(TENANT_ASSERTION_HEADER, assertion);
   }
   return headers;
@@ -171,11 +184,27 @@ export async function* streamSearchAgentRun(input: SearchAgentRunRequest, signal
   const config = await loadSearchAgentServiceConfig();
   const timeout = AbortSignal.timeout(config.requestTimeoutMs);
   const combinedSignal = AbortSignal.any([signal, timeout]);
+  let headers: Headers;
+  try {
+    headers = internalHeaders(
+      "application/x-ndjson",
+      { tenantId: input.tenantId, runId: input.runId, visitorId: input.visitorId },
+      config.origin
+    );
+  } catch (error) {
+    if (error instanceof TenantAssertionError) {
+      throw new SearchAgentRequestError(
+        "Search Agent 租户断言配置无效",
+        "SEARCH_AGENT_TENANT_ASSERTION_CONFIG"
+      );
+    }
+    throw error;
+  }
   let response: Response;
   try {
     response = await fetch(`${config.origin}/v1/runs/stream`, {
       method: "POST",
-      headers: internalHeaders("application/x-ndjson", { tenantId: input.tenantId, runId: input.runId, visitorId: input.visitorId }),
+      headers,
       body: JSON.stringify({ version: 1, ...input, depth: input.depth || "balanced", resume: Boolean(input.resume) }),
       cache: "no-store",
       signal: combinedSignal
@@ -201,18 +230,21 @@ export async function* streamSearchAgentRun(input: SearchAgentRunRequest, signal
   }
 }
 
-export async function requestSearchAgentStop(runId: string): Promise<"requested" | "unsupported" | "unavailable"> {
+export async function requestSearchAgentStop(runId: string): Promise<SearchAgentStopResult> {
   try {
     const config = await loadSearchAgentServiceConfig();
     const response = await fetch(`${config.origin}/v1/runs/${encodeURIComponent(runId)}/stop`, {
       method: "POST",
-      headers: internalHeaders(),
+      headers: internalHeaders("application/json"),
       body: "{}",
       cache: "no-store",
-      signal: AbortSignal.timeout(Math.min(config.requestTimeoutMs, 5_000))
+      signal: AbortSignal.timeout(Math.min(config.requestTimeoutMs, 500))
     });
     if ([404, 405, 501].includes(response.status)) return "unsupported";
-    return response.ok ? "requested" : "unavailable";
+    if (!response.ok) return "unavailable";
+    const payload = stopResponseSchema.parse(await response.json());
+    if (payload.runId !== runId) return "unavailable";
+    return payload.status === "not_running" ? "not_running" : "requested";
   } catch {
     return "unavailable";
   }

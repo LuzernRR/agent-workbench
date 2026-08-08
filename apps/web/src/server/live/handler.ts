@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig, publicModelDefinitions } from "@/server/config/runtime-config";
-import { QuotaExceededError } from "@/server/live/quota";
+import {
+  memoryAuthorizationScope,
+  QuotaExceededError,
+  recordAuthorizationDenied,
+  recordAuthorizationDenials,
+  type AuthorizationAuditAction,
+  type AuthorizationResourceKind
+} from "@/server/live/quota";
 import { ImageInputError } from "@/server/media/image-input";
 import {
   cancelXiaohongshuVerification,
@@ -9,7 +16,7 @@ import {
   requestXiaohongshuVerificationStatus,
   SearchAgentVerificationError
 } from "@/server/search-agent/client";
-import { resolveVisitor, VisitorSessionError } from "@/server/session/visitor";
+import { resolveVisitor, VisitorSessionError, type VisitorPrincipal } from "@/server/session/visitor";
 import { startLiveRun, stopLiveRun } from "./engine";
 import {
   activeEventsForRun,
@@ -33,6 +40,32 @@ const LIVE_TOOLS = [{ id: "web_search", name: "网页搜索", description: "搜�
 const json = (data: unknown, status = 200) => NextResponse.json(data, { status });
 const fail = (message: string, status: number, code = "WORKBENCH_ERROR") => json({ success: false, code, message }, status);
 
+type DeniedResourceAudit = {
+  action: AuthorizationAuditAction;
+  resourceKind: AuthorizationResourceKind;
+  resourceId?: string | null;
+};
+
+async function deniedResource(
+  visitor: VisitorPrincipal,
+  input: DeniedResourceAudit & { blockedEffects?: DeniedResourceAudit[] },
+  message: string,
+  status = 404,
+  code = "WORKBENCH_ERROR"
+) {
+  const { blockedEffects = [], ...primary } = input;
+  const principal = { tenantId: visitor.tenantId, visitorId: visitor.id };
+  if (blockedEffects.length) {
+    await recordAuthorizationDenials([
+      { ...principal, ...primary },
+      ...blockedEffects.map((effect) => ({ ...principal, ...effect }))
+    ]);
+  } else {
+    await recordAuthorizationDenied({ ...principal, ...primary });
+  }
+  return fail(message, status, code);
+}
+
 async function body(request: Request): Promise<Record<string, unknown>> {
   try {
     const text = await request.text();
@@ -42,9 +75,9 @@ async function body(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
-async function liveEventStream(request: Request, visitorId: string, runId: string, after: number) {
-  const record = await liveRun(visitorId, runId);
-  if (!record) return fail("运行不存在", 404);
+async function liveEventStream(request: Request, visitor: VisitorPrincipal, runId: string, after: number) {
+  const record = await liveRun(visitor.id, runId);
+  if (!record) return await deniedResource(visitor, { action: "run.read", resourceKind: "run", resourceId: runId }, "运行不存在");
   const encoder = new TextEncoder();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let catchupTimer: ReturnType<typeof setInterval> | null = null;
@@ -80,8 +113,8 @@ async function liveEventStream(request: Request, visitorId: string, runId: strin
           // Read status before events. A terminal transition commits its event
           // in the same transaction, so either this pass sees both or the next
           // pass observes them; it can never close between the two writes.
-          const latest = await liveRun(visitorId, runId);
-          const events = await activeEventsForRun(visitorId, runId, lastSeq);
+          const latest = await liveRun(visitor.id, runId);
+          const events = await activeEventsForRun(visitor.id, runId, lastSeq);
           for (const event of events) if (send(event)) return close();
           if (!latest || ["completed", "failed", "stopped"].includes(latest.status)) close();
         } catch {
@@ -136,7 +169,15 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
       if (segments.length === 2 && segments[1] === "reorder" && method === "PATCH") {
         const payload = await body(request);
         const projectIds = Array.isArray(payload.projectIds) ? payload.projectIds.map(String) : [];
-        return await reorderLiveProjects(visitor.id, projectIds) ? json({ status: "reordered" }) : fail("项目顺序无效", 400);
+        const reordered = await reorderLiveProjects(visitor.id, projectIds);
+        if (reordered.kind === "reordered") return json({ status: "reordered" });
+        if (reordered.kind === "invalid_order") return fail("项目顺序无效", 400);
+        return await deniedResource(
+          visitor,
+          { action: "project.reorder", resourceKind: "project", resourceId: reordered.resourceId },
+          "项目顺序无效",
+          400
+        );
       }
       const projectId = segments[1];
       if (segments.length === 2 && projectId) {
@@ -146,16 +187,36 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
             name: typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined,
             path: typeof payload.path === "string" ? payload.path : undefined
           });
-          return project ? json(project) : fail("项目不存在", 404);
+          return project
+            ? json(project)
+            : await deniedResource(visitor, { action: "project.update", resourceKind: "project", resourceId: projectId }, "项目不存在");
         }
-        if (method === "DELETE") return await deleteLiveProject(visitor.id, projectId) ? json({ status: "deleted" }) : fail("项目不存在", 404);
+        if (method === "DELETE") return await deleteLiveProject(visitor.id, projectId)
+          ? json({ status: "deleted" })
+          : await deniedResource(visitor, {
+              action: "project.delete",
+              resourceKind: "project",
+              resourceId: projectId,
+              blockedEffects: [{
+                action: "memory.delete",
+                resourceKind: "memory",
+                resourceId: memoryAuthorizationScope("project", projectId)
+              }]
+            }, "项目不存在");
       }
       if (segments.length === 3 && segments[2] === "threads" && projectId) {
-        if (method === "GET") return json(await listLiveThreads(visitor.id, projectId));
+        if (method === "GET") {
+          const threads = await listLiveThreads(visitor.id, projectId);
+          return threads
+            ? json(threads)
+            : await deniedResource(visitor, { action: "project.read", resourceKind: "project", resourceId: projectId }, "项目不存在");
+        }
         if (method === "POST") {
           const payload = await body(request);
           const thread = await createLiveThread(visitor.id, projectId, typeof payload.title === "string" ? payload.title : undefined);
-          return thread ? json(thread) : fail("项目不存在", 404);
+          return thread
+            ? json(thread)
+            : await deniedResource(visitor, { action: "thread.create", resourceKind: "project", resourceId: projectId }, "项目不存在");
         }
       }
     }
@@ -165,23 +226,48 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
         const payload = await body(request);
         const projectId = payload.projectId === null || payload.projectId === undefined ? null : String(payload.projectId);
         const thread = await createLiveThread(visitor.id, projectId, typeof payload.title === "string" ? payload.title : undefined);
-        return thread ? json(thread) : fail("项目不存在", 404);
+        if (thread) return json(thread);
+        return projectId === null
+          ? fail("会话创建失败", 503, "LIVE_SERVICE_UNAVAILABLE")
+          : await deniedResource(visitor, { action: "thread.create", resourceKind: "project", resourceId: projectId }, "项目不存在");
       }
       const threadId = segments[1];
       if (segments.length === 2 && threadId) {
         if (method === "GET") {
           const snapshot = await getLiveSnapshot(visitor.id, threadId);
-          return snapshot ? json(snapshot) : fail("会话不存在", 404);
+          return snapshot
+            ? json(snapshot)
+            : await deniedResource(visitor, { action: "thread.read", resourceKind: "thread", resourceId: threadId }, "会话不存在");
         }
         if (method === "PATCH") {
           const payload = await body(request);
           const patch: { title?: string; projectId?: string | null } = {};
           if (typeof payload.title === "string" && payload.title.trim()) patch.title = payload.title.trim();
           if ("projectId" in payload) patch.projectId = payload.projectId === null ? null : String(payload.projectId);
-          const thread = await updateLiveThread(visitor.id, threadId, patch);
-          return thread ? json(thread) : fail("会话或目标项目不存在", 404);
+          const updated = await updateLiveThread(visitor.id, threadId, patch);
+          if (updated.kind === "updated") return json(updated.thread);
+          return await deniedResource(
+            visitor,
+            {
+              action: "thread.update",
+              resourceKind: updated.kind === "target_project_denied" ? "project" : "thread",
+              resourceId: updated.resourceId
+            },
+            "会话或目标项目不存在"
+          );
         }
-        if (method === "DELETE") return await deleteLiveThread(visitor.id, threadId) ? json({ status: "deleted" }) : fail("会话不存在", 404);
+        if (method === "DELETE") return await deleteLiveThread(visitor.id, threadId)
+          ? json({ status: "deleted" })
+          : await deniedResource(visitor, {
+              action: "thread.delete",
+              resourceKind: "thread",
+              resourceId: threadId,
+              blockedEffects: [{
+                action: "memory.delete",
+                resourceKind: "memory",
+                resourceId: memoryAuthorizationScope("thread", threadId)
+              }]
+            }, "会话不存在");
       }
       if (segments.length === 3 && threadId) {
         if (segments[2] === "runs" && method === "POST") {
@@ -205,7 +291,9 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
           const form = await request.formData();
           const files = form.getAll("files").filter((entry): entry is File => entry instanceof File && entry.size > 0 && entry.size <= 20 * 1024 * 1024);
           const uploaded = await uploadLiveAttachments(visitor.id, threadId, files);
-          return uploaded ? json(uploaded) : fail("会话不存在", 404);
+          return uploaded
+            ? json(uploaded)
+            : await deniedResource(visitor, { action: "attachment.upload", resourceKind: "thread", resourceId: threadId }, "会话不存在");
         }
       }
     }
@@ -215,7 +303,19 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
         const runId = segments[1];
         const challengeId = segments[3];
         const owned = await liveRun(visitor.id, runId);
-        if (!owned || owned.run.agentId !== "search-agent") return fail("验证会话不存在", 404, "VERIFICATION_NOT_FOUND");
+        if (!owned || owned.run.agentId !== "search-agent") {
+          return await deniedResource(
+            visitor,
+            {
+              action: method === "DELETE" ? "run.verification.cancel" : "run.verification.read",
+              resourceKind: "run",
+              resourceId: runId
+            },
+            "验证会话不存在",
+            404,
+            "VERIFICATION_NOT_FOUND"
+          );
+        }
         try {
           if (segments.length === 4 && method === "GET") {
             return json(await requestXiaohongshuVerificationStatus(runId, challengeId));
@@ -246,17 +346,19 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
         const queryAfter = Number(new URLSearchParams(search || "").get("after") || 0);
         const headerAfter = Number(request.headers.get("last-event-id") || 0);
         const after = Math.max(Number.isFinite(queryAfter) ? queryAfter : 0, Number.isFinite(headerAfter) ? headerAfter : 0);
-        return liveEventStream(request, visitor.id, segments[1], after);
+        return liveEventStream(request, visitor, segments[1], after);
       }
       if (segments[2] === "stop" && method === "POST") {
         const status = await stopLiveRun(visitor.id, segments[1]);
-        return status ? json({ status }) : fail("运行不存在", 404);
+        return status
+          ? json({ status })
+          : await deniedResource(visitor, { action: "run.stop", resourceKind: "run", resourceId: segments[1] }, "运行不存在");
       }
     }
 
     if (segments[0] === "attachments" && segments[1] && method === "GET") {
       const attachment = await liveAttachment(visitor.id, segments[1]);
-      if (!attachment) return fail("附件不存在", 404);
+      if (!attachment) return await deniedResource(visitor, { action: "attachment.read", resourceKind: "attachment", resourceId: segments[1] }, "附件不存在");
       return new Response(attachment.bytes, { headers: { "content-type": attachment.mime_type, "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.name)}`, "cache-control": "private, max-age=31536000, immutable" } });
     }
 

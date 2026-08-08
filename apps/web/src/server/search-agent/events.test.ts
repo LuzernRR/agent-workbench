@@ -10,6 +10,7 @@ const sourceEnvelope = {
   seq: 1,
   createdAt: "2026-07-28T00:00:00Z"
 };
+const zeroUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 };
 const provenance = {
   discovery_provider: "tavily",
   detail_provider: null,
@@ -71,6 +72,40 @@ describe("Search Agent 严格 NDJSON 边界", () => {
       nodeRunId: "merge_research_0123456789abcdef0123456789abcdef"
     };
     expect(parseSearchAgentEvent(event)).toEqual(event);
+  });
+
+  it("接受 Python 生产图发出的全部节点名称与 Agent 归属", () => {
+    const productionNodes = {
+      load_context: "supervisor",
+      classify_intent: "supervisor",
+      plan_research: "planner",
+      plan_fast_search: "planner",
+      mark_plan_running: "planner",
+      research: "researcher",
+      merge_research: "researcher",
+      accept_fast_evidence: "reflector",
+      reflect: "reflector",
+      compose: "writer",
+      verify: "verifier",
+      finalize: "supervisor"
+    } as const;
+
+    for (const [node, agent] of Object.entries(productionNodes)) {
+      const event = {
+        ...nodeStarted,
+        node,
+        nodeRunId: `${node}_run`,
+        agent
+      };
+      expect(parseSearchAgentEvent(event)).toEqual(event);
+    }
+
+    expect(() => parseSearchAgentEvent({
+      ...nodeStarted,
+      node: "plan_fast_search",
+      nodeRunId: "plan_fast_search_wrong_agent",
+      agent: "verifier"
+    })).toThrow(/Agent 归属/u);
   });
 
   it("拒绝未知事件与任何额外字段", () => {
@@ -167,7 +202,19 @@ describe("Search Agent 严格 NDJSON 边界", () => {
     expect(completed.type).toBe("run.completed");
     if (completed.type !== "run.completed") throw new Error("run.completed 解析失败");
     expect(completed.responseStatus).toBe("partial");
-    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED" }).type).toBe("run.stopped");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED", usage: zeroUsage }).type).toBe("run.stopped");
+    expect(parseSearchAgentEvent({ ...sourceEnvelope, type: "run.failed", reasonCode: "SEARCH_UNAVAILABLE", message: "搜索不可用", usage: zeroUsage }).type).toBe("run.failed");
+  });
+
+  it("所有运行终态都要求严格的四字段 usage", () => {
+    const stopped = { ...sourceEnvelope, type: "run.stopped", runId: "run_one", responseStatus: "partial", reasonCode: "USER_STOPPED" };
+    const failed = { ...sourceEnvelope, type: "run.failed", reasonCode: "SEARCH_UNAVAILABLE", message: "搜索不可用" };
+
+    expect(() => parseSearchAgentEvent(stopped)).toThrow();
+    expect(() => parseSearchAgentEvent(failed)).toThrow();
+    expect(() => parseSearchAgentEvent({ ...failed, usage: { ...zeroUsage, requests: 1 } })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...failed, usage: { ...zeroUsage, input_tokens: -1 } })).toThrow();
+    expect(() => parseSearchAgentEvent({ ...failed, usage: { ...zeroUsage, output_tokens: 0.5 } })).toThrow();
   });
 
   it("允许上限内 60 条安全引用和固定 unknown_tool 防御事件", () => {

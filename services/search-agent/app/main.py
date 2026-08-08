@@ -39,15 +39,18 @@ from app.tools.channels.xiaohongshu_mcp import (
 )
 from app.tools.xiaohongshu_verification import XiaohongshuVerificationRegistry
 
+_MIN_TENANT_ASSERTION_SECRET_BYTES = 32
+
+
+class _TenantAssertionConfigError(RuntimeError):
+    """Raised when the tenant assertion trust boundary is misconfigured."""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config = agent_config()
     runtime = runtime_config()
-    if not _internal_auth_configured():
-        raise RuntimeError(
-            "Search Agent 必须配置 WORKBENCH_INTERNAL_TOKEN；仅显式本机开发模式可豁免"
-        )
+    _validate_security_configuration()
     if not runtime.database_url:
         raise RuntimeError("Search Agent live 模式必须配置 PostgreSQL 持久账本与 checkpoint")
     ledger = ToolOperationLedger(runtime.database_url)
@@ -122,6 +125,38 @@ def _internal_auth_configured() -> bool:
     return bool(os.environ.get("WORKBENCH_INTERNAL_TOKEN", "").strip()) or _insecure_loopback_allowed()
 
 
+def _tenant_assertion_secret() -> bytes | None:
+    value = os.environ.get("WORKBENCH_TENANT_ASSERTION_SECRET", "").strip()
+    if not value:
+        if _insecure_loopback_allowed():
+            return None
+        raise _TenantAssertionConfigError(
+            "Search Agent 必须配置 WORKBENCH_TENANT_ASSERTION_SECRET"
+        )
+    secret = value.encode("utf-8")
+    if len(secret) < _MIN_TENANT_ASSERTION_SECRET_BYTES:
+        raise _TenantAssertionConfigError(
+            "WORKBENCH_TENANT_ASSERTION_SECRET 至少需要 32 个 UTF-8 字节"
+        )
+    internal_token = os.environ.get("WORKBENCH_INTERNAL_TOKEN", "").strip()
+    if internal_token and hmac.compare_digest(secret, internal_token.encode("utf-8")):
+        raise _TenantAssertionConfigError(
+            "WORKBENCH_TENANT_ASSERTION_SECRET 必须与 WORKBENCH_INTERNAL_TOKEN 独立"
+        )
+    return secret
+
+
+def _validate_security_configuration() -> None:
+    if not _internal_auth_configured():
+        raise RuntimeError(
+            "Search Agent 必须配置 WORKBENCH_INTERNAL_TOKEN；仅显式本机开发模式可豁免"
+        )
+    try:
+        _tenant_assertion_secret()
+    except _TenantAssertionConfigError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def _authorize(token: str | None) -> None:
     expected = os.environ.get("WORKBENCH_INTERNAL_TOKEN", "").strip()
     if not expected:
@@ -135,20 +170,22 @@ def _authorize(token: str | None) -> None:
 def _authorize_tenant(assertion: str | None, payload: SearchRunRequest) -> None:
     """Verify the server-signed tenant assertion instead of trusting the body.
 
-    The BFF signs `tenant:run:visitor` with the shared internal secret, so a
-    caller that merely holds the token cannot rebind a run to another tenant.
-    When no secret is configured the loopback development path already applies,
-    and `_authorize` has decided the request is acceptable.
+    The BFF signs the length-prefixed tenant/run/visitor scope with an assertion
+    secret that is independent from the transport token. Missing assertions are
+    allowed only by the explicit loopback development exception.
     """
-    secret = os.environ.get("WORKBENCH_INTERNAL_TOKEN", "").strip()
-    if not secret:
+    try:
+        secret = _tenant_assertion_secret()
+    except _TenantAssertionConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if secret is None:
         return
     if not assertion:
         raise HTTPException(status_code=401, detail="缺少租户断言")
     parts = (payload.tenant_id, payload.run_id, payload.visitor_id)
     body = "".join(f"{len(part.encode('utf-8'))}:{part}" for part in parts)
-    mac = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(assertion, f"v1:{mac}"):
+    mac = hmac.new(secret, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(assertion.encode("utf-8"), f"v1:{mac}".encode("ascii")):
         raise HTTPException(status_code=403, detail="租户断言与请求不匹配")
 
 
@@ -189,15 +226,17 @@ async def graph_definition(
             "load_context",
             "classify_intent",
             "plan_research",
+            "plan_fast_search",
             "mark_plan_running",
             "research",
             "merge_research",
+            "accept_fast_evidence",
             "reflect",
             "compose",
             "verify",
             "finalize",
         ],
-        "flow": "classify -> plan -> mark_running -> Send(research fan-out) -> merge_research fan-in -> reflect -> replan|compose -> verify -> research_more|rewrite|finalize",
+        "flow": "classify -> plan_fast_search|plan_research|compose -> mark_running -> Send(research fan-out) -> merge_research fan-in -> accept_fast_evidence|reflect|replan -> compose -> verify -> research_more|rewrite|finalize",
     }
 
 

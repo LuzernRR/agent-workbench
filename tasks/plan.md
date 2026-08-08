@@ -10,9 +10,9 @@ queries, records each real `SearchAttempt`, and drives later searches from typed
 `EvidenceGap` feedback. It does not add another graph loop, search provider,
 reranker, broker, or public reasoning surface.
 
-Issue #52 is the only active feature. It has `Status: ready` and
-`Execution Gate: allowed`. The user authorized Codex to run fresh verification
-and pass the current acceptance when all criteria are proved.
+This section is the historical plan for #52, which has already been accepted and
+merged. The current active feature is Issue #56 in the later plan section; do not
+use this historical gate to infer current execution state.
 
 ## Architecture Decisions
 
@@ -262,8 +262,11 @@ outcomes. Real OIDC/RBAC/RLS stay out of scope and remain blocked.
   cookie. It is seeded only when the session row is first created, so changing
   `WORKBENCH_TENANT` cannot migrate existing sessions into another tenant.
 - The Search Agent previously trusted the request-body `tenantId` behind a shared
-  token. It now verifies an HMAC assertion over `tenant:run:visitor`. Binding all
-  three prevents replaying a valid assertion onto another run of the same tenant.
+  token. Issue #54 added a UTF-8 length-prefixed HMAC over tenant, run, and visitor,
+  but the merged implementation used the transport token itself as the HMAC key.
+  That binding prevented cross-run replay for callers without the token, but it did
+  not establish an authorization boundary against the threat actor defined by the
+  Issue. Issue #56 is the explicit post-merge correction.
 - Quotas and the audit ledger live in PostgreSQL. No Redis: the authoritative run
   state is already there, and a second store would create a split source of truth.
 - The audit table requires a non-null tenant, so paths where tenant cannot be
@@ -271,10 +274,126 @@ outcomes. Real OIDC/RBAC/RLS stay out of scope and remain blocked.
 
 ## Status
 
-All implementation and verification tasks are complete; see `tasks/todo.md`.
-Remaining: user acceptance, then PR, merge, Issue close, and main sync.
+Accepted and merged. PR
+[#55](https://github.com/LuzernRR/agent-workbench/pull/55) merged into `main` as
+`314e28da32c37ad97596090240e8c09375e77fec`; Issue #54 is closed. The historical
+verification numbers remain in development record 045. Post-merge findings are
+tracked only in Issue #56 rather than rewriting #54 as if it had shipped the
+independent secret and complete lifecycle audit.
 
 ## Open Questions
 
 - None blocking. OIDC provider choice is deferred to the follow-up P0-05 Issue and
   requires user input (issuer, client credentials, callback domain).
+
+---
+
+# Implementation Plan: Issue #56 Tenant Assertion And Audit Follow-up
+
+## Overview
+
+Issue [#56](https://github.com/LuzernRR/agent-workbench/issues/56) is the only
+active feature. It repairs the post-merge gaps in #54 without expanding into
+OIDC, RBAC, ABAC, RLS, exact serialized quotas, or a new public memory API.
+The GitHub gate remains `Status: ready` and `Execution Gate: allowed`. The user
+pre-authorized Codex to accept after fresh verification. The final tree has now
+passed the local acceptance gates and rebuilt-image runtime smokes, so local status
+is `accepted`; commit `32fdbda` and PR #57 now exist, while CI/review, merge SHA,
+Issue close, and `main` synchronization remain pending until they actually occur.
+
+## Acceptance Slices
+
+- A1-A3: use an independent `WORKBENCH_TENANT_ASSERTION_SECRET`, fail closed on
+  missing/weak/reused configuration, preserve the cross-language UTF-8
+  length-prefixed payload, fixed vector, constant-time comparison, and exact-scope
+  recovery replay behavior.
+- A4: map cross-subject missing/not-owned project, thread, run, attachment, and
+  parent-scoped memory operations to non-enumerating responses and durable denied
+  audit rows with `RESOURCE_NOT_OWNED_OR_MISSING`.
+- A5: commit allowed admission, Run insertion, queued lifecycle, terminal status,
+  terminal usage, public terminal event, and one terminal lifecycle audit in their
+  corresponding PostgreSQL transactions; rollback must not leave phantom usage or
+  lifecycle rows.
+- A6: enforce visitor/tenant and run/visitor ownership with composite foreign keys
+  on `wb_tenant_usage` and `wb_audit_events`, plus unique queued/terminal lifecycle
+  indexes keyed by tenant and Run.
+- A7: use deterministic Node/Python tests and real PostgreSQL integration tests,
+  then run the applicable full Web/Search Agent, type, lint, build, Playwright,
+  Compose, dependency, and diff gates. Final evidence is Web `573 passed / 31
+  skipped`, critical focused `89 passed`, dedicated PostgreSQL integration `31
+  passed`, Search Agent `647 passed / 1 skipped`, and Playwright `17 passed / 3
+  live-only skipped`; all build/lint/type/Compose/audit/diff gates passed.
+- A8: update HANDOFF, tasks, record 045, the production checklist, deployment
+  handoff, and a new Chinese record 046. PR and merge data remain explicit
+  placeholders until those actions really occur.
+
+## Architecture And Operational Decisions
+
+- The transport token and tenant assertion secret are separate trust material.
+  The assertion is deterministic and bound to the exact tenant/run/visitor tuple;
+  no nonce or expiry is added because same-scope replay is required for checkpoint
+  recovery. Run identity, active-run rejection, checkpoint authority, and secret
+  rotation limit the replay surface.
+- The authoritative tables are `wb_tenant_quotas`, `wb_tenant_usage`, and
+  `wb_audit_events`. Authorization denial and Run lifecycle use stable action,
+  outcome, reason code, resource kind, and resource ID fields; no prompt, question,
+  cookie, token, or provider body is stored.
+- Existing environments upgrade through `deploy/new-local-env.ps1
+  -UpgradeTenantAssertionSecret`. Rotation has no dual-key window, so Web, Worker,
+  and Search Agent are recreated as one release unit.
+- Direct `run.failed` and `run.stopped` events without a checkpoint boundary use a
+  two-phase `stage -> transactional consume` protocol backed by the
+  immutable `wb_run_terminal_settlements` table. Pending settlement is authoritative
+  before ordinary input parsing, upstream reconnect, checkpoint terminal, HTTP stop
+  fallback, or generic zero-usage fallback. Same-hash stage is idempotent,
+  different-hash stage conflicts, and owner/epoch fencing protects takeover. A
+  direct `run.completed` without a checkpoint boundary is rejected; completed
+  projection must use the checkpoint transaction. Database checks additionally
+  require pending rows to have `settled_status IS NULL`, stopped source to settle
+  only as stopped, and failed source to settle as failed or as stopped when a real
+  stop intent won the race.
+- PostgreSQL integration verification requires an explicit
+  `WORKBENCH_INTEGRATION_DATABASE_URL`; the runner accepts only loopback PostgreSQL
+  databases whose names end in `_test` or `_integration` and never falls back to
+  the business database.
+- Python tests lock `NodeName`, `_AGENT_BY_NODE`, and the actual LangGraph node set;
+  Web validates all current 12 node-agent pairs and rejects a mismatched role. The
+  cross-language list is still manually mirrored and remains a documented future
+  contract-generation opportunity.
+- Rollback is expand-only at the database boundary. Revert #56 before #54, stop
+  intake and drain/stop Worker first, and never roll back only Search Agent. The
+  #54 merge commit is `314e28d`; the #56 merge SHA stays unknown until merge.
+
+## Known Residual Boundaries
+
+- Compose pins Search Agent with `container_name`, while cancellation uses an
+  in-memory `RunRegistry`; the current deployment is intentionally single-replica
+  for cancellation routing. Horizontal scale needs an external cancel registry or
+  deterministic replica routing and removal of fixed container names.
+- There is no independent public memory CRUD API. Memory isolation is proved
+  through the owning visitor/thread/project/run predicates and direct database
+  constraints; a future memory endpoint must add its own authorization and audit.
+- `WORKBENCH_API_ORIGIN` bypasses the local `handleLive` authorization/audit path.
+  Any external backend enabled through that seam must implement an equivalent
+  non-enumerating authorization and lifecycle ledger before production use.
+- The explicit insecure loopback exception is development-only. Stop and
+  Xiaohongshu verification endpoints still carry transport authentication rather
+  than tenant semantics. Quotas remain approximate admission controls, not the
+  tenant-isolation security boundary.
+- GitHub Issue #27 remains open. Its elapsed-time behavior must be reconciled and
+  closed separately; this security follow-up must not claim that governance step.
+- Final runtime probing also exposed a separate query-planning robustness defect:
+  a generic Agent-framework research request can be rejected by
+  `PLAN_INITIAL_FACET_DUPLICATE` and then `QUERY_FOLLOW_UP_LINEAGE_REQUIRED`, ending
+  partial with zero tool calls. This belongs in a new post-#56 search Issue and is
+  not silently folded into the tenant-assertion change.
+
+## Status
+
+Status is locally `accepted` and in GitHub delivery. Final rebuilt-image evidence:
+completed `run_4d4a46dfd9034199838cb80807e67868`, direct failed
+`run_3342b99584ef4dbb97bcda830751ff0e`, and active stop
+`run_60623f90c32e4012aef9bd71ce1ae726`; each has one public terminal, consistent
+usage/audit/outbox, cleared lease, no pending settlement, and stable SSE replay.
+Commit, PR, CI/review, merge, Issue close, and main synchronization remain before
+starting the next feature.

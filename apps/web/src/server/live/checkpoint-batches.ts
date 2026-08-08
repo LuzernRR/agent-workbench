@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AgentEventType } from "@/lib/agent-events/types";
 import { transaction } from "@/server/persistence/database";
 import type { SearchAgentEvent } from "@/server/search-agent/events";
+import { recordRunLifecycleWithClient } from "./quota";
 import {
   insertEventWithClient,
   rememberProjectExchangeWithClient,
@@ -20,13 +21,14 @@ export type AuthoritativeCheckpoint = {
 
 type CheckpointBoundary = Extract<SearchAgentEvent, { type: "checkpoint.committed" }>;
 type PersistableEvent = { type: AgentEventType; payload: Record<string, unknown> };
+type TerminalStatus = "completed" | "failed" | "stopped";
 
 export type ClaimedCheckpointBatch = {
   boundary: CheckpointBoundary;
   sourceEvents: SearchAgentEvent[];
   events: PersistableEvent[];
   terminal?: {
-    status: "completed" | "failed" | "stopped";
+    status: TerminalStatus;
     memory?: ProjectExchangeInput;
   };
 };
@@ -46,6 +48,7 @@ type LockedRunRow = {
   lease_owner: string | null;
   lease_epoch: string | number;
   lease_valid: boolean;
+  stop_requested_at: Date | string | null;
   archived_at: string | null;
 };
 
@@ -211,6 +214,59 @@ function duplicateMatches(
     && existing.batch_hash.trim() === hash;
 }
 
+const terminalStatuses = new Set<TerminalStatus>(["completed", "failed", "stopped"]);
+
+function duplicateTerminalStatus(runStatus: string, batch: ClaimedCheckpointBatch): TerminalStatus | null {
+  if (!batch.terminal) return null;
+  return terminalStatuses.has(runStatus as TerminalStatus)
+    ? runStatus as TerminalStatus
+    : batch.terminal.status;
+}
+
+function stoppedPayload(source: SearchAgentEvent, projection: PersistableEvent): Record<string, unknown> {
+  if (source.type !== "run.completed" && source.type !== "run.failed" && source.type !== "run.stopped") {
+    throw new CheckpointBatchConflictError("停止收口缺少权威上游终态");
+  }
+  return {
+    reasonCode: "USER_STOPPED",
+    partial: true,
+    usage: source.usage,
+    sourceEventId: projection.payload.sourceEventId,
+    sourceStreamId: projection.payload.sourceStreamId,
+    sourceStreamSeq: projection.payload.sourceStreamSeq,
+    sourceSeq: projection.payload.sourceSeq
+  };
+}
+
+function settleCheckpointBatch(stopRequested: boolean, batch: ClaimedCheckpointBatch): {
+  terminalStatus: TerminalStatus | null;
+  events: PersistableEvent[];
+  memory?: ProjectExchangeInput;
+} {
+  if (!batch.terminal) {
+    return { terminalStatus: null, events: batch.events };
+  }
+  if (!stopRequested || batch.terminal.status === "stopped") {
+    return {
+      terminalStatus: batch.terminal.status,
+      events: batch.events,
+      memory: batch.terminal.status === "completed" ? batch.terminal.memory : undefined
+    };
+  }
+  const upstreamTerminal = batch.events.at(-1);
+  const sourceTerminal = batch.sourceEvents.at(-1);
+  if (!upstreamTerminal || !sourceTerminal) {
+    throw new CheckpointBatchConflictError("停止收口缺少上游终态载荷");
+  }
+  return {
+    terminalStatus: "stopped",
+    events: [
+      ...batch.events.slice(0, -1),
+      { type: "run.cancelled", payload: stoppedPayload(sourceTerminal, upstreamTerminal) }
+    ]
+  };
+}
+
 export async function commitClaimedCheckpointBatch(
   claim: ClaimedRunIdentity,
   batch: ClaimedCheckpointBatch
@@ -222,7 +278,7 @@ export async function commitClaimedCheckpointBatch(
     const locked = await client.query<LockedRunRow>(`
       SELECT revision, checkpoint_id, checkpoint_session_id, checkpoint_ns, checkpoint_step,
         status, lease_owner, lease_epoch, lease_expires_at > now() AS lease_valid,
-        archived_at
+        stop_requested_at, archived_at
       FROM wb_runs
       WHERE id = $1 AND visitor_id = $2
       FOR UPDATE
@@ -242,9 +298,21 @@ export async function commitClaimedCheckpointBatch(
       return {
         status: "duplicate" as const,
         revision: safeInteger(existing.revision, "commit revision"),
-        checkpoint: checkpoint(batch.boundary)
+        checkpoint: checkpoint(batch.boundary),
+        terminalStatus: duplicateTerminalStatus(run.status, batch)
       };
     }
+
+    // A staged no-boundary stopped suffix is the immutable terminal authority.
+    // Exact checkpoint redelivery above remains a read-only duplicate, but no
+    // new checkpoint may advance revision or overwrite the staged real usage.
+    const pendingSettlement = await client.query<{ settled_at: Date | string | null }>(`
+      SELECT settled_at
+      FROM wb_run_terminal_settlements
+      WHERE run_id = $1 AND visitor_id = $2 AND settled_at IS NULL
+      FOR UPDATE
+    `, [claim.run.id, claim.run.visitorId]);
+    if (pendingSettlement.rows.length) return null;
 
     if (
       run.archived_at !== null
@@ -255,6 +323,8 @@ export async function commitClaimedCheckpointBatch(
     ) {
       return null;
     }
+
+    const settled = settleCheckpointBatch(Boolean(run.stop_requested_at), batch);
 
     const revision = safeInteger(run.revision, "run revision");
     const currentStep = run.checkpoint_step === null
@@ -295,7 +365,7 @@ export async function commitClaimedCheckpointBatch(
     if (!Number.isSafeInteger(nextRevision)) {
       throw new CheckpointBatchConflictError("Run revision 超出安全整数范围");
     }
-    const terminalStatus = batch.terminal?.status ?? null;
+    const terminalStatus = settled.terminalStatus;
     const updated = await client.query(`
       UPDATE wb_runs
       SET revision = $4,
@@ -370,28 +440,40 @@ export async function commitClaimedCheckpointBatch(
       ]);
     }
 
-    for (const event of batch.events) {
+    for (const event of settled.events) {
       await insertEventWithClient(client, claim.run, event.type, event.payload);
     }
 
-    if (batch.terminal) {
+    if (terminalStatus) {
+      const terminalEvent = settled.events.at(-1);
+      if (!terminalEvent || !claim.run.tenantId) {
+        throw new CheckpointBatchConflictError("终态 checkpoint 缺少可信租户或公开终态载荷");
+      }
+      await recordRunLifecycleWithClient(client, {
+        runId: claim.run.id,
+        tenantId: claim.run.tenantId,
+        visitorId: claim.run.visitorId,
+        status: terminalStatus,
+        payload: terminalEvent.payload
+      });
       await client.query(
         "UPDATE wb_threads SET status = $3, updated_at = now() WHERE id = $1 AND visitor_id = $2",
         [
           claim.run.threadId,
           claim.run.visitorId,
-          batch.terminal.status === "failed" ? "failed" : "idle"
+          terminalStatus === "failed" ? "failed" : "idle"
         ]
       );
-      if (batch.terminal.memory) {
-        await rememberProjectExchangeWithClient(client, claim.run, batch.terminal.memory);
+      if (settled.memory) {
+        await rememberProjectExchangeWithClient(client, claim.run, settled.memory);
       }
     }
 
     return {
       status: "committed" as const,
       revision: nextRevision,
-      checkpoint: checkpoint(batch.boundary)
+      checkpoint: checkpoint(batch.boundary),
+      terminalStatus
     };
   });
 }

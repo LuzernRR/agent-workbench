@@ -7,9 +7,13 @@ const store = vi.hoisted(() => ({
   insertEventWithClient: vi.fn(),
   rememberProjectExchangeWithClient: vi.fn()
 }));
+const quota = vi.hoisted(() => ({
+  recordRunLifecycleWithClient: vi.fn()
+}));
 
 vi.mock("@/server/persistence/database", () => database);
 vi.mock("./store", () => store);
+vi.mock("./quota", () => quota);
 
 import {
   canonicalCheckpointBatchHash,
@@ -23,6 +27,7 @@ const claim = {
   run: {
     id: "run_one",
     visitorId: "11111111-1111-1111-1111-111111111111",
+    tenantId: "tenant_one",
     threadId: "thread_one",
     projectId: "project_one",
     modelId: "deepseek-v4-flash",
@@ -86,6 +91,7 @@ function clientFor(input: {
           lease_owner: "worker_one",
           lease_epoch: "1",
           lease_valid: true,
+          stop_requested_at: null,
           archived_at: null,
           ...input.run
         }]
@@ -107,6 +113,7 @@ describe("checkpoint batch 原子确认", () => {
     vi.clearAllMocks();
     store.insertEventWithClient.mockResolvedValue({ id: "event_one" });
     store.rememberProjectExchangeWithClient.mockResolvedValue(0);
+    quota.recordRunLifecycleWithClient.mockResolvedValue(undefined);
   });
 
   it("canonical hash 不受对象 key 顺序影响，但覆盖 source 内容", () => {
@@ -154,7 +161,8 @@ describe("checkpoint batch 原子确认", () => {
         namespace: "",
         sessionId: "checkpoint_session_one",
         step: -1
-      }
+      },
+      terminalStatus: null
     });
 
     const sql = client.query.mock.calls.map(([statement]) => String(statement)).join("\n");
@@ -206,6 +214,157 @@ describe("checkpoint batch 原子确认", () => {
     });
     expect(client.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE wb_runs"))).toBe(false);
     expect(store.insertEventWithClient).not.toHaveBeenCalled();
+    expect(quota.recordRunLifecycleWithClient).not.toHaveBeenCalled();
+  });
+
+  it("终态 checkpoint 在同一事务写 usage 与生命周期审计", async () => {
+    const terminalSource = {
+      version: 1 as const,
+      eventId: "stream_one_000001",
+      streamId: "stream_one",
+      streamSeq: 1,
+      seq: 1,
+      createdAt: "2026-08-06T00:00:01Z",
+      type: "run.failed" as const,
+      reasonCode: "TEST_FAILURE",
+      message: "failure",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6, cost_usd: 0.01 }
+    };
+    const payload = { reasonCode: "TEST_FAILURE", message: "failure", usage: terminalSource.usage };
+    const client = clientFor();
+    database.transaction.mockImplementation(async (operation) => operation(client));
+
+    await expect(commitClaimedCheckpointBatch(claim, {
+      boundary,
+      sourceEvents: [terminalSource],
+      events: [{ type: "run.failed", payload }],
+      terminal: { status: "failed" }
+    })).resolves.toMatchObject({ status: "committed", terminalStatus: "failed" });
+
+    expect(quota.recordRunLifecycleWithClient).toHaveBeenCalledWith(client, {
+      runId: claim.run.id,
+      tenantId: claim.run.tenantId,
+      visitorId: claim.run.visitorId,
+      status: "failed",
+      payload
+    });
+  });
+
+  it("持久停止请求后仍允许非终态 checkpoint 推进", async () => {
+    const client = clientFor({ run: { stop_requested_at: "2026-08-06T00:00:00Z" } });
+    database.transaction.mockImplementation(async (operation) => operation(client));
+
+    await expect(commitClaimedCheckpointBatch(claim, batch)).resolves.toMatchObject({
+      status: "committed",
+      terminalStatus: null
+    });
+    expect(quota.recordRunLifecycleWithClient).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "failed",
+      source: {
+        version: 1 as const,
+        eventId: "stream_one_000001",
+        streamId: "stream_one",
+        streamSeq: 1,
+        seq: 1,
+        createdAt: "2026-08-06T00:00:01Z",
+        type: "run.failed" as const,
+        reasonCode: "PROVIDER_FAILED",
+        message: "failure",
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6, cost_usd: 0.01 }
+      },
+      event: {
+        type: "run.failed" as const,
+        payload: { reasonCode: "PROVIDER_FAILED", usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6, cost_usd: 0.01 } }
+      },
+      terminal: { status: "failed" as const }
+    },
+    {
+      name: "completed",
+      source: {
+        version: 1 as const,
+        eventId: "stream_one_000001",
+        streamId: "stream_one",
+        streamSeq: 1,
+        seq: 1,
+        createdAt: "2026-08-06T00:00:01Z",
+        type: "run.completed" as const,
+        answerMarkdown: "answer",
+        answerSource: "model" as const,
+        answerModelCalls: 1,
+        promptVersion: "2026-08-06.v1",
+        responseStatus: "completed" as const,
+        citations: [],
+        verificationPassed: true,
+        stopReason: "VERIFIED",
+        usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12, cost_usd: 0.03 },
+        modelCalls: 1,
+        toolCalls: 0,
+        evidenceCount: 1
+      },
+      event: {
+        type: "run.completed" as const,
+        payload: { usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12, cost_usd: 0.03 } }
+      },
+      terminal: {
+        status: "completed" as const,
+        memory: { userMessage: "question", assistantMessage: "answer" }
+      }
+    }
+  ])("停止请求把上游 $name 终态确定性改写为 stopped", async ({ source, event, terminal }) => {
+    const client = clientFor({ run: { stop_requested_at: "2026-08-06T00:00:00Z" } });
+    database.transaction.mockImplementation(async (operation) => operation(client));
+
+    await expect(commitClaimedCheckpointBatch(claim, {
+      boundary,
+      sourceEvents: [source],
+      events: [event],
+      terminal
+    })).resolves.toMatchObject({ status: "committed", terminalStatus: "stopped" });
+
+    expect(store.insertEventWithClient).toHaveBeenLastCalledWith(
+      client,
+      claim.run,
+      "run.cancelled",
+      expect.objectContaining({ reasonCode: "USER_STOPPED", partial: true, usage: event.payload.usage })
+    );
+    expect(quota.recordRunLifecycleWithClient).toHaveBeenCalledWith(client, expect.objectContaining({
+      status: "stopped",
+      payload: expect.objectContaining({ usage: event.payload.usage })
+    }));
+    expect(store.rememberProjectExchangeWithClient).not.toHaveBeenCalled();
+  });
+
+  it("持久停止请求允许带部分 usage 的 stopped 收口", async () => {
+    const stoppedSource = {
+      version: 1 as const,
+      eventId: "stream_one_000001",
+      streamId: "stream_one",
+      streamSeq: 1,
+      seq: 1,
+      createdAt: "2026-08-06T00:00:01Z",
+      type: "run.stopped" as const,
+      runId: claim.run.id,
+      responseStatus: "partial" as const,
+      reasonCode: "USER_STOPPED",
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10, cost_usd: 0.02 }
+    };
+
+    const allowed = clientFor({ run: { stop_requested_at: "2026-08-06T00:00:00Z" } });
+    database.transaction.mockImplementation(async (operation) => operation(allowed));
+    await expect(commitClaimedCheckpointBatch(claim, {
+      boundary,
+      sourceEvents: [stoppedSource],
+      events: [{ type: "run.cancelled", payload: { reasonCode: stoppedSource.reasonCode, usage: stoppedSource.usage } }],
+      terminal: { status: "stopped" }
+    })).resolves.toMatchObject({ status: "committed", terminalStatus: "stopped" });
+    expect(quota.recordRunLifecycleWithClient).toHaveBeenCalledWith(allowed, expect.objectContaining({
+      status: "stopped",
+      payload: expect.objectContaining({ usage: stoppedSource.usage })
+    }));
   });
 
   it("boundary 自身参与 Inbox 业务键碰撞检查", async () => {
@@ -232,7 +391,8 @@ describe("checkpoint batch 原子确认", () => {
       createdAt: "2026-08-06T00:00:01Z",
       type: "run.failed" as const,
       reasonCode: "TEST_FAILURE",
-      message: "failure"
+      message: "failure",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
     };
     const secondTerminal = {
       ...firstTerminal,
@@ -267,7 +427,8 @@ describe("checkpoint batch 原子确认", () => {
       createdAt: "2026-08-06T00:00:01Z",
       type: "run.failed" as const,
       reasonCode: "TEST_FAILURE",
-      message: "failure"
+      message: "failure",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
     };
     const invalidEvents: ClaimedCheckpointBatch["events"][] = [
       [],

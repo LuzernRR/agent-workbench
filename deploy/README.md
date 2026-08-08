@@ -15,10 +15,34 @@ Milvus、etcd、MinIO 与内部 `xiaohongshu-mcp`。Worker 与 Web 使用同一�
 - 正式 Web 使用 `127.0.0.1:3000`，Search Agent 健康/调试端口使用
   `127.0.0.1:8080`；Milvus gRPC/健康端口只在 `agent-milvus` 私网内使用。
 
+首次部署可运行 `.\deploy\new-local-env.ps1` 生成被 Git 忽略的
+`config/deploy.local.env`。脚本分别生成内部传输 Token 与租户断言密钥，不会在
+终端输出任何密钥；默认模式不会覆盖已有文件。
+
+从旧版本升级已有环境文件时必须显式执行：
+
+```powershell
+.\deploy\new-local-env.ps1 -UpgradeTenantAssertionSecret
+```
+
+该模式只补充或修复 `WORKBENCH_TENANT_ASSERTION_SECRET`，合规值保持不变，其他
+配置逐字保留并通过同卷临时文件原子替换。创建、升级和轮换都会关闭文件 ACL
+继承，只允许当前 Windows 用户、Administrators 与 SYSTEM 访问；不支持 Windows
+ACL 的卷或无权修改 ACL 的账户会在写入密钥前失败。不要用复制示例文件覆盖已有
+环境，也不要把密钥粘贴到终端历史。若替换后的 ACL 终检失败，脚本会先原子恢复
+旧文件并再次验证；只有更新成功或回滚验证成功才删除 backup。回滚也失败时会保留
+backup 路径并 fail-closed，运维人员不得继续重建三端。
+
 只做静态解析且不输出插值后的密钥：
 
 ```powershell
 docker compose --env-file config/deploy.local.env -f deploy/compose.yaml config --quiet
+```
+
+在不读取真实环境文件的系统临时目录中验证创建、升级、轮换、原子替换与 ACL：
+
+```powershell
+.\deploy\test-new-local-env.ps1
 ```
 
 启动本项目管理的服务：
@@ -55,6 +79,21 @@ Web API 只创建 `queued` Run 和用户事件，不直接调用模型或搜索�
 未完成 lease 并关闭数据库连接。Worker 崩溃时不执行清理，租约到期后由其他实例以 `resume=true`
 从 LangGraph Checkpoint 接管。
 
+## PostgreSQL 集成测试隔离
+
+`apps/web` 的真实 PostgreSQL 集成测试不会回退到业务数据库。运行前必须显式设置
+`WORKBENCH_INTEGRATION_DATABASE_URL`；runner 只接受 loopback PostgreSQL，并要求数据库名以
+`_test` 或 `_integration` 结尾。示例：
+
+```powershell
+$env:WORKBENCH_INTEGRATION_DATABASE_URL = "postgresql://postgres:<password>@127.0.0.1:5432/agent_workbench_integration"
+cd apps/web
+npm run test:integration
+```
+
+不得把 `WORKBENCH_DATABASE_URL`、Compose 业务库或远程 PostgreSQL 复制到该变量。URL 解析错误使用固定
+脱敏消息，不应在测试日志中回显密码。
+
 ## 小红书登录
 
 `xiaohongshu-mcp` 不发布宿主机端口，Web 也不加入它的私有网络。首次使用或
@@ -83,11 +122,61 @@ Apache-2.0 许可证。项目补丁只把搜索页的全局 network-idle 等待�
 
 ## 配置与生产约束
 
-- 非密钥默认值集中在 `config/search-agent.json`；密钥只保存在被忽略的
-  `config/*.local.json` 或生产密钥管理系统中。镜像构建不会复制 `config/`。
+### 租户断言密钥轮换与回滚
+
+密钥轮换没有双密钥兼容窗口，Web、Run Worker 与 Search Agent 的任意新旧组合
+都会 fail-closed。`docker compose restart` **不会**重新读取 env 文件，不能用于
+密钥轮换。使用以下维护顺序：
+
+1. 暂停公网新请求，等待 `queued`/`running` Run 排空；随后停止 Worker，确保不再
+   领取任务。若维护窗口不能等待当前 Run 完成，`stop worker` 会走 SIGTERM 释放
+   lease，稍后由新 Worker 从 checkpoint 接管。
+2. 显式轮换且不输出新值：
+
+   ```powershell
+   docker compose --env-file config/deploy.local.env -f deploy/compose.yaml stop worker
+   .\deploy\new-local-env.ps1 -RotateTenantAssertionSecret
+   docker compose --env-file config/deploy.local.env -f deploy/compose.yaml config --quiet
+   ```
+
+3. 在 Worker 保持停止时重建 Search Agent 与 Web，使二者读取同一新值：
+
+   ```powershell
+   docker compose --env-file config/deploy.local.env -f deploy/compose.yaml up -d --force-recreate search-agent web
+   Invoke-RestMethod http://127.0.0.1:3000/health
+   Invoke-RestMethod http://127.0.0.1:8080/health
+   ```
+
+4. 健康检查通过后重建 Worker，完成一次真实的 Web→Worker→Search Agent smoke，再
+   恢复公网入口：
+
+   ```powershell
+   docker compose --env-file config/deploy.local.env -f deploy/compose.yaml up -d --force-recreate worker
+   docker compose --env-file config/deploy.local.env -f deploy/compose.yaml ps worker
+   ```
+
+回滚版本时同样先停止入口并排空/停止 Worker，然后把 Web、Worker、Search Agent
+三个镜像作为一个单元回退并 `--force-recreate`；绝不能只回滚 Search Agent。若只
+需撤销一次密钥轮换，不要把旧值贴回 shell，可再次生成一个新的共同密钥并按上述
+顺序重建三端。混合版本或混合密钥期间不得启动 Worker，否则认证拒绝可能把已领取
+Run 记录为失败。
+
+### 配置存放
+
+- 非密钥默认值集中在 `config/search-agent.json`；DeepSeek、Tavily 等 Provider
+  密钥保存在被忽略的 `config/*.local.json`，Compose 服务凭据保存在被忽略的
+  `config/*.local.env`，生产环境使用密钥管理系统。镜像构建不会复制 `config/`。
 - Compose 将 `config/` 只读挂载到 Web、Run Worker 与 Search Agent。生产环境必须设置随机的
   `POSTGRES_PASSWORD`、与其一致且密码已 URL 编码的
-  `SEARCH_AGENT_DATABASE_URL`，以及 `WORKBENCH_INTERNAL_TOKEN`。
+  `SEARCH_AGENT_DATABASE_URL`、`WORKBENCH_INTERNAL_TOKEN`，以及独立的
+  `WORKBENCH_TENANT_ASSERTION_SECRET`。租户断言密钥按 UTF-8 计算至少 32 字节，
+  不得与内部传输 Token 相同或由其派生；Web、Run Worker 与 Search Agent 必须
+  注入同一个断言密钥。
+- 轮换租户断言密钥时应把 Web、Run Worker 与 Search Agent 作为一个发布单元协调
+  重建；新旧密钥不匹配期间运行请求会被 fail-closed 拒绝。生产 Compose 中 Search
+  Agent 绑定 `0.0.0.0`，不能使用无密钥例外。只有同时设置
+  `SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK=1` 且 Search Agent 主机为 loopback 的显式
+  本机开发进程，才允许不配置断言密钥。
 - Search Agent 容器固定启用 `LANGGRAPH_STRICT_MSGPACK=true`，只反序列化
   LangGraph 内建安全类型；不要在生产环境关闭该限制。
 - `config/deploy.env.example` 只列变量名和非密钥占位值，不可作为生产密钥文件。
@@ -166,8 +255,9 @@ PostgreSQL 使用 `pg_dump --format=custom` 做逻辑备份，并只恢复到新
 
 - Milvus 故障：保持 Search Agent 在线并观察 `/health` 的 `degraded`，暂停记忆
   写入告警；搜索与核验链路继续运行，恢复后再做召回抽样。
-- Search Agent 发布失败：回滚上一镜像，保持 PostgreSQL schema 与 Milvus
-  collection 不动；检查 checkpoint/工具账本后再恢复流量。
+- Search Agent 发布失败：按“租户断言密钥轮换与回滚”先排空并停止 Worker，同时
+  回滚 Web、Worker、Search Agent 三个兼容镜像并强制重建；保持 PostgreSQL schema
+  与 Milvus collection 不动，检查 checkpoint/工具账本后再恢复流量。
 - 新入口回滚：旧容器 `kanna-workbench-backend-1` 仅被停止，没有删除镜像、卷
   或数据；需要恢复时执行 `docker start kanna-workbench-backend-1`。恢复前先
   确认它要占用的端口不会与本项目 `127.0.0.1:8080` 冲突。

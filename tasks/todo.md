@@ -25,11 +25,41 @@
 ## Issue #54 · 租户隔离、配额与审计（2026-08-08）
 
 - [x] Audit the authorization boundary and design the minimal slice
-- [x] Add idempotent `wb_quotas` and `wb_audit_events` tables
+- [x] Add idempotent `wb_tenant_quotas`, `wb_tenant_usage`, and `wb_audit_events` tables
 - [x] Derive tenant server-side from the visitor token, ignore request-supplied tenant
 - [x] Per-tenant quotas across QPS, concurrent runs, tokens, and cost
 - [x] Signed tenant assertion so Search Agent verifies instead of trusting `tenantId`
+      (historical #54 implementation reused the transport token; corrected by #56)
 - [x] Cross-tenant fail-closed and audit coverage, proven on real PostgreSQL
 - [x] Full gates: Python 631/1, vitest 471/11, typecheck, lint, build, Playwright 17/3
 - [x] HANDOFF, P0-05 roadmap status, and Chinese development record 045
-- [ ] User acceptance, then PR, merge, Issue close, main sync
+- [x] User acceptance, PR #55 merge, Issue close, and main sync
+      (merged as `314e28da32c37ad97596090240e8c09375e77fec`; Issue #54 closed)
+
+## Issue #56 · 独立租户断言与授权/生命周期审计补强（2026-08-08）
+
+- [x] A1: separate `WORKBENCH_TENANT_ASSERTION_SECRET` from the transport token
+- [x] A2: fail closed before execution for missing, weak, or reused assertion secrets;
+      keep only the explicit two-sided loopback development exception
+- [x] A3: pin the UTF-8 length-prefixed tuple, fixed vector, constant-time comparison,
+      tenant/run/visitor tampering, and exact-scope recovery replay
+- [x] A4: add non-enumerating denied audit for project/thread/run/attachment and
+      parent-scoped memory boundaries with `RESOURCE_NOT_OWNED_OR_MISSING`
+- [x] A5: make queued and terminal Run lifecycle audit/usage share the owning
+      PostgreSQL transactions; keep stop intent and late terminal handling durable
+- [x] A6: add visitor/tenant and run/visitor composite ownership constraints plus
+      unique queued/terminal lifecycle indexes
+- [x] Add safe existing-env upgrade, rotation, restricted ACL, atomic replacement,
+      implemented rollback verification, secret-output scanning, and coordinated
+      three-service deployment guidance; deliberate post-replace failure injection is documented residual work
+- [x] A7: freeze the latest delivered tree and record final focused/full/integration/E2E,
+      Compose, dependency, health, diff, assertion-handshake, and three runtime-smoke results
+- [x] A8 local: update HANDOFF, plans, record 045, production checklist, deployment
+      handoff, and Chinese development record 046 with final local acceptance evidence
+- [x] Reconcile all delivery documents with failed/stopped settlement, completed
+      checkpoint authority, settlement status constraints, and dedicated integration DB behavior
+- [x] Replace stale 046 baselines with final frozen-tree evidence and the user's
+      pre-authorized Codex acceptance; keep only real GitHub metadata pending
+- [x] Commit `32fdbda`, push the feature branch, and open actual PR #57
+- [ ] Wait for CI/review, merge PR #57, close Issue #56, sync `main`, and record the
+      real merge SHA

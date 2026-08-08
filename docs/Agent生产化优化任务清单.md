@@ -32,12 +32,12 @@
 | 领域 | 手册目标 | 当前实现 | 判断 |
 |---|---|---|---|
 | Web/BFF | Next.js + React + TypeScript，SSE 事件流 | 已使用 Next.js 16、React 19、TypeScript，BFF 对 AgentEvent 做 Zod 校验 | 基础匹配 |
-| Agent Runtime | Python 3.12 + FastAPI + Pydantic 2 + LangGraph | 已落地显式图、预算、事件、PostgreSQL Checkpoint；恢复只从 Run 账本完整权威引用精确 fork | 主栈匹配，#50 等待验收 |
+| Agent Runtime | Python 3.12 + FastAPI + Pydantic 2 + LangGraph | 已落地显式图、预算、事件、PostgreSQL Checkpoint；恢复只从 Run 账本完整权威引用精确 fork | 主栈匹配，#50 已验收并合入 `main@048774f` |
 | 数据 | PostgreSQL 为权威状态；Redis 只做缓存/锁/限流；对象存储保存产物 | PostgreSQL 已保存运行账本、Checkpoint、lease/fencing 持久队列、source Inbox 与 transactional Outbox；尚无备份恢复门禁 | 主路径匹配，灾备待补 |
-| 模型层 | 统一 Model Gateway 负责路由、配额、重试、降级、成本和版本 | 生产 Search Agent 已统一走 Model Gateway；旧 mock/预览客户端仍独立，持久租户配额与健康熔断未完成 | 主路径匹配，治理待补 |
+| 模型层 | 统一 Model Gateway 负责路由、配额、重试、降级、成本和版本 | 生产 Search Agent 已统一走 Model Gateway；持久租户配额账本已落地，旧 mock/预览客户端仍独立，健康熔断与精确串行限额未完成 | 主路径匹配，治理待补 |
 | 工具层 | Tool Registry/Gateway 负责 Schema、鉴权、幂等、审批和审计 | 已有 Tool Ledger、稳定事件和部分安全门禁，但缺统一策略执行面 | 部分匹配 |
 | RAG | PostgreSQL FTS + pgvector 起步，Hybrid + RRF + Rerank，ACL 先过滤 | Compose 有 pgvector，但实际证据记忆走 Milvus + hashing embedding，尚无完整企业知识摄取和混合检索 | 技术路线未收敛 |
-| 身份与租户 | OIDC/SSO；RBAC + ABAC；每次工具/数据访问服务端复核 | 主要是内部静态 token、环境 tenant 和数据字段过滤，没有真实用户身份与策略引擎 | P0 缺口 |
+| 身份与租户 | OIDC/SSO；RBAC + ABAC；每次工具/数据访问服务端复核 | 匿名 visitor token 在数据库中解析 tenant，服务间使用独立租户断言；仍没有企业真实用户、OIDC、角色/属性策略引擎或 RLS | P0 基础边界已补，企业身份仍缺 |
 | 可观测性 | OTel SDK/Collector + Metric/Trace/Log，Prometheus/Grafana；可选 Langfuse | 已有隐私门控 span、OTel GenAI 属性和可选 LangSmith sink，未接 Collector、指标面板和 SLO 告警 | 部分匹配 |
 | 评测 | 30-100 条初始 Golden Cases，轨迹/恢复/安全/成本发布门禁 | 已有 replay/scorer 和大量确定性测试，但未形成足量 Golden Cases 与 CI 质量阈值 | 部分匹配 |
 | 代码架构 | domain/application/ports/adapters；模块化单体 + 独立 Worker | Node Run Worker 已与无状态 API 分离；`graph/nodes.py` 仍约 3014 行，编排、业务规则和适配逻辑集中 | 部分匹配，维护性风险 |
@@ -146,19 +146,39 @@
 
 ### P0-05 OIDC、多租户授权、配额与审计
 
-- 状态：`partial`（Issue #54 完成租户隔离、配额与审计三项；OIDC 接入仍 `blocked`）。
-- 本轮已完成：tenant 由服务端从访客令牌派生，请求携带的 tenant 头/cookie 一律忽略；Search Agent 侧
-  由信任请求体 `tenantId` 改为校验 HMAC 签名断言（绑定 tenant:run:visitor，防同租户重放）；
-  `wb_quotas` 覆盖 QPS/并发 Run/Token/费用四维并写 `wb_audit_events`；跨租户读/写/删除在真实
-  PostgreSQL 上验证 fail-closed。记录见
+- 状态：`partial`。Issue #54 已验收并由 PR #55 合入 `main@314e28d`；Issue #56 的 post-merge 安全与
+  审计补强已完成本地验收，提交 `32fdbda` 与 PR #57 已创建，正在等待 CI/review/merge/close。企业
+  OIDC/RBAC/ABAC/RLS 子项仍为 `blocked`，因此 P0-05 总项不能标成 completed。
+- #54 已完成：tenant 由服务端从 visitor token 对应的 `wb_visitors` 行回读，请求携带的 tenant
+  header/cookie 一律忽略；`wb_tenant_quotas` 覆盖 QPS、并发 Run、Token、费用，
+  `wb_tenant_usage` 保存每 Run 用量，`wb_audit_events` 保存稳定审计字段。历史记录见
   [045](development/2026-08-08-045-issue-54-tenant-isolation.md)。
-- 仍未做：企业 OIDC/OAuth2 登录与真实用户身份、RBAC 角色模型、PostgreSQL RLS 纵深防御、
-  过期 token 判定，以及工具/RAG/记忆/下载的逐次重校验。这些需要独立 Issue。
-- 目标技术：Web 接入企业 OIDC/OAuth2，BFF 使用服务身份调用 Agent；RBAC 管角色，ABAC 按 tenant、
-  resource、classification、environment 和时间做服务端授权；PostgreSQL 可结合 RLS 作为纵深防御。
-- 当前问题：内部 token 和 `WORKBENCH_TENANT` 不能代表真实用户身份，调用方可传 tenant 字段不等于授权。
-- 最小验收：跨租户、越权资源、伪造 tenant、过期 token 全部 fail closed；模型不能成为授权主体；工具、
-  RAG、记忆和下载每次重新校验；租户 QPS/并发 Run/Token/费用均有限额并写审计。
+- #56 已完成实现和本地验收：使用独立 `WORKBENCH_TENANT_ASSERTION_SECRET` 对 tenant/run/visitor 三段 UTF-8
+  字节长度前缀载荷做 HMAC，transport token 本身不能伪造；缺失、过弱、复用密钥 fail-closed；资源
+  不属于当前主体或不存在时返回不泄漏存在性的稳定响应并写 denied 审计；Run admission、queued 与
+  completed/failed/stopped 生命周期及终态 usage 与业务事务一致。没有 checkpoint boundary 的 direct
+  failed/stopped 使用 immutable stage→transactional consume；direct completed 无 boundary 时拒绝，只能走
+  checkpoint transaction。integration runner 强制使用专用 loopback `_test`/`_integration` PostgreSQL，
+  不回退业务库且拒绝 query/fragment 覆盖目标。最终门禁为 Web `573/31`、聚焦 `89`、PostgreSQL
+  integration `31`、Search Agent `647/1`、Playwright `17/3`；三类最终 Run 的 completed/direct-failed/
+  active-stop 结算均为唯一终态、账本一致、无 lease/pending。当前记录见
+  [046](development/2026-08-08-046-issue-56-tenant-assertion-audit.md)。
+- 数据库纵深：`wb_tenant_usage` 使用 visitor/tenant 与 run/visitor 复合外键，`wb_audit_events` 使用
+  visitor/tenant 复合外键；queued 与 terminal lifecycle 各有每 tenant/run 唯一索引，防止重投重复记账。
+- 仍未做：企业 OIDC/OAuth2 登录与真实用户身份、RBAC/ABAC 策略模型、PostgreSQL RLS、过期用户
+  token 判定，以及未来独立工具/RAG/记忆/下载 API 的逐次授权。这些需要独立 Issue。
+- 当前真实边界：匿名 visitor 不是企业用户；`WORKBENCH_INTERNAL_TOKEN` 只做 transport auth，不能代表
+  用户身份；`WORKBENCH_TENANT` 只在首次创建 visitor 时播种默认 tenant，后续请求不能用它迁移归属。
+- 残余风险：Compose 的固定 `container_name` 与 Search Agent 内存 `RunRegistry` 使取消控制当前仅支持
+  单副本；项目记忆没有独立公开 API，现有验证依赖 thread/project/run 父资源边界；租户断言是无 nonce/
+  expiry 的确定性 HMAC，同一精确作用域可为恢复重放；设置 `WORKBENCH_API_ORIGIN` 会绕过本地
+  `handleLive` 审计，外部后端必须实现等价授权与生命周期账本；配额仍是近似 admission 护栏，不是
+  租户隔离安全边界。
+- 发布与回滚：独立密钥轮换没有双密钥窗口，Web、Worker、Search Agent 必须协调重建。若 #56 已合并，
+  先回退 #56 再 `git revert 314e28d` 回退 #54；数据库 expand-only 表、列和约束默认保留。回退到 #54
+  会重新引入 transport token 可伪造断言的已知风险。
+- 治理残余：[Issue #27](https://github.com/LuzernRR/agent-workbench/issues/27) 当前仍为 open；即使代码中
+  已存在即时计时相关行为，也必须单独核对验收并关闭，不能在本安全 Issue 中代替 GitHub 状态闭环。
 
 ### P0-06 完整 Tool Gateway 与副作用语义
 

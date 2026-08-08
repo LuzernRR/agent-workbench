@@ -7,7 +7,16 @@ const database = vi.hoisted(() => ({
 
 vi.mock("@/server/persistence/database", () => database);
 
-import { checkRunAdmission, QuotaExceededError, recordRunUsage } from "./quota";
+import {
+  checkRunAdmission,
+  checkRunAdmissionWithClient,
+  memoryAuthorizationScope,
+  QuotaExceededError,
+  recordAuthorizationDenied,
+  recordAuthorizationDenials,
+  recordRunLifecycleWithClient,
+  recordRunUsage
+} from "./quota";
 
 type Reply = { rowCount: number; rows: Record<string, unknown>[] };
 
@@ -182,11 +191,119 @@ describe("每租户配额准入", () => {
     expect(database.query).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["requests_per_minute", { requests: 60 }, "QUOTA_REQUESTS_PER_MINUTE_EXCEEDED"],
+    ["concurrent_runs", { concurrent: 3 }, "QUOTA_CONCURRENT_RUNS_EXCEEDED"],
+    ["tokens_per_day", { tokens: 100000 }, "QUOTA_TOKENS_PER_DAY_EXCEEDED"],
+    ["cost_usd_per_day", { cost: 10 }, "QUOTA_COST_PER_DAY_EXCEEDED"]
+  ] as const)("%s 超限都在调用方事务内写对应 denied 审计", async (_dimension, state, reasonCode) => {
+    const query = admissionClient(state);
+    await expect(checkRunAdmissionWithClient({ query } as never, {
+      tenantId: "tenant-one",
+      visitorId: "visitor-one"
+    })).resolves.toMatchObject({ allowed: false, reasonCode });
+    expect(auditCalls(query)).toHaveLength(1);
+    expect(auditCalls(query)[0]?.[1]).toEqual(expect.arrayContaining(["denied", reasonCode]));
+  });
+
   it("QuotaExceededError 携带原因码供上层映射为 429", () => {
     const error = new QuotaExceededError("QUOTA_CONCURRENT_RUNS_EXCEEDED", 5, 5);
     expect(error).toBeInstanceOf(Error);
     expect(error.name).toBe("QuotaExceededError");
     expect(error.reasonCode).toBe("QUOTA_CONCURRENT_RUNS_EXCEEDED");
+  });
+});
+
+describe("授权拒绝批量审计", () => {
+  beforeEach(() => {
+    database.query.mockReset();
+    database.transaction.mockReset();
+  });
+
+  it("在一个事务中按顺序写入父命令与被阻断的 memory 能力", async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rowCount: 1, rows: [] }) };
+    database.transaction.mockImplementation(
+      (operation: (c: typeof client) => Promise<unknown>) => operation(client)
+    );
+
+    await recordAuthorizationDenials([
+      {
+        tenantId: "tenant-one",
+        visitorId: "visitor-one",
+        action: "thread.delete",
+        resourceKind: "thread",
+        resourceId: "thread-one"
+      },
+      {
+        tenantId: "tenant-one",
+        visitorId: "visitor-one",
+        action: "memory.delete",
+        resourceKind: "memory",
+        resourceId: memoryAuthorizationScope("thread", "thread-one")
+      }
+    ]);
+
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(database.query).not.toHaveBeenCalled();
+    expect(client.query).toHaveBeenCalledTimes(2);
+    expect(client.query.mock.calls[0]?.[1]).toEqual([
+      "tenant-one",
+      "visitor-one",
+      "thread.delete",
+      "denied",
+      "RESOURCE_NOT_OWNED_OR_MISSING",
+      "thread",
+      "thread-one"
+    ]);
+    expect(client.query.mock.calls[1]?.[1]).toEqual([
+      "tenant-one",
+      "visitor-one",
+      "memory.delete",
+      "denied",
+      "RESOURCE_NOT_OWNED_OR_MISSING",
+      "memory",
+      "thread:thread-one"
+    ]);
+  });
+
+  it("单条 helper 也通过同一批量事务路径写入", async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rowCount: 1, rows: [] }) };
+    database.transaction.mockImplementation(
+      (operation: (c: typeof client) => Promise<unknown>) => operation(client)
+    );
+
+    await recordAuthorizationDenied({
+      tenantId: "tenant-one",
+      visitorId: "visitor-one",
+      action: "thread.read",
+      resourceKind: "thread",
+      resourceId: "thread-one"
+    });
+
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(database.query).not.toHaveBeenCalled();
+    expect(client.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("不把超长或含控制字符的资源 ID 原文写入审计", async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rowCount: 1, rows: [] }) };
+    database.transaction.mockImplementation(
+      (operation: (c: typeof client) => Promise<unknown>) => operation(client)
+    );
+    const unsafeResourceId = `thread\n${"private".repeat(32)}`;
+
+    await recordAuthorizationDenied({
+      tenantId: "tenant-one",
+      visitorId: "visitor-one",
+      action: "thread.read",
+      resourceKind: "thread",
+      resourceId: unsafeResourceId
+    });
+
+    const storedResourceId = client.query.mock.calls[0]?.[1]?.[6];
+    expect(storedResourceId).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(storedResourceId).not.toContain("private");
+    expect(storedResourceId).not.toContain("\n");
   });
 });
 
@@ -225,5 +342,42 @@ describe("运行用量记账", () => {
     }, client as never);
     expect(client.query).toHaveBeenCalledTimes(1);
     expect(database.query).not.toHaveBeenCalled();
+  });
+
+  it("queued 生命周期只写带真实 runId 的审计", async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rowCount: 1, rows: [] }) };
+    await recordRunLifecycleWithClient(client as never, {
+      runId: "run-one",
+      tenantId: "tenant-one",
+      visitorId: "visitor-one",
+      status: "queued",
+      payload: {}
+    });
+    expect(client.query).toHaveBeenCalledTimes(1);
+    const [sql, values] = client.query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("INSERT INTO wb_audit_events");
+    expect(values).toEqual(expect.arrayContaining(["run.lifecycle", "queued", "RUN_QUEUED", "run", "run-one"]));
+  });
+
+  it.each(["completed", "failed", "stopped"] as const)("%s 终态在同一客户端写 usage 与生命周期审计", async (status) => {
+    const client = { query: vi.fn().mockResolvedValue({ rowCount: 1, rows: [] }) };
+    await recordRunLifecycleWithClient(client as never, {
+      runId: "run-one",
+      tenantId: "tenant-one",
+      visitorId: "visitor-one",
+      status,
+      payload: {
+        usage: { input_tokens: 11, output_tokens: 7, total_tokens: 18, cost_usd: 0.125 }
+      }
+    });
+    expect(client.query).toHaveBeenCalledTimes(2);
+    expect(String(client.query.mock.calls[0]?.[0])).toContain("INSERT INTO wb_tenant_usage");
+    expect(client.query.mock.calls[0]?.[1]).toEqual([
+      "run-one", "tenant-one", "visitor-one", 11, 7, 18, 0.125
+    ]);
+    expect(String(client.query.mock.calls[1]?.[0])).toContain("INSERT INTO wb_audit_events");
+    expect(client.query.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
+      "run.lifecycle", status, `RUN_${status.toUpperCase()}`, "run", "run-one"
+    ]));
   });
 });

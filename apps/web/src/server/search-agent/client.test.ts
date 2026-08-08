@@ -14,10 +14,21 @@ import {
   SearchAgentRequestError,
   streamSearchAgentRun
 } from "./client";
+import { TENANT_ASSERTION_HEADER, verifyTenantAssertion } from "./tenant-assertion";
 
 const encoder = new TextEncoder();
-const originalToken = process.env.WORKBENCH_INTERNAL_TOKEN;
+const assertionSecret = "0123456789abcdef0123456789abcdef";
+const original = {
+  token: process.env.WORKBENCH_INTERNAL_TOKEN,
+  assertionSecret: process.env.WORKBENCH_TENANT_ASSERTION_SECRET,
+  allowInsecureLoopback: process.env.SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK
+};
 const sourceEnvelope = { version: 1, eventId: "stream_test_000001", streamId: "stream_test", streamSeq: 1, seq: 1, createdAt: "2026-07-28T00:00:00Z" };
+
+function restore(name: string, value: string | undefined) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 function ndjsonResponse(events: unknown[]) {
   return new Response(events.map((event) => JSON.stringify(event)).join("\n"), {
@@ -43,12 +54,16 @@ const request = {
 describe("Search Agent 服务端 client", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    config.loadSearchAgentServiceConfig.mockReset().mockResolvedValue({ origin: "http://127.0.0.1:8100", requestTimeoutMs: 30_000 });
     process.env.WORKBENCH_INTERNAL_TOKEN = "internal-test-token";
+    process.env.WORKBENCH_TENANT_ASSERTION_SECRET = assertionSecret;
+    delete process.env.SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK;
   });
 
   afterEach(() => {
-    if (originalToken === undefined) delete process.env.WORKBENCH_INTERNAL_TOKEN;
-    else process.env.WORKBENCH_INTERNAL_TOKEN = originalToken;
+    restore("WORKBENCH_INTERNAL_TOKEN", original.token);
+    restore("WORKBENCH_TENANT_ASSERTION_SECRET", original.assertionSecret);
+    restore("SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK", original.allowInsecureLoopback);
   });
 
   it("只从 BFF 服务端调用内部 NDJSON 接口并携带最小运行请求", async () => {
@@ -56,7 +71,8 @@ describe("Search Agent 服务端 client", () => {
       ...sourceEnvelope,
       type: "run.failed",
       reasonCode: "SEARCH_UNAVAILABLE",
-      message: "搜索不可用"
+      message: "搜索不可用",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
     }]));
     const events = [];
     for await (const event of streamSearchAgentRun(request, new AbortController().signal)) events.push(event);
@@ -65,7 +81,9 @@ describe("Search Agent 服务端 client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1:8100/v1/runs/stream");
-    expect(new Headers(init.headers).get("X-Workbench-Token")).toBe("internal-test-token");
+    const headers = new Headers(init.headers);
+    expect(headers.get("X-Workbench-Token")).toBe("internal-test-token");
+    expect(verifyTenantAssertion(headers.get(TENANT_ASSERTION_HEADER), request)).toBe(true);
     expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({
       version: 1,
       runId: "run_one",
@@ -76,12 +94,61 @@ describe("Search Agent 服务端 client", () => {
     expect(String(init.body)).not.toMatch(/apiKey|Authorization|reasoning_content/u);
   });
 
+  it("租户断言密钥缺失、过弱或复用内部 Token 时在 fetch 前失败", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const consume = async () => {
+      for await (const _event of streamSearchAgentRun(request, new AbortController().signal)) void _event;
+    };
+
+    delete process.env.WORKBENCH_TENANT_ASSERTION_SECRET;
+    await expect(consume()).rejects.toMatchObject({ code: "SEARCH_AGENT_TENANT_ASSERTION_CONFIG" });
+
+    process.env.WORKBENCH_TENANT_ASSERTION_SECRET = "too-short";
+    await expect(consume()).rejects.toMatchObject({ code: "SEARCH_AGENT_TENANT_ASSERTION_CONFIG" });
+
+    process.env.WORKBENCH_TENANT_ASSERTION_SECRET = assertionSecret;
+    process.env.WORKBENCH_INTERNAL_TOKEN = assertionSecret;
+    await expect(consume()).rejects.toMatchObject({ code: "SEARCH_AGENT_TENANT_ASSERTION_CONFIG" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("显式 loopback 开发模式可在无断言密钥时省略断言", async () => {
+    delete process.env.WORKBENCH_TENANT_ASSERTION_SECRET;
+    process.env.SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK = "1";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ndjsonResponse([{
+      ...sourceEnvelope,
+      type: "run.failed",
+      reasonCode: "SEARCH_UNAVAILABLE",
+      message: "搜索不可用",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
+    }]));
+
+    for await (const _event of streamSearchAgentRun(request, new AbortController().signal)) void _event;
+
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has(TENANT_ASSERTION_HEADER)).toBe(false);
+  });
+
+  it("非 loopback 地址即使设置开发开关也不能省略断言", async () => {
+    delete process.env.WORKBENCH_TENANT_ASSERTION_SECRET;
+    process.env.SEARCH_AGENT_ALLOW_INSECURE_LOOPBACK = "1";
+    config.loadSearchAgentServiceConfig.mockResolvedValueOnce({ origin: "http://search-agent:8100", requestTimeoutMs: 30_000 });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const consume = async () => {
+      for await (const _event of streamSearchAgentRun(request, new AbortController().signal)) void _event;
+    };
+
+    await expect(consume()).rejects.toMatchObject({ code: "SEARCH_AGENT_TENANT_ASSERTION_CONFIG" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("只接受成对且格式合法的权威 checkpoint 恢复引用", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ndjsonResponse([{
       ...sourceEnvelope,
       type: "run.failed",
       reasonCode: "SEARCH_UNAVAILABLE",
-      message: "搜索不可用"
+      message: "搜索不可用",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
     }]));
 
     const invalid = [
@@ -114,6 +181,8 @@ describe("Search Agent 服务端 client", () => {
       checkpointNs: "research/subgraph",
       checkpointSessionId: "checkpoint_session_1"
     });
+    const recoveryHeaders = new Headers(fetchMock.mock.calls[0][1]?.headers);
+    expect(verifyTenantAssertion(recoveryHeaders.get(TENANT_ASSERTION_HEADER), exact)).toBe(true);
   });
 
   it("图片只传递不可逆引用，不传 bytes、base64 或附件地址", async () => {
@@ -121,7 +190,8 @@ describe("Search Agent 服务端 client", () => {
       ...sourceEnvelope,
       type: "run.failed",
       reasonCode: "SEARCH_UNAVAILABLE",
-      message: "搜索不可用"
+      message: "搜索不可用",
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 }
     }]));
     const imageRequest = {
       ...request,
@@ -164,13 +234,31 @@ describe("Search Agent 服务端 client", () => {
     expect(failure).toMatchObject({ code: "SEARCH_AGENT_STREAM_ENDED" });
   });
 
-  it("调用内部 stop endpoint，并把不存在 endpoint 视为 unsupported", async () => {
+  it("严格解析内部 stop 结果，并把 stopping/already_stopped 视为已请求", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
     const fetchMock = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_one", status: "stopping", taskCancelled: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_two", status: "already_stopped", taskCancelled: false }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_three", status: "not_running", taskCancelled: false }), { status: 200 }))
       .mockResolvedValueOnce(new Response("", { status: 404 }));
     await expect(requestSearchAgentStop("run_one")).resolves.toBe("requested");
-    await expect(requestSearchAgentStop("run_two")).resolves.toBe("unsupported");
+    await expect(requestSearchAgentStop("run_two")).resolves.toBe("requested");
+    await expect(requestSearchAgentStop("run_three")).resolves.toBe("not_running");
+    await expect(requestSearchAgentStop("run_four")).resolves.toBe("unsupported");
     expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8100/v1/runs/run_one/stop");
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("accept")).toBe("application/json");
+    expect(timeout).toHaveBeenCalledWith(500);
+  });
+
+  it("stop 的空正文、错误 runId 与额外字段全部 fail closed", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_other", status: "stopping", taskCancelled: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, runId: "run_one", status: "stopping", taskCancelled: true, extra: true }), { status: 200 }));
+
+    await expect(requestSearchAgentStop("run_one")).resolves.toBe("unavailable");
+    await expect(requestSearchAgentStop("run_one")).resolves.toBe("unavailable");
+    await expect(requestSearchAgentStop("run_one")).resolves.toBe("unavailable");
   });
 
   it("stop 配置不可用时返回 unavailable，不阻断本地停止兜底", async () => {

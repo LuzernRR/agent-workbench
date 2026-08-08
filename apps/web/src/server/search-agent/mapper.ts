@@ -396,13 +396,13 @@ function projectSearchAgentEvent(event: SearchAgentEvent, runId: string): Search
   if (event.type === "run.failed") {
     return {
       events: [],
-      terminal: { kind: "failed", payload: { message: "Search Agent 运行失败", reasonCode: event.reasonCode } }
+      terminal: { kind: "failed", payload: { message: "Search Agent 运行失败", reasonCode: event.reasonCode, usage: event.usage } }
     };
   }
   if (event.type === "run.stopped") {
     return {
       events: [],
-      terminal: { kind: "stopped", payload: { reasonCode: event.reasonCode, partial: true } }
+      terminal: { kind: "stopped", payload: { reasonCode: event.reasonCode, partial: true, usage: event.usage } }
     };
   }
   const citations = event.citations.map((citation) => ({ label: oneLine(citation.label, 300), url: safeUrl(citation.url) })).filter((citation) => citation.url);

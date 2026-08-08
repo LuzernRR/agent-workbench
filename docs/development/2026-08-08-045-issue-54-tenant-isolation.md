@@ -1,8 +1,9 @@
 # 045 · Issue #54 租户隔离与配额门禁
 
 - 日期：2026-08-08
-- Issue：#54（Status: ready，Execution Gate: allowed）
+- Issue：#54（已验收并关闭；开发时 `Status: ready`、`Execution Gate: allowed`）
 - 分支：`codex/issue-54-authz-quota-audit`
+- 合并：PR #55，`main@314e28da32c37ad97596090240e8c09375e77fec`（短 SHA `314e28d`）
 - 目标：把 tenant 从「调用方自述字段」改为「服务端派生 + 签名断言」，并按租户强制配额、跨租户 fail-closed、审计留痕。
 
 ## 1. 问题
@@ -24,17 +25,34 @@
 
 ### 2.2 签名租户断言
 
-新增 `apps/web/src/server/search-agent/tenant-assertion.ts`：BFF 用 `WORKBENCH_INTERNAL_TOKEN` 对 `tenant`、`run`、`visitor` 三段做 HMAC-SHA256，每段以 UTF-8 字节长度前缀拼接（`8:tenant_1` 形式），断言体只有 `v1:<mac>`，不回显任何标识；经 `X-Workbench-Tenant-Assertion` 下发；`services/search-agent/app/main.py` 的 `_authorize_tenant` 按同一格式重建载荷并用 `hmac.compare_digest` 常量时间校验。
+本记录必须保留 #54 的真实历史：合并版本新增
+`apps/web/src/server/search-agent/tenant-assertion.ts`，BFF 用
+`WORKBENCH_INTERNAL_TOKEN` 对 tenant、run、visitor 三段做 HMAC-SHA256，每段以
+UTF-8 字节长度前缀拼接（`8:tenant_1` 形式），断言体只有 `v1:<mac>`，不回显任何
+标识；经 `X-Workbench-Tenant-Assertion` 下发；`services/search-agent/app/main.py`
+按同一格式重建载荷并用 `hmac.compare_digest` 校验。
 
 长度前缀是纵深防御：`app/api/schemas.py:95` 的作用域 ID 校验已把冒号与非 ASCII 挡在 API 边界之外，因此边界移位在公开接口上不可达（`test_scope_ids_cannot_carry_the_payload_separator` 锁定该门）。前缀保证即使某段将来放宽字符集，`("a","b:c","d")` 与 `("a","b","c:d")` 也不会共享 MAC。两端各钉同一个已知答案向量（`v1:246dd156…2abd0`），单侧修改格式会同时打断两个测试套件。
 
-三元组绑定是刻意的：只签 tenant 会让一个合法断言可重放到同租户的任意 run 上，绑定 run 与 visitor 后重放即失效。未配置密钥时 `_authorize_tenant` 直接返回，把判断交回既有的 loopback 开发路径，不新增一条绕过。
+三元组绑定是刻意的：只签 tenant 会让一个合法断言可重放到同租户的任意 run 上，绑定
+run 与 visitor 后，断言不能换到另一作用域。未配置 transport token 时，显式 loopback
+开发路径仍可运行。
+
+但 post-merge 安全审查确认：#54 原威胁模型中的攻击者正是「持有
+`WORKBENCH_INTERNAL_TOKEN` 的内部调用方」。既然断言 HMAC 复用了同一 token，持有者就能为
+任意 tenant/run/visitor 自行计算合法断言，因此 #54 的 MAC 只增加了作用域绑定，没有建立独立
+授权边界。该缺口以及旧固定向量均由后续 Issue #56 明确接管；不能把 #56 的独立密钥方案倒写成
+#54 当时已经交付的事实。
 
 ### 2.3 配额与审计
 
-`wb_quotas`、`wb_audit_events` 幂等建表见 `schema.ts`；配额检查在 `quota.ts`，QPS/并发/Token/费用四维。审计表 `tenant_id` 为 `NOT NULL`，因此 tenant 未解析的路径写不出审计行——该场景以 run 的终态 `reasonCode` 为记录，这一点是设计选择而非遗漏。
+真实表名为 `wb_tenant_quotas`、`wb_tenant_usage` 与 `wb_audit_events`，幂等建表见
+`schema.ts`；配额检查位于 `quota.ts`，覆盖 QPS、并发 Run、Token 与费用四维。#54 合并时
+审计主要记录 Run admission 的 allowed/denied；资源授权拒绝和 queued/completed/failed/stopped
+完整生命周期账本尚未覆盖，现由 Issue #56 补齐。审计表 `tenant_id` 为 `NOT NULL`，因此 tenant
+无法可信解析时不能编造一个 tenant 写审计，只能让孤儿 Run 以稳定终态 reason code fail-closed。
 
-## 3. 验证
+## 3. #54 历史验证
 
 | 门禁 | 结果 |
 |---|---|
@@ -47,9 +65,27 @@
 
 跨租户隔离的真实证据来自 `store.integration.test.ts`，在真实 PostgreSQL（临时库，`finally` 中 drop）上 4 passed：跨租户读、写、删除全部 fail-closed，配额拒绝生效且审计行存在。默认 `vitest run` 会跳过该文件（需 `WORKBENCH_LIVE_INTEGRATION=1`），所以只看默认套件的 11 skipped 会误判这条证据缺失。
 
-## 4. 遗留
+以上数字是 PR #55 合并时的历史证据，不代表 Issue #56 当前工作树的最终门禁；#56 的最终数字只能在
+交付树冻结后写入记录 046。
+
+## 4. 遗留与 post-merge 勘误
 
 - 断言只覆盖 `/v1/runs/stream`。`requestSearchAgentStop` 与小红书验证端点仍只有共享 token；它们不携带 tenant 语义，但若将来按租户鉴权需要同样处理。
 - `pip-audit` 未装进服务 venv（该 venv 也没有 `pip`），文档写法不可复现；可用的调用是 `uvx --python 3.12 pip-audit`，已在记录 044 说明。
-- 配额是近似上限，不是精确上限。准入判定先于 run 插入单独提交（`quota.ts:158` / `store.ts:591`），换来"拒绝一定留痕"，代价是并发窗口：N 个同时入队的请求可能都读到 `concurrent_runs = limit - 1` 而全部放行，超出量最多为并发请求数。作为预算护栏可接受；**它不是安全边界**——租户隔离由每条语句上的 `visitor_id`/`tenant_id` 谓词保证，不依赖这些计数。要做成精确上限，需在整个 run 事务期间锁住租户配额行，代价是同租户入队串行化并失去上述留痕性质。
-- MAC 载荷改为长度前缀（`8:tenant_1`）。此前用 `:` 直接拼接三个字段，`("a","b:c","d")` 与 `("a","b","c:d")` 会产生同一个 MAC；虽然 `app/api/schemas.py:95` 已在 schema 层拒绝含冒号的 scope ID、经公开 API 不可达，但该安全性依赖三个其他文件的不变量。现两侧同时钉住同一组已知答案向量（`v1:246dd156…`），单侧改格式会同时打断两套测试。
+- 配额是近似上限，不是精确串行上限。并发请求仍可能在 admission 窗口内超放；它只是预算护栏，
+  不是租户隔离安全边界。若要精确限额，需锁住租户配额行并接受同租户入队串行化。
+- post-merge 审查还发现 #54 的审计只覆盖 admission，没有完整记录资源授权拒绝和 Run 生命周期；
+  这不是对历史记录的文字修饰，而是 Issue #56 的实际修复范围。
+- HMAC 采用确定性固定作用域，没有 nonce 或过期时间；同一 tenant/run/visitor 的断言允许用于恢复。
+  该语义在 #56 保留，并通过独立密钥、Run 唯一性、active-run 门与密钥轮换限制风险。
+
+## 5. 验收、合并与回滚
+
+- 用户验收后，PR #55 已合入 `main@314e28d`，Issue #54 已关闭。
+- 若只回滚 #54，先暂停入口并排空/停止 Worker，再 `git revert 314e28d`，统一重建相关服务。
+  若 #56 已合并，必须先回滚 #56，否则新旧断言协议会形成混合版本。
+- `wb_visitors.tenant_id`、`wb_tenant_quotas`、`wb_tenant_usage`、`wb_audit_events` 及其索引可按
+  expand-only 暂留；不要在代码回滚中直接 DROP。破坏性 contract 必须另立 migration，在完成备份并确认
+  没有活动 Run 后执行。
+- 回退到纯 #54 版本会重新引入「持有 transport token 即可伪造租户断言」的已知风险，只能作为应急
+  降级，不能作为安全等价回滚。

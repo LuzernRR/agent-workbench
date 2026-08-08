@@ -1,6 +1,6 @@
 import { loadRuntimeConfig } from "@/server/config/runtime-config";
 import { negotiateImageInputs } from "@/server/media/image-input";
-import { SearchAgentRequestError, streamSearchAgentRun } from "@/server/search-agent/client";
+import { requestSearchAgentStop, SearchAgentRequestError, streamSearchAgentRun } from "@/server/search-agent/client";
 import type { SearchAgentEvent } from "@/server/search-agent/events";
 import { mapSearchAgentEvent, type SearchAgentExecutionInput } from "@/server/search-agent/mapper";
 import {
@@ -16,8 +16,15 @@ import {
   readClaimedLiveCheckpoint,
   releaseLiveRunLease,
   renewLiveRunLease,
+  settleClaimedTerminalSettlement,
+  stageClaimedTerminalSettlement,
   type ClaimedLiveRun
 } from "@/server/live/store";
+import {
+  TerminalSettlementConflictError,
+  validateDirectTerminalSettlement,
+  type DirectTerminalSettlement
+} from "@/server/live/terminal-settlements";
 
 /**
  * The claim resolves the tenant from the owning visitor row and fails the run
@@ -32,6 +39,7 @@ function runTenantId(run: ClaimedLiveRun["run"]): string {
 export const SEARCH_AGENT_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 export const MAX_CHECKPOINT_SOURCE_EVENTS = 10_000;
 export const MAX_CHECKPOINT_SOURCE_BYTES = 8 * 1024 * 1024;
+export const TERMINAL_SETTLEMENT_RETRY_DELAYS_MS = [50, 150, 300] as const;
 
 export type ClaimedRunOutcome = "completed" | "failed" | "stopped" | "released" | "lease-lost";
 
@@ -48,6 +56,7 @@ type ClaimedRuntime = {
   eventTail: Promise<void>;
   leaseLost: boolean;
   stopping: boolean;
+  stopNotificationAccepted: boolean;
   releaseRequested: boolean;
   settled: boolean;
 };
@@ -63,6 +72,13 @@ class CheckpointCommitRetryableError extends Error {
   constructor(readonly cause: unknown) {
     super("Checkpoint batch 暂时无法提交");
     this.name = "CheckpointCommitRetryableError";
+  }
+}
+
+class TerminalSettlementCommitRetryableError extends Error {
+  constructor(readonly cause: unknown) {
+    super("无 checkpoint 终态暂时无法持久结算");
+    this.name = "TerminalSettlementCommitRetryableError";
   }
 }
 
@@ -263,8 +279,72 @@ async function commitSourceBatch(input: {
     loseLease(input.runtime);
     throw new LeaseLostError();
   }
-  if (projected.outcome) input.runtime.settled = true;
-  return projected;
+  const outcome = committed.terminalStatus ?? undefined;
+  if (outcome) input.runtime.settled = true;
+  return { ...projected, outcome };
+}
+
+function directTerminalSettlement(sourceEvents: SearchAgentEvent[], runId: string): DirectTerminalSettlement | null {
+  const terminalSource = sourceEvents.at(-1);
+  const terminalCount = sourceEvents.filter((event) =>
+    event.type === "run.completed" || event.type === "run.failed" || event.type === "run.stopped"
+  ).length;
+  if (terminalCount === 0) return null;
+  if (!terminalSource || terminalCount !== 1) {
+    throw new TerminalSettlementConflictError("无 checkpoint source 必须只有一个末尾终态");
+  }
+  if (terminalSource.type !== "run.failed" && terminalSource.type !== "run.stopped") {
+    throw new TerminalSettlementConflictError("无 checkpoint source 的唯一终态只能是 run.failed 或 run.stopped");
+  }
+  const events: DirectTerminalSettlement["events"] = [];
+  for (const sourceEvent of sourceEvents.slice(0, -1)) {
+    const projection = mapSearchAgentEvent(sourceEvent, runId);
+    if (projection.terminal) throw new TerminalSettlementConflictError("无 checkpoint 终态前不能出现其他终态");
+    events.push(...projection.events);
+    if (events.length > MAX_CHECKPOINT_SOURCE_EVENTS) {
+      throw new TerminalSettlementConflictError("无 checkpoint 公开投影事件超过上限");
+    }
+  }
+  const terminalProjection = mapSearchAgentEvent(terminalSource, runId);
+  const terminalStatus = terminalSource.type === "run.failed" ? "failed" : "stopped";
+  if (terminalProjection.terminal?.kind !== terminalStatus) {
+    throw new TerminalSettlementConflictError("无 checkpoint 终态缺少匹配投影");
+  }
+  const settlement = {
+    terminalStatus,
+    sourceEvents,
+    events,
+    terminalPayload: terminalProjection.terminal.payload
+  } satisfies DirectTerminalSettlement;
+  validateDirectTerminalSettlement(runId, settlement);
+  return settlement;
+}
+
+async function persistDirectTerminalSettlement(runtime: ClaimedRuntime, settlement: DirectTerminalSettlement) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const staged = await enqueueRuntimeOperation(runtime, () => stageClaimedTerminalSettlement(runtime.claim, settlement));
+      if (!staged) {
+        loseLease(runtime);
+        throw new LeaseLostError();
+      }
+      const settled = await enqueueRuntimeOperation(runtime, () => settleClaimedTerminalSettlement(runtime.claim));
+      if (!settled) {
+        loseLease(runtime);
+        throw new LeaseLostError();
+      }
+      runtime.settled = true;
+      return settled;
+    } catch (error) {
+      if (error instanceof LeaseLostError || error instanceof TerminalSettlementConflictError) throw error;
+      if (runtime.leaseLost || runtime.stopping) throw error;
+      lastError = error;
+      if (attempt >= TERMINAL_SETTLEMENT_RETRY_DELAYS_MS.length) break;
+      await waitForReconnect(TERMINAL_SETTLEMENT_RETRY_DELAYS_MS[attempt], runtime.abortController.signal);
+    }
+  }
+  throw new TerminalSettlementCommitRetryableError(lastError);
 }
 
 async function executeSearchRun(
@@ -362,6 +442,11 @@ async function executeSearchRun(
         streamedMessageId = projected.streamedMessageId;
         if (projected.outcome) return projected.outcome;
       }
+      const directTerminal = directTerminalSettlement(bufferedSourceEvents, run.id);
+      if (directTerminal) {
+        const settled = await persistDirectTerminalSettlement(runtime, directTerminal);
+        return settled.terminalStatus;
+      }
       throw new SearchAgentRequestError("Search Agent 事件流提前结束", "SEARCH_AGENT_STREAM_ENDED");
     } catch (error) {
       bufferedSourceEvents = [];
@@ -397,6 +482,7 @@ export async function runClaimedLiveRun(claim: ClaimedLiveRun, options: ClaimedR
     eventTail: Promise.resolve(),
     leaseLost: false,
     stopping: options.signal.aborted,
+    stopNotificationAccepted: false,
     releaseRequested: false,
     settled: false
   };
@@ -412,7 +498,15 @@ export async function runClaimedLiveRun(claim: ClaimedLiveRun, options: ClaimedR
     heartbeatTail = heartbeatTail.then(async () => {
       if (runtime.stopping || runtime.leaseLost || runtime.settled) return;
       try {
-        if (!await renewLiveRunLease(claim, options.leaseMs)) loseLease(runtime);
+        const renewal = await renewLiveRunLease(claim, options.leaseMs);
+        if (!renewal.renewed) {
+          loseLease(runtime);
+          return;
+        }
+        if (renewal.stopRequested && !runtime.stopNotificationAccepted) {
+          const result = await requestSearchAgentStop(claim.run.id);
+          if (result === "requested") runtime.stopNotificationAccepted = true;
+        }
       } catch (error) {
         options.onError?.(error, { operation: "heartbeat", runId: claim.run.id, leaseEpoch: claim.lease.epoch });
         loseLease(runtime);
@@ -436,15 +530,22 @@ export async function runClaimedLiveRun(claim: ClaimedLiveRun, options: ClaimedR
   } catch (error) {
     if (runtime.leaseLost || error instanceof LeaseLostError) {
       outcome = "lease-lost";
-    } else if (error instanceof CheckpointCommitRetryableError) {
+    } else if (error instanceof CheckpointCommitRetryableError || error instanceof TerminalSettlementCommitRetryableError) {
       options.onError?.(error.cause, {
-        operation: "checkpoint-commit",
+        operation: error instanceof TerminalSettlementCommitRetryableError ? "terminal-settlement" : "checkpoint-commit",
         runId: claim.run.id,
         leaseEpoch: claim.lease.epoch
       });
       runtime.releaseRequested = true;
       runtime.abortController.abort(error);
       outcome = "released";
+    } else if (error instanceof TerminalSettlementConflictError) {
+      // A malformed or replayed terminal envelope must never be translated
+      // into a synthetic generic failed/zero-usage terminal. Fence this
+      // worker and leave the durable run for explicit recovery/inspection.
+      options.onError?.(error, { operation: "terminal-settlement-conflict", runId: claim.run.id, leaseEpoch: claim.lease.epoch });
+      loseLease(runtime);
+      outcome = "lease-lost";
     } else if (runtime.stopping) {
       outcome = "released";
     } else {

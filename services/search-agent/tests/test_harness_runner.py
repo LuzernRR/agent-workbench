@@ -16,6 +16,12 @@ from app.observability.trace import TracerFactory, record_model_call, tracing_en
 from app.run_control import RunRegistry
 
 FIXED_TIME = "2026-08-01T00:00:00Z"
+ZERO_USAGE = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": 0.0,
+}
 
 
 def payload(
@@ -246,6 +252,7 @@ async def test_no_http_runner_is_deterministic_and_injects_runtime_dependencies(
     assert first[-1]["answerMarkdown"] == "完成"
     assert first[-1]["answerSource"] == "model"
     assert first[-1]["answerModelCalls"] == 1
+    assert first[-1]["usage"] == completed_state()["usage"]
     assert first_graph.inputs[0]["run_id"] == "run_1"
     assert first_graph.configs[0]["configurable"]["thread_id"] == (
         "run:run_1:session:checkpoint_session_1"
@@ -380,7 +387,7 @@ async def test_resume_uses_checkpoint_without_new_graph_input_and_replays_termin
     )
 
     assert graph.inputs == [None]
-    assert graph.get_state_calls == 2
+    assert graph.get_state_calls == 1
     assert graph.get_state_configs[0]["configurable"] == {
         "thread_id": "run:run_1:session:checkpoint_session_1",
         "checkpoint_ns": "research/subgraph",
@@ -432,6 +439,7 @@ async def test_explicit_missing_checkpoint_fails_closed_without_running_graph() 
     assert graph.inputs == []
     assert [event["type"] for event in events] == ["run.failed"]
     assert events[0]["reasonCode"] == "CHECKPOINT_NOT_FOUND"
+    assert events[0]["usage"] == ZERO_USAGE
 
 
 @pytest.mark.asyncio
@@ -565,6 +573,57 @@ async def test_resume_scope_mismatch_returns_stable_failure_without_running_grap
     assert graph.inputs == []
     assert events[0]["type"] == "run.failed"
     assert events[0]["reasonCode"] == "RESUME_SCOPE_MISMATCH"
+    assert events[0]["usage"] == ZERO_USAGE
+
+
+@pytest.mark.asyncio
+async def test_resume_immediate_failure_keeps_validated_checkpoint_usage() -> None:
+    state = completed_state()
+    graph = FakeGraph(snapshot=state, error=RuntimeError("private body"))
+
+    events = await collect(runner(graph), payload(resume=True))
+
+    assert graph.inputs == [None]
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "RUNTIMEERROR"
+    assert events[0]["usage"] == state["usage"]
+
+
+@pytest.mark.asyncio
+async def test_resume_timeout_before_first_value_keeps_checkpoint_usage() -> None:
+    state = completed_state()
+    graph = FakeGraph(snapshot=state)
+
+    events = await collect(
+        runner(graph, timeout_factory=lambda _: ImmediateTimeout()),
+        payload(resume=True),
+    )
+
+    assert graph.inputs == []
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "RUN_TIMEOUT"
+    assert events[0]["usage"] == state["usage"]
+
+
+@pytest.mark.asyncio
+async def test_resume_cancel_before_first_value_keeps_checkpoint_usage() -> None:
+    state = completed_state()
+    entered = asyncio.Event()
+    harness = runner(
+        FakeGraph(snapshot=state, entered=entered, blocker=asyncio.Event())
+    )
+    stream = harness.stream(payload(resume=True))
+    next_event = asyncio.create_task(anext(stream))
+    await entered.wait()
+
+    decision = await harness.stop("run_1")
+    event = await next_event
+
+    assert decision.status == "stopping"
+    assert event["type"] == "run.stopped"
+    assert event["reasonCode"] == "USER_STOPPED"
+    assert event["usage"] == state["usage"]
+    await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -576,6 +635,7 @@ async def test_non_model_answer_is_rejected_as_structured_failure() -> None:
 
     assert [event["type"] for event in events] == ["run.failed"]
     assert events[0]["reasonCode"] == "NON_MODEL_OUTPUT"
+    assert events[0]["usage"] == completed_state()["usage"]
     assert "answerMarkdown" not in events[0]
 
 
@@ -601,6 +661,7 @@ async def test_duplicate_run_returns_stable_failure() -> None:
         events = await collect(runner(FakeGraph(), registry=registry))
         assert events[0]["type"] == "run.failed"
         assert events[0]["reasonCode"] == "RUN_ALREADY_ACTIVE"
+        assert events[0]["usage"] == ZERO_USAGE
     finally:
         active.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -618,7 +679,28 @@ async def test_timeout_marks_started_tools_unknown_and_returns_stable_failure() 
     ))
 
     assert events[0]["reasonCode"] == "RUN_TIMEOUT"
+    assert events[0]["usage"] == ZERO_USAGE
     assert ledger.unknown_runs == [("run_1", "RUN_TIMEOUT_OUTCOME_UNKNOWN")]
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_keeps_usage_from_the_last_observed_state() -> None:
+    class StableGraphError(RuntimeError):
+        code = "RESEARCH_RESULT_CONFLICT"
+
+    state = completed_state()
+
+    def explode() -> dict[str, Any]:
+        raise StableGraphError("private body")
+
+    events = await collect(runner(FakeGraph(parts=[
+        {"type": "values", "data": state},
+        {"type": "custom", "data": explode},
+    ])))
+
+    assert [event["type"] for event in events] == ["run.failed"]
+    assert events[0]["reasonCode"] == "RESEARCH_RESULT_CONFLICT"
+    assert events[0]["usage"] == state["usage"]
 
 
 @pytest.mark.asyncio
@@ -658,6 +740,7 @@ async def test_user_stop_cancels_runner_and_marks_tool_outcome_unknown() -> None
     assert decision.status == "stopping"
     assert event["type"] == "run.stopped"
     assert event["reasonCode"] == "USER_STOPPED"
+    assert event["usage"] == ZERO_USAGE
     assert ledger.unknown_runs == [
         ("run_1", "CANCELLED_OUTCOME_UNKNOWN"),
         ("run_1", "CANCELLED_OUTCOME_UNKNOWN"),
@@ -680,4 +763,38 @@ async def test_client_disconnect_has_safe_terminal_and_unknown_tool_outcome() ->
 
     assert [event["type"] for event in events] == ["run.stopped"]
     assert events[0]["reasonCode"] == "CLIENT_DISCONNECTED"
+    assert events[0]["usage"] == ZERO_USAGE
     assert ledger.unknown_runs == [("run_1", "CANCELLED_OUTCOME_UNKNOWN")]
+
+
+@pytest.mark.asyncio
+async def test_stopped_terminal_keeps_usage_from_the_last_observed_state() -> None:
+    state = completed_state()
+    graph = FakeGraph(parts=[
+        {"type": "values", "data": state},
+        {
+            "type": "custom",
+            "data": lambda: runtime_event(
+                "node.started",
+                node="reflect",
+                nodeRunId="reflect_after_usage",
+                agent="reflector",
+                iteration=1,
+            ),
+        },
+    ])
+    probes = 0
+
+    async def disconnected_after_state() -> bool:
+        nonlocal probes
+        probes += 1
+        return probes > 1
+
+    events = await collect(
+        runner(graph),
+        is_disconnected=disconnected_after_state,
+    )
+
+    assert [event["type"] for event in events] == ["run.stopped"]
+    assert events[0]["reasonCode"] == "CLIENT_DISCONNECTED"
+    assert events[0]["usage"] == state["usage"]

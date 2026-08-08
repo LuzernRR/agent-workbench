@@ -36,8 +36,9 @@ uv run python -m app.run
 
 直接用 `app.run` 启动时健康检查为 `http://127.0.0.1:8100/health`；正式 Compose
 把容器内 8100 映射到宿主机 `http://127.0.0.1:8080/health`。非密钥配置位于
-`config/search-agent.json`；DeepSeek 与 Tavily 密钥只位于被忽略的
-`config/*.local.json`。
+`config/search-agent.json`；DeepSeek 与 Tavily 等 Provider 密钥位于被忽略的
+`config/*.local.json`，数据库及服务间 Token/租户断言密钥位于被忽略的
+`config/*.local.env` 或生产密钥管理系统。
 
 ### 验证
 
@@ -49,9 +50,13 @@ cd services/search-agent
 ```
 
 Compose 运行态使用 `deploy/compose.yaml` 与 `config/deploy.local.env`。发布前还要执行 Web 全量门禁、镜像
-构建、Compose 静态解析、依赖审计、Playwright 和 `git diff --check`。真实 smoke 的请求必须带
-`X-Workbench-Token`，结束后以最后一个 `checkpoint.committed` 的完整引用读取 PostgreSQL checkpoint，核对
-`search_attempts`、`evidence_gaps`、`evidence` 和终态；不要把公开事件中的摘要当作私有查询分析。
+构建、Compose 静态解析、依赖审计、Playwright 和 `git diff --check`。真实 smoke 优先通过 Web/Worker
+发起，由服务端生成断言；若直接调用 `/v1/runs/stream`，请求必须同时携带 `X-Workbench-Token` 与
+`X-Workbench-Tenant-Assertion`。后者使用独立 `WORKBENCH_TENANT_ASSERTION_SECRET` 对 UTF-8
+长度前缀的 tenant/run/visitor 作用域签名，不能用内部 Token 代替，也不要把任何密钥粘贴到命令行或日志。
+只有显式启用且两端均为 loopback 的不安全开发模式可以省略断言。结束后以最后一个
+`checkpoint.committed` 的完整引用读取 PostgreSQL checkpoint，核对 `search_attempts`、
+`evidence_gaps`、`evidence` 和终态；不要把公开事件中的摘要当作私有查询分析。
 
 2026-08-07 发布前 Web Provider smoke `issue52accept_3d56d8258084` 验证了首轮 web 查询、两个带
 `gapId`/`parentAttemptId` 的 `source_targeting` follow-up、Evidence 增益和缺口闭合；公开事件私有字段扫描为
