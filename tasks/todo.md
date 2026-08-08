@@ -85,7 +85,7 @@
 - [x] Rebuild Search Agent and complete the `forceSearch=false` real Provider smoke
 - [x] Finish Chinese record 047 with final Run/test evidence
 - [x] Commit and push, create PR #59
-- [ ] Resolve PR #59 checks/comments, squash merge, close #58, sync main, and
+- [x] Resolve PR #59 checks/comments, squash merge, close #58, sync main, and
       record the real merge SHA
 - [ ] Only after #58 closure: create the Scheme A ready/allowed Issue and continue
       its implementation under the one-active-Issue gate

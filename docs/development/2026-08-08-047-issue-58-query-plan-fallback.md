@@ -5,10 +5,10 @@
 - Issue：[#58](https://github.com/LuzernRR/agent-workbench/issues/58)
 - 分支：`codex/issue-58-query-plan-fallback`
 - 门禁：`Status: ready`、`Execution Gate: allowed`
-- 当前：`executing`
+- 当前：`accepted`
 - 用户授权：已确认实现方案，并授权 Codex 在最终测试后自主验收；该授权不替代 A1-A8 证据。
 - 本地验收：A1-A8 的代码、测试、运行态与安全证据已通过。
-- 尚未完成：PR、合并、Issue 关闭与 main 同步。
+- GitHub 闭环：PR #59 已 squash 合并，Issue #58 已关闭，本地 main 已同步。
 
 ## 问题与真实证据
 
@@ -175,6 +175,6 @@ Web 与发布门禁：
 - Web/Playwright/审计/Compose/health：通过，数字见上文
 - 真实 `forceSearch=false` Run：`run_f1b24daa53f34ba2af4a7fe2752fa6d4`，4 个 toolCallId/attempt，唯一 completed
 - commit：待执行
-- PR：[#59](https://github.com/LuzernRR/agent-workbench/pull/59)，检查中
-- merge SHA：待合并
-- Issue #58 close/main sync：待执行
+- PR：[#59](https://github.com/LuzernRR/agent-workbench/pull/59)，已合并
+- merge SHA：`6b7c83cef7439744deac677decf6aca7fc60e474`
+- Issue #58 close/main sync：完成

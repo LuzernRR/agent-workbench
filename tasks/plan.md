@@ -410,8 +410,8 @@ post-#52 path where an explicit research request could be rejected twice by the
 semantic plan gate and end partial with zero tool calls. The branch is
 `codex/issue-58-query-plan-fallback`; GitHub has `Status: ready` and
 `Execution Gate: allowed`. The user authorized implementation and Codex-owned
-acceptance after fresh verification. Status remains `executing` until every
-runtime/release gate, PR, merge, Issue close, and main synchronization step is real.
+acceptance after fresh verification. PR #59 was squash-merged as `6b7c83c`,
+Issue #58 is closed, and local `main` matches `origin/main`; status is `accepted`.
 
 ## Architecture Decisions
 
@@ -457,7 +457,7 @@ runtime/release gate, PR, merge, Issue close, and main synchronization step is r
   SearchAttempt, safe terminal and no planner-rejection zero-tool partial.
 - [x] Complete record 047 with local test and Run evidence.
 - [x] Commit/push and create PR #59.
-- [ ] Complete PR #59 review/checks, squash merge, close #58,
+- [x] Complete PR #59 review/checks, squash merge, close #58,
   synchronize main, and replace placeholders with real IDs/SHAs.
 
 ## Acceptance And Rollback

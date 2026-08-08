@@ -1,12 +1,11 @@
 # 项目交接
 
-## 当前结论（2026-08-08，Issue #58 已通过本地验收，正在 GitHub 收口）
+## 当前结论（2026-08-08，Issue #58 已验收、合并并关闭）
 
-- 当前唯一活动功能为 [#58](https://github.com/LuzernRR/agent-workbench/issues/58)“搜索计划校验失败后的关键词
-  修复与确定性 fallback”，分支 `codex/issue-58-query-plan-fallback`；GitHub 状态为 `Status: ready`、
-  `Execution Gate: allowed`，PR [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已创建。用户已确认
-  方案并授权 Codex 在完整测试后自主验收；代码、全量门禁和真实 Provider smoke 已通过，但 PR 检查/合并与
-  Issue 关闭尚未完成，因此状态仍是 `executing`，不能提前写成 accepted。
+- [#58](https://github.com/LuzernRR/agent-workbench/issues/58)“搜索计划校验失败后的关键词修复与确定性
+  fallback”已按用户预授权完成 Codex 自主验收并关闭；PR
+  [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已 squash 合入 `main`，merge commit 为
+  `6b7c83cef7439744deac677decf6aca7fc60e474`（短 SHA `6b7c83c`），本地 `main` 与 `origin/main` 同步。
 - **真实根因**：#56 最终 smoke 中 `run_278120d58722490b883333c9b5f8ce0d` 与
   `run_d0d13d42b61e4c35824ae51689a697da` 先后触发 `PLAN_INITIAL_FACET_DUPLICATE` 和
   `QUERY_FOLLOW_UP_LINEAGE_REQUIRED`；Provider 没有被调用，最终 `toolCalls=0` partial。#58 将 planner
@@ -38,8 +37,8 @@
   freshness、版本与成本；召回顺序为硬约束签名 → facet/channel → 语义相似 → 时效/来源校验 → 历史收益。
   经验只能作为新 query/路径提示，必须重新搜索和核验证据，不能把旧结果直接当当前 Evidence。第一阶段只记录
   contextual-bandit 特征并做离线回放，不启用在线探索；#58 关闭前不创建第二个活动 Issue。
-- **#58 剩余闭环**：等待并处理 PR #59 的真实检查/评论，合并、关闭 Issue、同步 main 并回填真实 merge SHA；
-  随后才从已批准方案 A 创建唯一下一 Issue。
+- **#58 闭环完成**：PR 无配置的 CI check、无 review/comment；本地 A1-A8 门禁作为发布证据。下一步可按已批准
+  方案 A 创建唯一新的 ready/allowed Issue；创建前仓库没有活动功能。
 
 ## 上一轮结论（2026-08-08，Issue #56 已验收、合并并关闭）
 
