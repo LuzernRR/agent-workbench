@@ -61,5 +61,5 @@
 - [x] Replace stale 046 baselines with final frozen-tree evidence and the user's
       pre-authorized Codex acceptance; keep only real GitHub metadata pending
 - [x] Commit `32fdbda`, push the feature branch, and open actual PR #57
-- [ ] Wait for CI/review, merge PR #57, close Issue #56, sync `main`, and record the
-      real merge SHA
+- [x] Confirm no configured CI/review blockers, merge PR #57 as `f46a04c`, close
+      Issue #56, sync `main`, and record the real merge SHA

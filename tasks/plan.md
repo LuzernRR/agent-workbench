@@ -292,14 +292,14 @@ independent secret and complete lifecycle audit.
 
 ## Overview
 
-Issue [#56](https://github.com/LuzernRR/agent-workbench/issues/56) is the only
-active feature. It repairs the post-merge gaps in #54 without expanding into
+Issue [#56](https://github.com/LuzernRR/agent-workbench/issues/56) repaired the
+post-merge gaps in #54 without expanding into
 OIDC, RBAC, ABAC, RLS, exact serialized quotas, or a new public memory API.
 The GitHub gate remains `Status: ready` and `Execution Gate: allowed`. The user
 pre-authorized Codex to accept after fresh verification. The final tree has now
 passed the local acceptance gates and rebuilt-image runtime smokes, so local status
-is `accepted`; commit `32fdbda` and PR #57 now exist, while CI/review, merge SHA,
-Issue close, and `main` synchronization remain pending until they actually occur.
+is `accepted`; PR #57 was squash-merged as `f46a04c`, Issue #56 is closed, and
+local `main` is synchronized with `origin/main`.
 
 ## Acceptance Slices
 
@@ -362,7 +362,7 @@ Issue close, and `main` synchronization remain pending until they actually occur
   contract-generation opportunity.
 - Rollback is expand-only at the database boundary. Revert #56 before #54, stop
   intake and drain/stop Worker first, and never roll back only Search Agent. The
-  #54 merge commit is `314e28d`; the #56 merge SHA stays unknown until merge.
+  #54 merge commit is `314e28d`; the #56 merge commit is `f46a04c`.
 
 ## Known Residual Boundaries
 
@@ -390,10 +390,11 @@ Issue close, and `main` synchronization remain pending until they actually occur
 
 ## Status
 
-Status is locally `accepted` and in GitHub delivery. Final rebuilt-image evidence:
+Status is `accepted`, merged, and closed. Final rebuilt-image evidence:
 completed `run_4d4a46dfd9034199838cb80807e67868`, direct failed
 `run_3342b99584ef4dbb97bcda830751ff0e`, and active stop
 `run_60623f90c32e4012aef9bd71ce1ae726`; each has one public terminal, consistent
 usage/audit/outbox, cleared lease, no pending settlement, and stable SSE replay.
-Commit, PR, CI/review, merge, Issue close, and main synchronization remain before
-starting the next feature.
+PR #57 had no configured check runs, review requests, or comments and was
+`MERGEABLE/CLEAN`; it was squash-merged as `f46a04c`, Issue #56 was closed, and
+`main` was synchronized. A next feature may start only through a new ready Issue.

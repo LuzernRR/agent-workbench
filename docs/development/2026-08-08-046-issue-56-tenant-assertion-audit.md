@@ -2,12 +2,13 @@
 
 - 日期：2026-08-08
 - Issue：[GitHub #56](https://github.com/LuzernRR/agent-workbench/issues/56)
-- 状态：本地 `accepted`、GitHub 交付中；用户已预授权 Codex 在全部新鲜门禁通过后自行验收。旧阶段快照
+- 状态：`accepted`、已合并并关闭；用户已预授权 Codex 在全部新鲜门禁通过后自行验收。旧阶段快照
   已由 17:04 后最终树门禁、最终镜像重建和三类真实 Run 证据替换
 - 分支：`codex/issue-56-tenant-assertion-audit`
 - 父项：Issue #54 已关闭，PR #55 已合入 `main@314e28da32c37ad97596090240e8c09375e77fec`
 - 提交 / PR：`32fdbda` / [GitHub PR #57](https://github.com/LuzernRR/agent-workbench/pull/57)
-- merge SHA：**待真实合并后最终回填；不得预填**
+- merge SHA：`f46a04cd0153d8918499aa6fcff3d8012995e451`（短 SHA `f46a04c`）
+- GitHub 状态：PR #57 merged；Issue #56 completed/closed；本地 `main` 已同步 `origin/main`
 - 最终本地证据：Web `573 passed / 31 skipped`；关键聚焦 `89 passed`；专用 PostgreSQL integration
   `31 passed`；Search Agent `647 passed / 1 skipped`；Playwright `17 passed / 3 live-only skipped`；
   全部构建、静态检查、依赖审计、Compose、ACL、health、HTTP 握手与 runtime smoke 通过
@@ -144,19 +145,18 @@ Issue #54 把 tenant 从请求自述字段改为 `wb_visitors` 中的服务端�
 | A5 lifecycle 原子性 | failed/stopped stage→consume、completed checkpoint-only、pending-first、故障回滚、epoch fencing；最终 completed/direct-failed/active-stop smoke 均通过 | 通过 |
 | A6 归属约束 | schema 单测、真实 PostgreSQL 错配 usage/audit 拒绝 | 通过 |
 | A7 全门禁 | Web 573/31、聚焦 89、integration 31、Search Agent 647/1、Playwright 17/3；构建/审计/Compose/health/diff 全通过 | 通过 |
-| A8 文档交接 | HANDOFF、tasks、045 勘误、生产清单、部署文档与本记录已同步本地验收；commit 32fdbda、PR #57 已回填，仅 merge SHA/close/main 待办 | 本地通过 |
+| A8 文档交接 | HANDOFF、tasks、045 勘误、生产清单、部署文档与本记录已同步；commit 32fdbda、PR #57、merge f46a04c、Issue close/main sync 均已回填 | 通过 |
 
 ## 5. 回滚
 
-### 5.1 合并前
+### 5.1 合并前（历史）
 
-当前 #56 的提交为 `32fdbda`，PR 为 #57，尚无真实 merge SHA。合并前回滚仅丢弃本功能分支的改动，
-不修改 `main@314e28d`。
+#56 的功能提交为 `32fdbda`，PR 为 #57；该分支已合并，因此“直接丢弃分支”的合并前回滚路径不再适用。
 
 ### 5.2 #56 合并后
 
 1. 暂停公网入口，等待 queued/running Run 排空；随后停止 Worker 领取。
-2. `git revert <实际 #56 merge SHA>`；占位符只能在真实 merge 后替换。
+2. `git revert f46a04cd0153d8918499aa6fcff3d8012995e451`。
 3. Web、Worker、Search Agent 作为一个单元重建。不得只回滚 Search Agent，否则断言密钥或协议混合会
    fail-closed，并可能把已领取 Run 推入失败/接管路径。
 4. 保留 `WORKBENCH_TENANT_ASSERTION_SECRET` 和数据库 expand-only 对象；旧版本忽略额外 env 比删除
@@ -246,5 +246,5 @@ checkpoint/outbox 或审计保留要求。
 依据用户此前两次明确要求「验收通过，测试后你自己通过当前验收」，Codex 已将 #56 本地状态设为
 `accepted`。
 
-提交 `32fdbda` 与 PR #57 已真实回填。仍只能在真实发生后回填：实际 merge SHA、Issue close、功能分支
-处理与本地 `main` 同步结果。若 GitHub/CI 暴露新阻断，必须修复并重新执行受影响门禁。
+提交 `32fdbda`、PR #57、merge `f46a04c`、Issue close 与本地 `main` 同步均已真实回填。仓库没有配置
+PR check run 或受保护分支必需检查；合并前 PR 为 `MERGEABLE/CLEAN`，且无评论、评审请求或 check run。

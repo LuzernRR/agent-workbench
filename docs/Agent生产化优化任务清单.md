@@ -147,7 +147,7 @@
 ### P0-05 OIDC、多租户授权、配额与审计
 
 - 状态：`partial`。Issue #54 已验收并由 PR #55 合入 `main@314e28d`；Issue #56 的 post-merge 安全与
-  审计补强已完成本地验收，提交 `32fdbda` 与 PR #57 已创建，正在等待 CI/review/merge/close。企业
+  审计补强已完成验收，PR #57 已 squash 合入 `main@f46a04c`，Issue #56 已关闭。企业
   OIDC/RBAC/ABAC/RLS 子项仍为 `blocked`，因此 P0-05 总项不能标成 completed。
 - #54 已完成：tenant 由服务端从 visitor token 对应的 `wb_visitors` 行回读，请求携带的 tenant
   header/cookie 一律忽略；`wb_tenant_quotas` 覆盖 QPS、并发 Run、Token、费用，
