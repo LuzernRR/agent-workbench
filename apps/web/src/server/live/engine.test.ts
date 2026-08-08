@@ -50,6 +50,7 @@ describe("live API queue boundary", () => {
   it("创建运行时只持久入队并立即返回 runId", async () => {
     await expect(startLiveRun({
       visitorId: "visitor_one",
+      tenantId: "tenant_one",
       threadId: "thread_one",
       message: "查询最新资料",
       modelId: "deepseek-v4-flash",

@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { z } from "zod";
 import { createEmptyThreadState, reduceAgentEvents } from "@/lib/agent-events/reducer";
 import type { AgentEvent, AgentEventType, AgentThreadState, MessageAttachment, ProjectSummary, ThreadSnapshot, ThreadSummary } from "@/lib/agent-events/types";
+import { checkRunAdmission, QuotaExceededError, recordRunUsage } from "@/server/live/quota";
 import { ImageInputError, MAX_IMAGE_INPUTS_PER_RUN, prepareImageInput, type PreparedImageInput } from "@/server/media/image-input";
 import { query, transaction } from "@/server/persistence/database";
 import type { SearchAgentExecutionInput } from "@/server/search-agent/mapper";
@@ -61,6 +62,8 @@ export type LiveRunRecord = {
   projectId: string | null;
   modelId: string;
   agentId?: string;
+  /** Server-derived from the owning visitor row; absent for records read on paths that do not authorize. */
+  tenantId?: string;
 };
 
 export type LiveRunStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "stopped";
@@ -133,6 +136,7 @@ type ClaimRow = {
   checkpoint_session_id: string | null;
   checkpoint_ns: string | null;
   checkpoint_step: string | number | null;
+  tenant_id: string | null;
 };
 
 const iso = (value: Date | string) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -566,6 +570,7 @@ export async function rememberProjectExchange(run: LiveRunRecord, input: Project
 
 export async function prepareLiveRun(input: {
   visitorId: string;
+  tenantId: string;
   threadId: string;
   message: string;
   modelId: string;
@@ -576,6 +581,13 @@ export async function prepareLiveRun(input: {
   memoryRecallItems: number;
   memoryMaxChars: number;
 }): Promise<PreparedRun | null> {
+  // Admission runs before the run transaction. Its decision and the audit row
+  // commit in their own transaction, so a denial is durable even when the run
+  // insert later fails or returns null.
+  const decision = await checkRunAdmission({ tenantId: input.tenantId, visitorId: input.visitorId });
+  if (!decision.allowed) {
+    throw new QuotaExceededError(decision.reasonCode, decision.limit, decision.observed);
+  }
   return transaction(async (client) => {
     const threadResult = await client.query<ThreadRow>(`
       SELECT id, project_id, title, status, updated_at, last_user_message_at
@@ -762,7 +774,8 @@ export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number)
       WHERE run.id = candidate.id
       RETURNING run.id, run.visitor_id, run.thread_id, run.project_id, run.model_id,
         run.agent_id, run.execution_input, run.lease_epoch, run.lease_expires_at, run.worker_attempt,
-        run.checkpoint_id, run.checkpoint_session_id, run.checkpoint_ns, run.checkpoint_step
+        run.checkpoint_id, run.checkpoint_session_id, run.checkpoint_ns, run.checkpoint_step,
+        (SELECT tenant_id FROM wb_visitors WHERE id = run.visitor_id) AS tenant_id
     `, [owner, leaseMs]);
     return result.rows[0] ?? null;
   });
@@ -777,10 +790,21 @@ export async function claimNextLiveRun(ownerInput: string, leaseMsInput: number)
       threadId: row.thread_id,
       projectId: row.project_id,
       modelId: row.model_id,
-      agentId: row.agent_id
+      agentId: row.agent_id,
+      tenantId: row.tenant_id ?? undefined
     },
     lease: { owner, epoch }
   };
+  // Fail closed: a run whose owning visitor no longer resolves to a tenant must
+  // not execute under a fallback tenant, or it would run against another
+  // tenant's scoped memory and quota.
+  if (!row.tenant_id) {
+    await finalizeClaimedLiveRun(identity, "failed", {
+      message: "运行归属租户不可解析，请重新发送",
+      reasonCode: "RUN_TENANT_UNRESOLVED"
+    });
+    return null;
+  }
   const parsed = durableSearchRunInputSchema.safeParse(row.execution_input);
   if (!parsed.success) {
     await finalizeClaimedLiveRun(identity, "failed", {
@@ -905,6 +929,34 @@ async function appendLiveRunFinalization(
   return events;
 }
 
+const usageNumber = (source: Record<string, unknown>, key: string) => {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+};
+
+// Usage is derived from an agent-supplied payload, so a malformed block degrades
+// to a zero-token row rather than aborting the run's terminal transition.
+async function recordRunUsageWithClient(
+  client: PoolClient,
+  run: LiveRunRecord,
+  payload: Record<string, unknown>
+) {
+  // No invented fallback tenant: claimLiveRun already fails closed on an
+  // unresolvable tenant, so skipping here cannot silently misattribute cost.
+  if (!run.tenantId) return;
+  const raw = payload.usage;
+  const usage = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  await recordRunUsage({
+    tenantId: run.tenantId,
+    runId: run.id,
+    visitorId: run.visitorId,
+    inputTokens: usageNumber(usage, "input_tokens"),
+    outputTokens: usageNumber(usage, "output_tokens"),
+    totalTokens: usageNumber(usage, "total_tokens"),
+    costUsd: typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0 ? usage.cost_usd : 0
+  }, client);
+}
+
 export async function finalizeClaimedLiveRun(
   claim: ClaimedRunIdentity,
   status: "completed" | "failed" | "stopped",
@@ -922,6 +974,9 @@ export async function finalizeClaimedLiveRun(
       RETURNING id
     `, [claim.run.id, claim.lease.owner, claim.lease.epoch, status]);
     if (!transitioned.rowCount) return null;
+    // Bill inside the terminal transaction: a committed completion always has
+    // its usage row, and a rolled-back one never leaves a phantom charge.
+    await recordRunUsageWithClient(client, claim.run, payload);
     return appendLiveRunFinalization(client, claim.run, status, payload, completion);
   });
 }

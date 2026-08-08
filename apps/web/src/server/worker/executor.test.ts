@@ -122,6 +122,7 @@ function claim(patch: Partial<ClaimedLiveRun> = {}): ClaimedLiveRun {
     run: {
       id: "run_one",
       visitorId: "visitor_one",
+      tenantId: "tenant_one",
       threadId: "thread_one",
       projectId: "project_one",
       modelId: "deepseek-v4-flash",
