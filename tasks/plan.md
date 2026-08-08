@@ -11,7 +11,7 @@ queries, records each real `SearchAttempt`, and drives later searches from typed
 reranker, broker, or public reasoning surface.
 
 This section is the historical plan for #52, which has already been accepted and
-merged. The current active feature is Issue #56 in the later plan section; do not
+merged. The current active feature is Issue #58 in the later plan section; do not
 use this historical gate to infer current execution state.
 
 ## Architecture Decisions
@@ -398,3 +398,140 @@ usage/audit/outbox, cleared lease, no pending settlement, and stable SSE replay.
 PR #57 had no configured check runs, review requests, or comments and was
 `MERGEABLE/CLEAN`; it was squash-merged as `f46a04c`, Issue #56 was closed, and
 `main` was synchronized. A next feature may start only through a new ready Issue.
+
+---
+
+# Implementation Plan: Issue #58 Query-plan Repair And Deterministic Fallback
+
+## Overview
+
+Issue [#58](https://github.com/LuzernRR/agent-workbench/issues/58) repairs the
+post-#52 path where an explicit research request could be rejected twice by the
+semantic plan gate and end partial with zero tool calls. The branch is
+`codex/issue-58-query-plan-fallback`; GitHub has `Status: ready` and
+`Execution Gate: allowed`. The user authorized implementation and Codex-owned
+acceptance after fresh verification. Status remains `executing` until every
+runtime/release gate, PR, merge, Issue close, and main synchronization step is real.
+
+## Architecture Decisions
+
+- Keep the model as the first query planner. On a stable `PLAN_*`/`QUERY_*`
+  rejection, send one bounded private repair request containing `errorCode`,
+  `fieldPath`, a bounded rejected plan, the current QueryBrief and hard IDs.
+- If the repaired plan is still invalid, build a deterministic minimum plan from
+  the same private QueryBrief. It still passes the existing plan and query gates;
+  fallback is not an alternate trust boundary.
+- Initial fallback chooses at most two distinct facets and authorized channels.
+  Follow-up fallback requires an open EvidenceGap and a real same-facet parent
+  SearchAttempt, except the existing narrow `facet_discovery` rule.
+- Preserve must/exclude/date/location/channel signatures deterministically;
+  account for should constraints through retain/relax metadata; add evidence type,
+  requested field and language cues without generating channel-invalid syntax.
+- X bilingual requirements distribute one `lang:` value per attempt. Xiaohongshu
+  remains a bounded natural-language query. Planner activity never resets the
+  objective no-progress counter because a new query string is not evidence gain.
+- Treat the accepted plan as the authorization boundary for distributed initial
+  `should` constraints. A pending request may use aggregate accounting only when
+  it exactly matches a current/historical initial PlanStep and the complete plan
+  accounts for every `should`; unbound checkpoint requests still fail closed.
+- Keep repair details and QueryBrief-derived fields private. Public `plan.updated`
+  may state only `planSource=runtime`; it never includes rejected plan data.
+
+## Delivery Checklist
+
+- [x] Reproduce the two zero-tool failures and prove that Provider availability
+  was not the cause.
+- [x] Add structured private validation feedback and at most one semantic repair.
+- [x] Add stable initial/follow-up deterministic fallback with strict constraint,
+  channel, budget, lineage and near-duplicate validation.
+- [x] Preserve no-progress semantics and legacy zero-attempt checkpoint recovery.
+- [x] Add offline coverage for Web official/primary sources, X 90-day windows,
+  Xiaohongshu natural queries, no-result relaxation, source conflicts, double
+  invalid planner output, finalization reserve and resumed legacy state.
+- [x] Freeze documentation and run final Search Agent gates: focused `200 passed`,
+  full `665 passed / 1 skipped`, Ruff, compileall and diff check passed.
+- [x] Run Web unit/integration/type/lint/build/Playwright, dependency, Compose,
+  health and diff gates on the final tree.
+- [x] Rebuild Search Agent and prove `forceSearch=false` real Provider execution
+  for the exact generic Agent-framework prompt, with a non-empty toolCallId,
+  SearchAttempt, safe terminal and no planner-rejection zero-tool partial.
+- [x] Complete record 047 with local test and Run evidence.
+- [ ] Commit/push, PR review/checks, squash merge, close #58,
+  synchronize main, and replace placeholders with real IDs/SHAs.
+
+## Acceptance And Rollback
+
+- Acceptance is determined only from Issue #58 A1-A8 and fresh frozen-tree
+  evidence. The user has pre-authorized Codex to make that determination after
+  verification; it is not a waiver of any gate.
+- Zero tool calls are valid only for stable budget/config/provider/user-stop
+  reasons. A planner schema/semantic failure with available channel and budget
+  must either execute the validated model plan or the deterministic fallback.
+- Rollback stops Worker intake first, reverts the eventual #58 merge commit, and
+  rebuilds Search Agent/Worker/Web as one release. The added state counters have
+  stable defaults and may remain in old checkpoints.
+
+---
+
+# Approved Successor Plan: Search Experience Scheme A
+
+## Gate And Scope
+
+The user approved Scheme A on 2026-08-08. It is deliberately a successor to
+#58, not part of #58: the repository permits one active feature at a time. After
+#58 is merged and closed, create one new Issue with ready/allowed labels and the
+DoD below before editing experience-memory code.
+
+## Source-driven Design
+
+- Microsoft Search Task Trails motivates learning from the sequence of queries
+  and clicks/results belonging to one task rather than isolated query strings:
+  https://www.microsoft.com/en-us/research/publication/evaluating-the-effectiveness-of-search-task-trails/
+- MemSearcher and MapAgent support compact task-relevant memory and reusable
+  search trajectories instead of replaying complete conversation history:
+  https://aclanthology.org/2026.findings-acl.736/ and
+  https://arxiv.org/abs/2507.21953
+- Cache-freshness research requires explicit provenance, observation time and
+  invalidation rather than assuming a past result is still true:
+  https://conferences.sigcomm.org/hotnets/2024/papers/hotnets24-21.pdf
+- LangGraph persistence provides a checkpoint/store integration point, but the
+  domain contract remains project-owned and versioned:
+  https://reference.langchain.com/python/langgraph/overview
+- Similar-session recommendation supports coarse retrieval by task/session
+  resemblance before fine-grained ranking:
+  https://ojs.aaai.org/index.php/AAAI/article/view/25607
+
+## Proposed Architecture
+
+1. Persist a private, tenant/project-scoped `SearchExperience` only from a
+   verified terminal task. Record QueryBrief/constraint fingerprints, facets,
+   channels, rewrite sequence, SearchAttempt gains, EvidenceGap closure, source
+   provenance/hash/capturedAt, freshness class, cost/latency and graph/prompt/tool
+   versions. Do not store raw Provider bodies or public reasoning.
+2. Recall in coarse-to-fine order: exact hard-constraint signature; compatible
+   facet/channel/source tier; semantic task similarity; ACL/provenance/freshness;
+   historical verified reward. A stale or version-incompatible item is excluded
+   or down-ranked with a stable reason.
+3. Inject only compact strategy/query cues into Planner. Historical Evidence is
+   never current Evidence: every recalled path must execute a fresh search and
+   pass the existing QueryBrief, lineage, Evidence and citation gates.
+4. Add offline replay first. Compare baseline versus experience-assisted paths on
+   tool calls, time-to-first-Evidence, constraint retention, duplicate rate, gap
+   closure, answer support, cost and latency.
+5. Log contextual-bandit features and observed rewards, but do not make online
+   exploration decisions in phase one. Enable adaptive selection only after a
+   sufficiently large, bias-audited label set and an independent Issue/ADR.
+
+## Successor DoD
+
+- Exact tenant/project/ACL isolation; failed, stopped, unverified or sensitive
+  runs cannot enter the experience store.
+- Idempotent write/replay, bounded retention, provenance/hash/version/freshness
+  invalidation and user/tenant deletion propagation are tested.
+- Retrieval ranking is deterministic for equal inputs and exposes private stable
+  selection/rejection reason codes without leaking experience data publicly.
+- An offline golden set proves no regression in hard constraints or citations and
+  a measurable gain in at least two of: fewer duplicate calls, faster first
+  Evidence, higher gap closure, lower cost, or higher verified task success.
+- Cold start, no-match and stale-only states behave exactly like the #58 baseline;
+  disabling the feature is a one-flag rollback with no data loss or split truth.

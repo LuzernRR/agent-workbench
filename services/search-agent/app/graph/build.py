@@ -156,7 +156,10 @@ def _evented(name: str, function: Node) -> Node:
                 revision=plan["revision"],
                 iteration=plan["iteration"],
                 steps=public_plan_steps(plan),
-                planSource="model" if name == "plan_research" else "runtime",
+                planSource=(
+                    patch.get("plan_source")
+                    or ("model" if name == "plan_research" else "runtime")
+                ),
             ))
         plan_error_code = str(patch.get("plan_error_code") or "")
         if (

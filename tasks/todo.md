@@ -63,3 +63,28 @@
 - [x] Commit `32fdbda`, push the feature branch, and open actual PR #57
 - [x] Confirm no configured CI/review blockers, merge PR #57 as `f46a04c`, close
       Issue #56, sync `main`, and record the real merge SHA
+
+## Issue #58 · 搜索计划错误修复与确定性 fallback（2026-08-08）
+
+- [x] Reproduce `PLAN_INITIAL_FACET_DUPLICATE` →
+      `QUERY_FOLLOW_UP_LINEAGE_REQUIRED` zero-tool failure from real Runs
+- [x] Add one bounded, structured, private semantic repair with stable error code
+      and field path
+- [x] Add validated deterministic initial/follow-up fallback with constraint,
+      channel, facet, lineage, budget and near-duplicate gates
+- [x] Preserve objective no-progress counting and recover zero-attempt legacy
+      checkpoints without fake parent lineage
+- [x] Add Web official/primary, X 90-day, Xiaohongshu, no-result, conflict,
+      double-invalid, budget and resume offline cases
+- [x] Final Search Agent gate: focused `200 passed`, full `665 passed / 1 skipped`,
+      Ruff, compileall and diff check passed
+- [x] Record the user-approved Search Experience Scheme A as the gated successor;
+      do not open or implement it before #58 closes
+- [x] Run final Web full/integration/type/lint/build/Playwright, dependency,
+      Compose, health and diff gates
+- [x] Rebuild Search Agent and complete the `forceSearch=false` real Provider smoke
+- [x] Finish Chinese record 047 with final Run/test evidence
+- [ ] Commit and push, create PR, resolve checks/comments, squash merge, close #58,
+      sync main, and record real PR/merge IDs
+- [ ] Only after #58 closure: create the Scheme A ready/allowed Issue and continue
+      its implementation under the one-active-Issue gate

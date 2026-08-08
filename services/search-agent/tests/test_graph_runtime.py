@@ -233,6 +233,115 @@ def test_pending_search_batch_fails_closed_on_duplicate_identity(collision: str)
     assert nodes.build_research_work_items(state) == []
 
 
+def test_initial_plan_with_distributed_should_constraints_compiles_all_branches() -> None:
+    """首轮计划整体覆盖 should 后，每个已批准步骤不得被单请求复核误杀。"""
+
+    brief = QueryBrief.model_validate({
+        "version": 1,
+        "objective": "比较 Agent 框架的架构与人工审批能力",
+        "complexity": "multi_faceted",
+        "entities": ["Agent"],
+        "must": [],
+        "should": [
+            {
+                "constraint_id": "architecture",
+                "text": "架构",
+                "terms": ["architecture"],
+            },
+            {
+                "constraint_id": "approval",
+                "text": "人工审批",
+                "terms": ["approval"],
+            },
+        ],
+        "exclude": [],
+        "time_range": None,
+        "locations": [],
+        "languages": ["en"],
+        "required_channels": ["web"],
+        "requested_fields": ["architecture", "approval"],
+        "evidence_facets": [
+            {
+                "facet_id": "architecture",
+                "description": "官方架构设计",
+                "evidence_type": "official",
+                "required_fields": ["architecture"],
+            },
+            {
+                "facet_id": "approval",
+                "description": "官方人工审批能力",
+                "evidence_type": "official",
+                "required_fields": ["approval"],
+            },
+        ],
+    })
+    state = initial_state("比较 Agent 框架")
+    state["run_id"] = "run_distributed_should"
+    state["intent"] = {"channels": ["web"]}
+    state["query_brief"] = brief.model_dump(mode="json")
+    state["round"] = 1
+    plan = nodes.build_plan_snapshot(
+        run_id=state["run_id"],
+        iteration=1,
+        revision=1,
+        created_at="2026-08-08T00:00:00Z",
+        planned_steps=[
+            {
+                "local_id": "architecture",
+                "facet_id": "architecture",
+                "facet": "官方架构设计",
+                "objective": "核对官方架构设计",
+                "query_terms": ["Agent", "architecture"],
+                "strategy": "initial_precise",
+                "query": "Agent architecture official documentation",
+                "channel": "web",
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "retained_constraint_ids": ["architecture"],
+                "relaxed_should_ids": [],
+                "depends_on": [],
+                "priority": 100,
+                "evidence_needed": 2,
+                "can_parallelize": True,
+            },
+            {
+                "local_id": "approval",
+                "facet_id": "approval",
+                "facet": "官方人工审批能力",
+                "objective": "核对官方人工审批能力",
+                "query_terms": ["Agent", "approval"],
+                "strategy": "initial_precise",
+                "query": "Agent approval official documentation",
+                "channel": "web",
+                "gap_id": None,
+                "parent_attempt_id": None,
+                "retained_constraint_ids": ["approval"],
+                "relaxed_should_ids": [],
+                "depends_on": [],
+                "priority": 100,
+                "evidence_needed": 2,
+                "can_parallelize": True,
+            },
+        ],
+        allowed_channels={"web"},
+        max_steps=2,
+        max_evidence_per_step=3,
+        max_total_evidence=6,
+        query_brief=brief,
+        prior_attempts=[],
+        open_gaps=[],
+        initial=True,
+    )
+    running_plan, selected = nodes.start_ready_steps(plan, revision=2)
+    state["plan"] = running_plan
+    state["plan_revision"] = running_plan["revision"]
+    state["pending_plan_step_ids"] = [item["step_id"] for item in selected]
+    state["pending_searches"] = nodes.requests_for_steps(selected)
+
+    assert len(selected) == 2
+    assert len(nodes.build_research_work_items(state)) == 2
+
+
 def test_malformed_query_strategy_checkpoint_is_rejected_before_tool_compilation() -> None:
     query_brief = _checkpoint_query_brief()
     state = initial_state("Product API")
@@ -742,10 +851,16 @@ async def test_zero_evidence_platform_round_keeps_web_fallback_partial(
         no_progress_limit=3,
     )
 
-    assert scenario.tool_execution_searches == [
+    assert scenario.tool_execution_searches[:2] == [
         {"query": "xhs query", "channel": "xiaohongshu"},
         {"query": "official web query", "channel": "web"},
     ]
+    assert all(
+        item["channel"] in {"xiaohongshu", "web"}
+        for item in scenario.tool_execution_searches
+    )
+    assert len(scenario.tool_execution_searches) <= 3
+    assert output["plan_fallback_count"] == 1
     assert output["response_status"] == "partial"
     assert output["verification_passed"] is False
     assert output["stop_reason"] == "MAX_ITERATIONS"
@@ -885,6 +1000,7 @@ class Scenario:
     writer_stream_chunk_chars: int = 7
     evidence_by_query: dict[str, bool] = field(default_factory=lambda: {"query one": True})
     result_count_by_query: dict[str, int] = field(default_factory=dict)
+    default_result_count: int = 1
     limitations_by_query: dict[str, str] = field(default_factory=dict)
     provider_by_query: dict[str, str] = field(default_factory=dict)
     channels_by_query: dict[str, str] = field(default_factory=dict)
@@ -892,6 +1008,7 @@ class Scenario:
     evidence_needed_by_query: dict[str, int] = field(default_factory=dict)
     evidence_needed_by_plan: list[int] = field(default_factory=list)
     retained_constraint_ids_by_plan: list[list[str]] = field(default_factory=list)
+    facet_ids_by_plan: list[list[str]] = field(default_factory=list)
     structured_calls: dict[str, int] = field(default_factory=dict)
     structured_attempts: dict[str, int] = field(default_factory=dict)
     # 网络重试与格式修复分别记账：attempts 是真实 Provider 尝试数，
@@ -1115,7 +1232,13 @@ class Scenario:
                         "facet_id": (
                             self._latest_private_ref(messages, "facet_id")
                             if is_follow_up
-                            else facet_ids[position]
+                            else (
+                                self.facet_ids_by_plan[
+                                    min(index, len(self.facet_ids_by_plan) - 1)
+                                ][position]
+                                if self.facet_ids_by_plan
+                                else facet_ids[position]
+                            )
                         ),
                         "facet": f"证据面 {position + 1}",
                         "objective": f"检索 {query}",
@@ -1341,7 +1464,10 @@ class Scenario:
             self.tool_completion_order.append(query)
             self.tool_finished_at_by_query[query] = time.perf_counter()
         has_evidence = self.evidence_by_query.get(query, False)
-        result_count = self.result_count_by_query.get(query, 1)
+        result_count = self.result_count_by_query.get(
+            query,
+            self.default_result_count,
+        )
         limitation = self.limitations_by_query.get(query)
         provider = self.provider_by_query.get(query, "deterministic")
         degraded_match = re.search(r"fallback\[([^]]+)]", provider)
@@ -2157,12 +2283,19 @@ async def test_unmet_dependency_is_blocked_then_reflected_without_false_deadlock
 
     output, events = await run_scenario(monkeypatch, scenario)
 
-    assert scenario.tool_executions == ["root without body"]
-    assert [step["status"] for step in output["plan"]["steps"]] == [
+    assert scenario.tool_executions[0] == "root without body"
+    assert len(scenario.tool_executions) == 2
+    assert scenario.tool_executions[1] != "dependent follow-up"
+    assert output["plan_fallback_count"] == 1
+    blocked_plan = next(
+        plan for plan in output["plan_history"]
+        if len(plan["steps"]) == 2
+    )
+    assert [step["status"] for step in blocked_plan["steps"]] == [
         "blocked",
         "blocked",
     ]
-    assert output["plan"]["steps"][1]["reason_code"] == "PLAN_DEPENDENCY_BLOCKED"
+    assert blocked_plan["steps"][1]["reason_code"] == "PLAN_DEPENDENCY_BLOCKED"
     assert output["stop_reason"] != "PLAN_NO_RUNNABLE_STEP"
     assert any(
         event["type"] == "node.started" and event["node"] == "reflect"
@@ -2402,12 +2535,20 @@ async def test_planner_cannot_escape_supervisor_channel_scope(
         question="只在小红书搜索测试内容",
     )
 
-    assert output["queries"] == []
-    assert scenario.tool_executions == []
-    assert not any(event["type"] == "tool.started" for event in events)
-    rejected = [event for event in events if event["type"] == "plan.rejected"]
-    assert rejected
-    assert {event["reasonCode"] for event in rejected} == {"PLAN_CHANNEL_NOT_ALLOWED"}
+    assert output["queries"]
+    assert scenario.tool_executions
+    assert all(
+        item["channel"] == "xiaohongshu"
+        for item in scenario.tool_execution_searches
+    )
+    assert any(event["type"] == "tool.started" for event in events)
+    assert output["plan_fallback_count"] >= 1
+    assert "未授权的网页查询" not in scenario.tool_executions
+    assert output["plan_error_code"] is None
+    assert any(
+        event["type"] == "plan.updated" and event["planSource"] == "runtime"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -2735,6 +2876,80 @@ async def test_planner_repairs_query_constraint_metadata_before_execution(
 
 
 @pytest.mark.asyncio
+async def test_double_invalid_plan_uses_private_deterministic_fallback_and_searches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[
+            ["Agent frameworks official", "Agent frameworks comparison"],
+            ["Agent frameworks official retry", "Agent frameworks comparison retry"],
+        ],
+        facet_ids_by_plan=[
+            ["facet_1", "facet_1"],
+            ["facet_1", "facet_1"],
+        ],
+        reflects=[{
+            "sufficient": False,
+            "missing": "仍需可核验来源",
+            "extra_searches": [],
+            "source_presentations": [],
+        }],
+        evidence_by_query={},
+        writer_answer="本次已执行搜索，但没有取得足够的可核验正文。",
+    )
+
+    output, events = await run_scenario(monkeypatch, scenario, max_rounds=1)
+
+    assert scenario.structured_calls["planner"] == 2
+    repair_input = str(scenario.structured_messages["planner"][1][-1].content)
+    assert '"errorCode": "PLAN_INITIAL_FACET_DUPLICATE"' in repair_input
+    assert '"fieldPath": "steps[*].facet_id"' in repair_input
+    assert '"rejectedPlan"' in repair_input
+    assert output["tool_calls"] >= 1
+    assert scenario.tool_executions
+    assert output["plan_fallback_count"] == 1
+    assert any(
+        event["type"] == "plan.updated" and event["planSource"] == "runtime"
+        for event in events
+    )
+    public_events = json.dumps(events, ensure_ascii=False)
+    assert "rejectedPlan" not in public_events
+    assert "fieldPath" not in public_events
+
+
+@pytest.mark.asyncio
+async def test_invalid_plan_without_finalization_reserve_stops_before_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = Scenario(
+        plans=[["Agent frameworks official", "Agent frameworks comparison"]],
+        facet_ids_by_plan=[["facet_1", "facet_1"]],
+        reflects=[{
+            "sufficient": False,
+            "missing": "仍需可核验来源",
+            "extra_searches": [],
+            "source_presentations": [],
+        }],
+        evidence_by_query={},
+        writer_answer="本次已执行搜索，但没有取得足够的可核验正文。",
+    )
+
+    output, events = await run_scenario(
+        monkeypatch,
+        scenario,
+        max_model_calls=4,
+        max_rounds=1,
+    )
+
+    assert scenario.structured_calls["planner"] == 1
+    assert output["tool_calls"] == 0
+    assert output["plan_repair_count"] == 0
+    assert output["plan_fallback_count"] == 1
+    assert output["stop_reason"] == "MODEL_CALL_LIMIT"
+    assert not any(event["type"] == "tool.started" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_model_limit_stops_with_partial_answer_without_overshoot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2869,6 +3084,7 @@ async def test_no_progress_has_stable_partial_stop_reason(
     scenario = Scenario(
         reflects=[{"sufficient": False, "missing": "unsupported", "extra_searches": []}],
         result_count_by_query={"query one": 0},
+        default_result_count=0,
         evidence_by_query={"query one": False},
     )
     output, _events = await run_scenario(monkeypatch, scenario, max_rounds=3)
