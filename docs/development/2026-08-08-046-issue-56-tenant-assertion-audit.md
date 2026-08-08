@@ -6,7 +6,8 @@
   已由 17:04 后最终树门禁、最终镜像重建和三类真实 Run 证据替换
 - 分支：`codex/issue-56-tenant-assertion-audit`
 - 父项：Issue #54 已关闭，PR #55 已合入 `main@314e28da32c37ad97596090240e8c09375e77fec`
-- PR / merge SHA：**待真实创建、合并后最终回填；不得预填**
+- 提交 / PR：`32fdbda` / [GitHub PR #57](https://github.com/LuzernRR/agent-workbench/pull/57)
+- merge SHA：**待真实合并后最终回填；不得预填**
 - 最终本地证据：Web `573 passed / 31 skipped`；关键聚焦 `89 passed`；专用 PostgreSQL integration
   `31 passed`；Search Agent `647 passed / 1 skipped`；Playwright `17 passed / 3 live-only skipped`；
   全部构建、静态检查、依赖审计、Compose、ACL、health、HTTP 握手与 runtime smoke 通过
@@ -143,13 +144,14 @@ Issue #54 把 tenant 从请求自述字段改为 `wb_visitors` 中的服务端�
 | A5 lifecycle 原子性 | failed/stopped stage→consume、completed checkpoint-only、pending-first、故障回滚、epoch fencing；最终 completed/direct-failed/active-stop smoke 均通过 | 通过 |
 | A6 归属约束 | schema 单测、真实 PostgreSQL 错配 usage/audit 拒绝 | 通过 |
 | A7 全门禁 | Web 573/31、聚焦 89、integration 31、Search Agent 647/1、Playwright 17/3；构建/审计/Compose/health/diff 全通过 | 通过 |
-| A8 文档交接 | HANDOFF、tasks、045 勘误、生产清单、部署文档与本记录已同步本地验收；仅真实 PR/merge SHA 待 GitHub 动作后回填 | 本地通过 |
+| A8 文档交接 | HANDOFF、tasks、045 勘误、生产清单、部署文档与本记录已同步本地验收；commit 32fdbda、PR #57 已回填，仅 merge SHA/close/main 待办 | 本地通过 |
 
 ## 5. 回滚
 
 ### 5.1 合并前
 
-当前 #56 尚未记录真实 PR/merge SHA。合并前回滚仅丢弃本功能分支的改动，不修改 `main@314e28d`。
+当前 #56 的提交为 `32fdbda`，PR 为 #57，尚无真实 merge SHA。合并前回滚仅丢弃本功能分支的改动，
+不修改 `main@314e28d`。
 
 ### 5.2 #56 合并后
 
@@ -244,5 +246,5 @@ checkpoint/outbox 或审计保留要求。
 依据用户此前两次明确要求「验收通过，测试后你自己通过当前验收」，Codex 已将 #56 本地状态设为
 `accepted`。
 
-仍只能在真实发生后回填：#56 commit、PR URL/编号、实际 merge SHA、Issue close、功能分支处理与本地
-`main` 同步结果。若 GitHub/CI 暴露新阻断，必须修复并重新执行受影响门禁。
+提交 `32fdbda` 与 PR #57 已真实回填。仍只能在真实发生后回填：实际 merge SHA、Issue close、功能分支
+处理与本地 `main` 同步结果。若 GitHub/CI 暴露新阻断，必须修复并重新执行受影响门禁。

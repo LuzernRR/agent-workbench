@@ -5,8 +5,9 @@
 - 本轮唯一活动功能为 [#56](https://github.com/LuzernRR/agent-workbench/issues/56)，分支
   `codex/issue-56-tenant-assertion-audit`，Issue 门禁仍为 `Status: ready`、`Execution Gate: allowed`；用户已
   预授权 Codex 在测试后自行验收。此前所有阶段快照已由 17:04 后的最终树门禁、最终镜像重建和真实运行
-  证据替换；当前本地状态为 `accepted`，GitHub commit/PR/merge/Issue close 仍待真实执行。尚未为 #56
-  杜撰 PR 或 merge SHA，必须在真实创建/合并后回填。详细记录见
+  证据替换；当前本地状态为 `accepted`。提交 `32fdbda` 已推送，真实 PR
+  [#57](https://github.com/LuzernRR/agent-workbench/pull/57) 已创建；CI/review、merge SHA、Issue close 与
+  `main` 同步仍待真实执行。详细记录见
   [046](docs/development/2026-08-08-046-issue-56-tenant-assertion-audit.md)。
 - **#54 权威历史已确认**：Issue [#54](https://github.com/LuzernRR/agent-workbench/issues/54) 已完成，PR
   [#55](https://github.com/LuzernRR/agent-workbench/pull/55) 于 2026-08-08 合入 `main`，merge commit 为

@@ -60,5 +60,6 @@
       checkpoint authority, settlement status constraints, and dedicated integration DB behavior
 - [x] Replace stale 046 baselines with final frozen-tree evidence and the user's
       pre-authorized Codex acceptance; keep only real GitHub metadata pending
-- [ ] Commit/push, open the actual #56 PR, obtain acceptance, merge, close Issue #56,
-      sync `main`, and record the real PR/merge SHA
+- [x] Commit `32fdbda`, push the feature branch, and open actual PR #57
+- [ ] Wait for CI/review, merge PR #57, close Issue #56, sync `main`, and record the
+      real merge SHA

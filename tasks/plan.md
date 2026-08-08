@@ -298,8 +298,8 @@ OIDC, RBAC, ABAC, RLS, exact serialized quotas, or a new public memory API.
 The GitHub gate remains `Status: ready` and `Execution Gate: allowed`. The user
 pre-authorized Codex to accept after fresh verification. The final tree has now
 passed the local acceptance gates and rebuilt-image runtime smokes, so local status
-is `accepted`; commit/PR/merge data remains pending until the corresponding GitHub
-actions actually occur.
+is `accepted`; commit `32fdbda` and PR #57 now exist, while CI/review, merge SHA,
+Issue close, and `main` synchronization remain pending until they actually occur.
 
 ## Acceptance Slices
 
