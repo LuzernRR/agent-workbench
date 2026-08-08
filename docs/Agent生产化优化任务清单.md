@@ -150,7 +150,8 @@
   单请求复核误杀的问题。Search Agent 最终冻结树为聚焦 `200 passed`、全量 `665 passed / 1 skipped`；Web
   `573/31`、专用 PostgreSQL integration `31`、Playwright `17/3`、构建/审计/Compose/health 均通过。真实
   `forceSearch=false` Run `run_f1b24daa53f34ba2af4a7fe2752fa6d4` 完成 4 次工具调用、4 条 SearchAttempt
-  与有来源 partial；PR/merge/close 尚未完成，因此仍不能标为 accepted。
+  与有来源 partial；PR [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已创建，检查/merge/close
+  尚未完成，因此仍不能标为 accepted。
 - 已批准下一项“搜索经验方案 A”：#58 关闭后建立 tenant/project 私有 `SearchExperience` 账本，保存已验证
   task trail 的约束签名、facet/channel/strategy、SearchAttempt 增益、gap 闭合、来源 provenance/hash/
   freshness、成本与版本；召回按硬签名→分面/渠道→语义相似→时效/来源→历史收益粗到细排序。经验仅提示

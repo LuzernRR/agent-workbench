@@ -175,6 +175,6 @@ Web 与发布门禁：
 - Web/Playwright/审计/Compose/health：通过，数字见上文
 - 真实 `forceSearch=false` Run：`run_f1b24daa53f34ba2af4a7fe2752fa6d4`，4 个 toolCallId/attempt，唯一 completed
 - commit：待执行
-- PR：待创建
+- PR：[#59](https://github.com/LuzernRR/agent-workbench/pull/59)，检查中
 - merge SHA：待合并
 - Issue #58 close/main sync：待执行

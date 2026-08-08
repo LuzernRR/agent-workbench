@@ -4,8 +4,9 @@
 
 - 当前唯一活动功能为 [#58](https://github.com/LuzernRR/agent-workbench/issues/58)“搜索计划校验失败后的关键词
   修复与确定性 fallback”，分支 `codex/issue-58-query-plan-fallback`；GitHub 状态为 `Status: ready`、
-  `Execution Gate: allowed`。用户已确认方案并授权 Codex 在完整测试后自主验收；代码、全量门禁和真实 Provider
-  smoke 已通过，但 PR、合并与 Issue 关闭尚未完成，因此状态仍是 `executing`，不能提前写成 accepted。
+  `Execution Gate: allowed`，PR [#59](https://github.com/LuzernRR/agent-workbench/pull/59) 已创建。用户已确认
+  方案并授权 Codex 在完整测试后自主验收；代码、全量门禁和真实 Provider smoke 已通过，但 PR 检查/合并与
+  Issue 关闭尚未完成，因此状态仍是 `executing`，不能提前写成 accepted。
 - **真实根因**：#56 最终 smoke 中 `run_278120d58722490b883333c9b5f8ce0d` 与
   `run_d0d13d42b61e4c35824ae51689a697da` 先后触发 `PLAN_INITIAL_FACET_DUPLICATE` 和
   `QUERY_FOLLOW_UP_LINEAGE_REQUIRED`；Provider 没有被调用，最终 `toolCalls=0` partial。#58 将 planner
@@ -37,8 +38,8 @@
   freshness、版本与成本；召回顺序为硬约束签名 → facet/channel → 语义相似 → 时效/来源校验 → 历史收益。
   经验只能作为新 query/路径提示，必须重新搜索和核验证据，不能把旧结果直接当当前 Evidence。第一阶段只记录
   contextual-bandit 特征并做离线回放，不启用在线探索；#58 关闭前不创建第二个活动 Issue。
-- **#58 剩余闭环**：提交并 push 当前冻结树，创建 PR、等待并处理真实检查/评论，合并、关闭 Issue、同步 main
-  并回填真实 PR/merge SHA；随后才从已批准方案 A 创建唯一下一 Issue。
+- **#58 剩余闭环**：等待并处理 PR #59 的真实检查/评论，合并、关闭 Issue、同步 main 并回填真实 merge SHA；
+  随后才从已批准方案 A 创建唯一下一 Issue。
 
 ## 上一轮结论（2026-08-08，Issue #56 已验收、合并并关闭）
 
