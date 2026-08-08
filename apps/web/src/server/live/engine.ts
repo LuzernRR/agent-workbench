@@ -5,6 +5,7 @@ import { finalizeLiveRun, liveRun, prepareLiveRun, type LiveRunStatus } from "./
 
 export async function startLiveRun(input: {
   visitorId: string;
+  tenantId: string;
   threadId: string;
   message: string;
   modelId: string;

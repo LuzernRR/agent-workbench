@@ -244,3 +244,37 @@ acceptance is recorded only from fresh evidence.
 
 - None. Issue #52 defines the scope, non-goals, architecture, acceptance criteria,
   and execution gate; the user explicitly authorized autonomous fresh acceptance.
+
+---
+
+# Implementation Plan: Issue #54 Tenant Isolation, Quotas, And Audit
+
+## Overview
+
+Issue [#54](https://github.com/LuzernRR/agent-workbench/issues/54) is the minimal
+rollbackable slice of P0-05. It moves tenant from a caller-asserted field to a
+server-derived, signed identity, adds per-tenant quotas, and records authorization
+outcomes. Real OIDC/RBAC/RLS stay out of scope and remain blocked.
+
+## Architecture Decisions
+
+- Tenant is read back from the `wb_visitors` row, never from a request header or
+  cookie. It is seeded only when the session row is first created, so changing
+  `WORKBENCH_TENANT` cannot migrate existing sessions into another tenant.
+- The Search Agent previously trusted the request-body `tenantId` behind a shared
+  token. It now verifies an HMAC assertion over `tenant:run:visitor`. Binding all
+  three prevents replaying a valid assertion onto another run of the same tenant.
+- Quotas and the audit ledger live in PostgreSQL. No Redis: the authoritative run
+  state is already there, and a second store would create a split source of truth.
+- The audit table requires a non-null tenant, so paths where tenant cannot be
+  resolved deliberately record the run's terminal `reasonCode` instead.
+
+## Status
+
+All implementation and verification tasks are complete; see `tasks/todo.md`.
+Remaining: user acceptance, then PR, merge, Issue close, and main sync.
+
+## Open Questions
+
+- None blocking. OIDC provider choice is deferred to the follow-up P0-05 Issue and
+  requires user input (issuer, client credentials, callback domain).

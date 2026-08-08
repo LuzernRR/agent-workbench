@@ -19,6 +19,16 @@ import {
   type ClaimedLiveRun
 } from "@/server/live/store";
 
+/**
+ * The claim resolves the tenant from the owning visitor row and fails the run
+ * when it cannot, so a claimed run always carries one. Throwing here keeps that
+ * invariant enforced instead of silently substituting a fallback tenant.
+ */
+function runTenantId(run: ClaimedLiveRun["run"]): string {
+  if (!run.tenantId) throw new Error("已领取运行缺少服务端派生租户");
+  return run.tenantId;
+}
+
 export const SEARCH_AGENT_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 export const MAX_CHECKPOINT_SOURCE_EVENTS = 10_000;
 export const MAX_CHECKPOINT_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -300,7 +310,7 @@ async function executeSearchRun(
       const checkpointSessionId = authority.checkpoint?.sessionId ?? liveId("checkpoint_session");
       for await (const sourceEvent of streamSearchAgentRun({
         runId: run.id,
-        tenantId: process.env.WORKBENCH_TENANT || "local",
+        tenantId: runTenantId(run),
         visitorId: run.visitorId,
         projectId: run.projectId,
         threadId: run.threadId,

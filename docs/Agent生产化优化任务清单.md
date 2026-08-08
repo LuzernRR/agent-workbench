@@ -146,7 +146,14 @@
 
 ### P0-05 OIDC、多租户授权、配额与审计
 
-- 状态：`blocked`。
+- 状态：`partial`（Issue #54 完成租户隔离、配额与审计三项；OIDC 接入仍 `blocked`）。
+- 本轮已完成：tenant 由服务端从访客令牌派生，请求携带的 tenant 头/cookie 一律忽略；Search Agent 侧
+  由信任请求体 `tenantId` 改为校验 HMAC 签名断言（绑定 tenant:run:visitor，防同租户重放）；
+  `wb_quotas` 覆盖 QPS/并发 Run/Token/费用四维并写 `wb_audit_events`；跨租户读/写/删除在真实
+  PostgreSQL 上验证 fail-closed。记录见
+  [045](development/2026-08-08-045-issue-54-tenant-isolation.md)。
+- 仍未做：企业 OIDC/OAuth2 登录与真实用户身份、RBAC 角色模型、PostgreSQL RLS 纵深防御、
+  过期 token 判定，以及工具/RAG/记忆/下载的逐次重校验。这些需要独立 Issue。
 - 目标技术：Web 接入企业 OIDC/OAuth2，BFF 使用服务身份调用 Agent；RBAC 管角色，ABAC 按 tenant、
   resource、classification、environment 和时间做服务端授权；PostgreSQL 可结合 RLS 作为纵深防御。
 - 当前问题：内部 token 和 `WORKBENCH_TENANT` 不能代表真实用户身份，调用方可传 tenant 字段不等于授权。

@@ -3,6 +3,7 @@ import type { ImageInputReference } from "@/server/media/image-input";
 import { z } from "zod";
 import { loadSearchAgentServiceConfig } from "./config";
 import { decodeSearchAgentNdjson, SearchAgentEventProtocolError, type SearchAgentEvent } from "./events";
+import { TENANT_ASSERTION_HEADER, signTenantAssertion } from "./tenant-assertion";
 
 export type SearchAgentRunRequest = {
   runId: string;
@@ -85,10 +86,14 @@ export class SearchAgentVerificationError extends Error {
   }
 }
 
-function internalHeaders(accept = "application/x-ndjson") {
+function internalHeaders(accept = "application/x-ndjson", assertFor?: { tenantId: string; runId: string; visitorId: string }) {
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", accept });
   const token = process.env.WORKBENCH_INTERNAL_TOKEN;
   if (token) headers.set("X-Workbench-Token", token);
+  if (assertFor) {
+    const assertion = signTenantAssertion(assertFor);
+    if (assertion) headers.set(TENANT_ASSERTION_HEADER, assertion);
+  }
   return headers;
 }
 
@@ -170,7 +175,7 @@ export async function* streamSearchAgentRun(input: SearchAgentRunRequest, signal
   try {
     response = await fetch(`${config.origin}/v1/runs/stream`, {
       method: "POST",
-      headers: internalHeaders(),
+      headers: internalHeaders("application/x-ndjson", { tenantId: input.tenantId, runId: input.runId, visitorId: input.visitorId }),
       body: JSON.stringify({ version: 1, ...input, depth: input.depth || "balanced", resume: Boolean(input.resume) }),
       cache: "no-store",
       signal: combinedSignal

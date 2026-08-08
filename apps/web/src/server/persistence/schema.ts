@@ -443,4 +443,63 @@ CREATE TABLE IF NOT EXISTS wb_attachments (
 
 CREATE INDEX IF NOT EXISTS wb_attachments_thread_idx
   ON wb_attachments(visitor_id, thread_id, created_at);
+
+-- Tenancy is a server-derived property of the authenticated principal, never a
+-- caller-supplied field. Storing it on the visitor row makes the database the
+-- single source of truth: a request can only ever act inside the tenant that
+-- its own session resolves to.
+ALTER TABLE wb_visitors
+  ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT 'local';
+
+ALTER TABLE wb_visitors
+  DROP CONSTRAINT IF EXISTS wb_visitors_tenant_id_valid;
+ALTER TABLE wb_visitors
+  ADD CONSTRAINT wb_visitors_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$');
+
+CREATE INDEX IF NOT EXISTS wb_visitors_tenant_idx
+  ON wb_visitors(tenant_id);
+
+-- Per-tenant limits. Absent rows mean "use the configured default", so adding
+-- the table cannot retroactively deny an existing tenant.
+CREATE TABLE IF NOT EXISTS wb_tenant_quotas (
+  tenant_id text PRIMARY KEY CONSTRAINT wb_tenant_quotas_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+  max_requests_per_minute integer NOT NULL CONSTRAINT wb_tenant_quotas_rpm_positive CHECK (max_requests_per_minute > 0),
+  max_concurrent_runs integer NOT NULL CONSTRAINT wb_tenant_quotas_concurrency_positive CHECK (max_concurrent_runs > 0),
+  max_tokens_per_day bigint NOT NULL CONSTRAINT wb_tenant_quotas_tokens_positive CHECK (max_tokens_per_day > 0),
+  max_cost_usd_per_day numeric(12, 6) NOT NULL CONSTRAINT wb_tenant_quotas_cost_positive CHECK (max_cost_usd_per_day > 0),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Usage ledger for the token and cost dimensions. run.completed already carries
+-- schema-validated usage; this table is where it becomes durable and billable.
+CREATE TABLE IF NOT EXISTS wb_tenant_usage (
+  run_id text PRIMARY KEY,
+  tenant_id text NOT NULL CONSTRAINT wb_tenant_usage_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+  visitor_id uuid NOT NULL REFERENCES wb_visitors(id) ON DELETE CASCADE,
+  input_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_input_nonnegative CHECK (input_tokens >= 0),
+  output_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_output_nonnegative CHECK (output_tokens >= 0),
+  total_tokens bigint NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_total_nonnegative CHECK (total_tokens >= 0),
+  cost_usd numeric(12, 6) NOT NULL DEFAULT 0 CONSTRAINT wb_tenant_usage_cost_nonnegative CHECK (cost_usd >= 0),
+  recorded_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS wb_tenant_usage_window_idx
+  ON wb_tenant_usage(tenant_id, recorded_at);
+
+-- Append-only audit trail. Rows carry stable codes and scope identifiers only:
+-- no question text, prompt, provider body, token or cookie ever lands here.
+CREATE TABLE IF NOT EXISTS wb_audit_events (
+  id bigserial PRIMARY KEY,
+  tenant_id text NOT NULL CONSTRAINT wb_audit_events_tenant_id_valid CHECK (tenant_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+  visitor_id uuid REFERENCES wb_visitors(id) ON DELETE SET NULL,
+  action text NOT NULL CONSTRAINT wb_audit_events_action_valid CHECK (action ~ '^[a-z][a-z0-9_.]{0,63}$'),
+  outcome text NOT NULL CHECK (outcome IN ('allowed', 'denied')),
+  reason_code text NOT NULL CONSTRAINT wb_audit_events_reason_code_valid CHECK (reason_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+  resource_kind text CONSTRAINT wb_audit_events_resource_kind_valid CHECK (resource_kind IS NULL OR resource_kind ~ '^[a-z][a-z0-9_]{0,31}$'),
+  resource_id text CONSTRAINT wb_audit_events_resource_id_valid CHECK (resource_id IS NULL OR length(resource_id) <= 128),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS wb_audit_events_tenant_idx
+  ON wb_audit_events(tenant_id, created_at DESC);
 `;

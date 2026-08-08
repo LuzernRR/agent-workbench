@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ReasoningEffort } from "@/lib/agent-events/types";
 import { loadRuntimeConfig, publicModelDefinitions } from "@/server/config/runtime-config";
+import { QuotaExceededError } from "@/server/live/quota";
 import { ImageInputError } from "@/server/media/image-input";
 import {
   cancelXiaohongshuVerification,
@@ -190,6 +191,7 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
           const reasoningEffort = ["medium", "high", "xhigh", "max"].includes(String(payload.reasoningEffort)) ? String(payload.reasoningEffort) as ReasoningEffort : "medium";
           const started = await startLiveRun({
             visitorId: visitor.id,
+            tenantId: visitor.tenantId,
             threadId,
             message,
             modelId: typeof payload.modelId === "string" ? payload.modelId : "",
@@ -261,6 +263,7 @@ export async function handleLive(request: Request, rawPath: string): Promise<Res
     return fail(`未实现的接口 ${method} ${path}`, 404, "NOT_IMPLEMENTED");
   } catch (error) {
     if (error instanceof VisitorSessionError) return fail(error.message, 401, "VISITOR_SESSION_INVALID");
+    if (error instanceof QuotaExceededError) return fail(error.message, 429, error.reasonCode);
     if (error instanceof ImageInputError) return fail(error.message, 400, error.code);
     console.error("Live workbench request failed", error instanceof Error ? error.message : error);
     return fail("真实工作台服务暂不可用", 503, "LIVE_SERVICE_UNAVAILABLE");

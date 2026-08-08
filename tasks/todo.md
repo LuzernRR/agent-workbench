@@ -21,3 +21,15 @@
 - [x] User confirmation in this session, then merge, Issue close, main sync
       (accepted 2026-08-07; PR #53 squashed into `main` as `0ce59e6`, Issue #52
       closed as completed, feature branch deleted)
+
+## Issue #54 · 租户隔离、配额与审计（2026-08-08）
+
+- [x] Audit the authorization boundary and design the minimal slice
+- [x] Add idempotent `wb_quotas` and `wb_audit_events` tables
+- [x] Derive tenant server-side from the visitor token, ignore request-supplied tenant
+- [x] Per-tenant quotas across QPS, concurrent runs, tokens, and cost
+- [x] Signed tenant assertion so Search Agent verifies instead of trusting `tenantId`
+- [x] Cross-tenant fail-closed and audit coverage, proven on real PostgreSQL
+- [x] Full gates: Python 631/1, vitest 471/11, typecheck, lint, build, Playwright 17/3
+- [x] HANDOFF, P0-05 roadmap status, and Chinese development record 045
+- [ ] User acceptance, then PR, merge, Issue close, main sync

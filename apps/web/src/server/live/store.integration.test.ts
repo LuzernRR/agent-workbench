@@ -7,8 +7,10 @@ import {
   createLiveProject,
   createLiveThread,
   deleteExpiredLiveThreads,
+  deleteLiveThread,
   finalizeClaimedLiveRun,
   finalizeLiveRun,
+  getLiveSnapshot,
   persistClaimedLiveEvent,
   prepareLiveRun,
   releaseLiveRunLease,
@@ -24,10 +26,10 @@ function identifier(prefix: string) {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
-async function createVisitor() {
+async function createVisitor(tenantId = "tenant-integration") {
   const visitorId = randomUUID();
   const tokenHash = createHash("sha256").update(randomUUID(), "utf8").digest("hex");
-  await query("INSERT INTO wb_visitors (id, token_hash) VALUES ($1, $2)", [visitorId, tokenHash]);
+  await query("INSERT INTO wb_visitors (id, token_hash, tenant_id) VALUES ($1, $2, $3)", [visitorId, tokenHash, tenantId]);
   visitors.push(visitorId);
   return visitorId;
 }
@@ -35,6 +37,7 @@ async function createVisitor() {
 async function prepare(visitorId: string, threadId: string, message: string, replaceMessageId?: string) {
   const prepared = await prepareLiveRun({
     visitorId,
+    tenantId: "tenant-integration",
     threadId,
     message,
     modelId: "deepseek-v4-flash",
@@ -249,6 +252,70 @@ describe.skipIf(!runLiveIntegration)("真实 PostgreSQL 分层记忆契约", () 
       WHERE run_id = $1 AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
     `, [takeoverRun.run.id]);
     expect(terminalEvents.rows[0].count).toBe("1");
+  });
+
+  it("跨租户读写删一律 fail-closed，配额超限拒绝入队并留下审计", async () => {
+    const tenantA = identifier("tenant").slice(0, 60);
+    const tenantB = identifier("tenant").slice(0, 60);
+    const visitorA = await createVisitor(tenantA);
+    const visitorB = await createVisitor(tenantB);
+    const projectA = await createLiveProject(visitorA, "租户甲项目");
+    const threadA = await createLiveThread(visitorA, projectA.id, "租户甲会话");
+    const run = await prepare(visitorA, threadA!.id, "租户甲事实是青川");
+    await complete(run, "租户甲事实是青川", "已记录租户甲事实青川");
+
+    const before = await query<{ title: string }>("SELECT title FROM wb_threads WHERE id = $1", [threadA!.id]);
+    // Read: another tenant's visitor cannot see the thread or its snapshot.
+    await expect(getLiveSnapshot(visitorB, threadA!.id)).resolves.toBeNull();
+    // Write: an update scoped to the other tenant's visitor must not apply.
+    await expect(updateLiveThread(visitorB, threadA!.id, { title: "越权改名" })).resolves.toBeNull();
+    // Delete: the same for removal.
+    await expect(deleteLiveThread(visitorB, threadA!.id)).resolves.toBe(false);
+    const intact = await query<{ title: string }>("SELECT title FROM wb_threads WHERE id = $1", [threadA!.id]);
+    expect(intact.rows[0].title).toBe(before.rows[0].title);
+    // Cross-tenant run start against another tenant's thread must fail closed.
+    await expect(prepareLiveRun({
+      visitorId: visitorB,
+      tenantId: tenantB,
+      threadId: threadA!.id,
+      message: "越权运行",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).resolves.toBeNull();
+
+    // Quota: a tenant pinned to a single concurrent run rejects the second.
+    await query(`
+      INSERT INTO wb_tenant_quotas (tenant_id, max_requests_per_minute, max_concurrent_runs, max_tokens_per_day, max_cost_usd_per_day)
+      VALUES ($1, 1000, 1, 1000000, 100)
+      ON CONFLICT (tenant_id) DO UPDATE SET max_concurrent_runs = 1
+    `, [tenantA]);
+    const secondThread = await createLiveThread(visitorA, projectA.id, "并发第二会话");
+    const holding = await prepare(visitorA, threadA!.id, "占用并发额度");
+    await expect(prepareLiveRun({
+      visitorId: visitorA,
+      tenantId: tenantA,
+      threadId: secondThread!.id,
+      message: "超出并发额度",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).rejects.toMatchObject({ reasonCode: "QUOTA_CONCURRENT_RUNS_EXCEEDED" });
+    const audit = await query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM wb_audit_events
+      WHERE tenant_id = $1 AND outcome = 'denied' AND reason_code = 'QUOTA_CONCURRENT_RUNS_EXCEEDED'
+    `, [tenantA]);
+    expect(audit.rows[0].count).toBe("1");
+    await stop(holding);
+
+    // Usage recorded on completion is attributed to the owning tenant only.
+    const usage = await query<{ tenant_id: string }>("SELECT tenant_id FROM wb_tenant_usage WHERE run_id = $1", [run.run.id]);
+    expect(usage.rows.every((row) => row.tenant_id === tenantA)).toBe(true);
+    const leaked = await query<{ count: string }>("SELECT count(*)::text AS count FROM wb_tenant_usage WHERE tenant_id = $1", [tenantB]);
+    expect(leaked.rows[0].count).toBe("0");
   });
 
   it("已有运行表会幂等补齐 epoch 与 attempt 的非负约束", async () => {

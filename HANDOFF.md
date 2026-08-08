@@ -1,6 +1,29 @@
 # 项目交接
 
-## 当前结论（2026-08-07，Issue #52 查询理解与反馈驱动检索已验收并合并）
+## 当前结论（2026-08-08，Issue #54 租户隔离与配额门禁待用户验收）
+
+- 本轮唯一功能为 [#54](https://github.com/LuzernRR/agent-workbench/issues/54)，分支
+  `codex/issue-54-authz-quota-audit`，状态 `awaiting-acceptance`（尚未提 PR，未合并）。
+  详细记录见 [045](docs/development/2026-08-08-045-issue-54-tenant-isolation.md)。
+- **tenant 不再可自述**：`resolveVisitor` 只按访客令牌哈希查库，tenant 由 `wb_visitors` 行回读，
+  请求携带的 `x-tenant-id` 头与 `tenant_id` cookie 一律忽略。tenant 仅在会话行首次创建时播种，
+  `ON CONFLICT` 只更新 `last_seen_at`，因此改 `WORKBENCH_TENANT` 不会静默迁移存量会话。
+- **Search Agent 侧补上签名断言**：改动前该服务完全信任请求体的 `tenantId`，只校验共享
+  `X-Workbench-Token`——持有 token 即可把任意 run 绑到任意租户。现由 BFF 用内部密钥对
+  `tenant:run:visitor` 做 HMAC-SHA256，服务端以 `compare_digest` 常量时间校验；绑定三元组使
+  合法断言无法重放到同租户的其他 run。未配置密钥时回落既有 loopback 开发路径，不新增绕过。
+- **配额与审计**：`wb_quotas`、`wb_audit_events` 幂等建表，配额覆盖 QPS/并发/Token/费用四维。
+  审计表 `tenant_id` 为 `NOT NULL`，故 tenant 未解析的路径不写审计行，改以 run 终态 `reasonCode`
+  记录——这是设计选择，不是遗漏。
+- **门禁**：Python 631 passed/1 skipped、ruff/compileall clean；Web vitest 471 passed/11 skipped；
+  typecheck/lint clean；production build exit 0；Playwright 17 passed/3 live-only skipped。
+  跨租户隔离的真实证据来自真实 PostgreSQL 上的 `store.integration.test.ts`（临时库，4 passed）：
+  跨租户读/写/删除全部 fail-closed。该文件在默认 `vitest run` 中被跳过，需
+  `WORKBENCH_LIVE_INTEGRATION=1`；只看默认套件会误判这条证据缺失。
+- **回滚**：本轮未合并，回滚即丢弃分支改动。已有的 `wb_quotas`/`wb_audit_events` 为幂等建表，
+  保留不影响旧代码路径。
+
+## 上一轮结论（2026-08-07，Issue #52 查询理解与反馈驱动检索已验收并合并）
 
 - 本轮唯一功能为 [#52](https://github.com/LuzernRR/agent-workbench/issues/52)，分支
   `codex/issue-52-query-strategy`，状态 `accepted`。用户于 2026-08-07 明确回复「验收通过，合并并关闭 #52」；

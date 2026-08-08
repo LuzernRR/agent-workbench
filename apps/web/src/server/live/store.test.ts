@@ -202,7 +202,8 @@ describe("live 数据保留与项目记忆", () => {
         checkpoint_id: null,
         checkpoint_session_id: null,
         checkpoint_ns: null,
-        checkpoint_step: null
+        checkpoint_step: null,
+        tenant_id: "tenant-one"
       }]
     });
     database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
@@ -210,7 +211,7 @@ describe("live 数据保留与项目记忆", () => {
     const claimed = await claimNextLiveRun("worker-two", 30_000);
 
     expect(claimed).toMatchObject({
-      run: { id: "run-queue" },
+      run: { id: "run-queue", tenantId: "tenant-one" },
       lease: { owner: "worker-two", epoch: 2 },
       attempt: 2,
       resume: false,
@@ -223,6 +224,65 @@ describe("live 数据保留与项目记忆", () => {
     expect(sql).toContain("lease_epoch = run.lease_epoch + 1");
     expect(sql).toContain("lease_expires_at IS NULL OR lease_expires_at <= now()");
     expect(values).toEqual(["worker-two", 30_000]);
+    expect(sql).toContain("SELECT tenant_id FROM wb_visitors WHERE id = run.visitor_id");
+  });
+
+  it("领取到缺失 tenant_id 的运行时 fail-closed，不返回无归属运行", async () => {
+    const claimResult = {
+      rowCount: 1,
+      rows: [{
+        id: "run-orphan",
+        visitor_id: "visitor-orphan",
+        thread_id: "thread-one",
+        project_id: null,
+        model_id: "deepseek-v4-flash",
+        agent_id: "search-agent",
+        execution_input: {
+          version: 1,
+          message: "无归属运行",
+          history: [],
+          attachmentIds: [],
+          projectMemoryContext: "",
+          reasoningEffort: "high"
+        },
+        lease_epoch: "1",
+        lease_expires_at: timestamp,
+        worker_attempt: 1,
+        checkpoint_id: null,
+        checkpoint_session_id: null,
+        checkpoint_ns: null,
+        checkpoint_step: null,
+        tenant_id: null
+      }]
+    };
+    const clientQuery = vi.fn().mockImplementation((sql: string, values?: unknown[]) => {
+      if (String(sql).includes("INSERT INTO wb_agent_events")) {
+        return Promise.resolve({
+          rowCount: 1,
+          rows: [{
+            id: "event-orphan",
+            seq: 1,
+            project_id: null,
+            thread_id: "thread-one",
+            run_id: "run-orphan",
+            created_at: timestamp,
+            event_type: values?.[5],
+            payload: JSON.parse(String(values?.[6]))
+          }]
+        });
+      }
+      return Promise.resolve(claimResult);
+    });
+    database.query.mockImplementation((sql: string) => Promise.resolve(
+      String(sql).includes("INSERT INTO wb_agent_events")
+        ? { rowCount: 1, rows: [{ id: "event-orphan", seq: 1, project_id: null, thread_id: "thread-one", run_id: "run-orphan", created_at: timestamp, event_type: "run.failed", payload: {} }] }
+        : { rowCount: 1, rows: [] }
+    ));
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+
+    await expect(claimNextLiveRun("worker-two", 30_000)).resolves.toBeNull();
+    const finalized = clientQuery.mock.calls.map((call) => JSON.stringify(call[1] ?? "")).join("\n");
+    expect(finalized).toContain("RUN_TENANT_UNRESOLVED");
   });
 
   it("heartbeat 与 release 都要求 owner、epoch 和未过期租约", async () => {
@@ -283,6 +343,7 @@ describe("live 数据保留与项目记忆", () => {
 
     const prepared = await prepareLiveRun({
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-current",
       message: "我叫什么名字？",
       modelId: "deepseek-v4-flash",
@@ -322,6 +383,7 @@ describe("live 数据保留与项目记忆", () => {
 
     const prepared = await prepareLiveRun({
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-current",
       message: "项目代号是什么？",
       modelId: "deepseek-v4-flash",
@@ -358,6 +420,7 @@ describe("live 数据保留与项目记忆", () => {
 
     const prepared = await prepareLiveRun({
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-current",
       message: "召回",
       modelId: "deepseek-v4-flash",
@@ -410,6 +473,7 @@ describe("live 数据保留与项目记忆", () => {
 
     const prepared = await prepareLiveRun({
       visitorId: "visitor-one",
+      tenantId: "tenant-one",
       threadId: "thread-current",
       message: "新事实",
       modelId: "deepseek-v4-flash",
@@ -428,6 +492,33 @@ describe("live 数据保留与项目记忆", () => {
     expect(String(archiveMemories?.[0])).toContain("created_at >= $3");
     expect(String(archiveRuns?.[0])).toContain("created_at >= $3");
     expect(archiveMemories?.[1]).toEqual(["visitor-one", "thread-current", timestamp]);
+  });
+
+  it("配额超限时 prepareLiveRun 抛出 QuotaExceededError 且不插入运行", async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rowCount: 1, rows: [] });
+    database.transaction.mockImplementation((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => operation({ query: clientQuery }));
+    // The gate is a separate transaction ahead of the run transaction; this
+    // mock drives that gate to a denied decision.
+    database.transaction.mockImplementationOnce((operation: (client: { query: typeof clientQuery }) => Promise<unknown>) => {
+      const gate = vi.fn(async (sql: string) => {
+        if (sql.includes("FROM wb_tenant_quotas")) return Promise.resolve({ rowCount: 0, rows: [] });
+        if (sql.includes("FROM wb_audit_events")) return Promise.resolve({ rowCount: 1, rows: [{ count: 9999 }] });
+        return Promise.resolve({ rowCount: 1, rows: [] });
+      });
+      return operation({ query: gate });
+    });
+
+    await expect(prepareLiveRun({
+      visitorId: "visitor-one",
+      tenantId: "tenant-one",
+      threadId: "thread-current",
+      message: "超限请求",
+      modelId: "deepseek-v4-flash",
+      attachmentIds: [],
+      memoryRecallItems: 24,
+      memoryMaxChars: 16_000
+    })).rejects.toMatchObject({ name: "QuotaExceededError", reasonCode: "QUOTA_REQUESTS_PER_MINUTE_EXCEEDED" });
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO wb_runs"))).toBe(false);
   });
 
   it("会话跨项目移动时迁移活动记忆，移出项目时归档活动记忆", async () => {

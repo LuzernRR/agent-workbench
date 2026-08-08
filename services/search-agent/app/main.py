@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -131,6 +132,26 @@ def _authorize(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="内部服务认证失败")
 
 
+def _authorize_tenant(assertion: str | None, payload: SearchRunRequest) -> None:
+    """Verify the server-signed tenant assertion instead of trusting the body.
+
+    The BFF signs `tenant:run:visitor` with the shared internal secret, so a
+    caller that merely holds the token cannot rebind a run to another tenant.
+    When no secret is configured the loopback development path already applies,
+    and `_authorize` has decided the request is acceptable.
+    """
+    secret = os.environ.get("WORKBENCH_INTERNAL_TOKEN", "").strip()
+    if not secret:
+        return
+    if not assertion:
+        raise HTTPException(status_code=401, detail="缺少租户断言")
+    parts = (payload.tenant_id, payload.run_id, payload.visitor_id)
+    body = "".join(f"{len(part.encode('utf-8'))}:{part}" for part in parts)
+    mac = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(assertion, f"v1:{mac}"):
+        raise HTTPException(status_code=403, detail="租户断言与请求不匹配")
+
+
 @app.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     config = request.app.state.agent_config
@@ -197,8 +218,10 @@ async def stream_run(
     request: Request,
     payload: SearchRunRequest,
     x_workbench_token: str | None = Header(default=None),
+    x_workbench_tenant_assertion: str | None = Header(default=None),
 ) -> StreamingResponse:
     _authorize(x_workbench_token)
+    _authorize_tenant(x_workbench_tenant_assertion, payload)
     return StreamingResponse(
         _run_stream(request, payload),
         media_type="application/x-ndjson",

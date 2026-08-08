@@ -4,11 +4,13 @@ const mocks = vi.hoisted(() => ({
   liveRun: vi.fn(),
   verificationStatus: vi.fn(),
   verificationQrcode: vi.fn(),
-  cancelVerification: vi.fn()
+  cancelVerification: vi.fn(),
+  startLiveRun: vi.fn(),
+  resolveVisitor: vi.fn()
 }));
 
 vi.mock("./engine", () => ({
-  startLiveRun: vi.fn(),
+  startLiveRun: mocks.startLiveRun,
   stopLiveRun: vi.fn()
 }));
 
@@ -31,7 +33,7 @@ vi.mock("./store", () => ({
 
 vi.mock("@/server/session/visitor", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/server/session/visitor")>()),
-  resolveVisitor: vi.fn(async () => ({ id: "visitor_one" }))
+  resolveVisitor: mocks.resolveVisitor
 }));
 
 vi.mock("@/server/search-agent/client", async (importOriginal) => ({
@@ -42,6 +44,7 @@ vi.mock("@/server/search-agent/client", async (importOriginal) => ({
 }));
 
 import { handleLive } from "./handler";
+import { QuotaExceededError } from "./quota";
 
 const challengeId = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
 const path = `/api/v1/runs/run_one/xiaohongshu-verifications/${challengeId}`;
@@ -61,6 +64,7 @@ describe("Live 小红书工具账号验证代理", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.liveRun.mockResolvedValue(ownedRun);
+    mocks.resolveVisitor.mockResolvedValue({ id: "visitor_one" });
   });
 
   it("只要求当前访客拥有 Run，不要求管理权限", async () => {
@@ -106,5 +110,43 @@ describe("Live 小红书工具账号验证代理", () => {
     expect(response.headers.get("content-type")).toBe("image/png");
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(png);
+  });
+});
+
+describe("Live 配额准入", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveVisitor.mockResolvedValue({ id: "visitor_one", tenantId: "tenant-one" });
+  });
+
+  it("配额超限映射为 429 与稳定原因码", async () => {
+    mocks.startLiveRun.mockRejectedValue(new QuotaExceededError("QUOTA_CONCURRENT_RUNS_EXCEEDED", 5, 5));
+
+    const response = await handleLive(
+      new Request("http://localhost/api/v1/threads/thread_one/runs", {
+        method: "POST",
+        body: JSON.stringify({ message: "帮我查一下", modelId: "deepseek-v4-flash" })
+      }),
+      "/api/v1/threads/thread_one/runs"
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ code: "QUOTA_CONCURRENT_RUNS_EXCEEDED" });
+    expect(mocks.startLiveRun).toHaveBeenCalledWith(expect.objectContaining({ tenantId: "tenant-one" }));
+  });
+
+  it("配额以内正常创建运行", async () => {
+    mocks.startLiveRun.mockResolvedValue({ runId: "run_one" });
+
+    const response = await handleLive(
+      new Request("http://localhost/api/v1/threads/thread_one/runs", {
+        method: "POST",
+        body: JSON.stringify({ message: "帮我查一下", modelId: "deepseek-v4-flash" })
+      }),
+      "/api/v1/threads/thread_one/runs"
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ runId: "run_one" });
   });
 });
